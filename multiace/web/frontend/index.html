@@ -164,6 +164,13 @@
               :class="{active: tab===('plugin:'+p.name)}"
               @click="tab='plugin:'+p.name">{{ p.label }}</button>
     </nav>
+    <!-- Webcam + console live NEXT TO the dashboard, not on another page:
+         the whole point is to watch the print while driving a swap. -->
+    <button class="side-toggle" :class="{active: sidebar.open}"
+            @click="toggleSidebar"
+            :title="t('ui.sidebar.toggle_hint')">
+      {{ sidebar.open ? '⟩' : '⟨' }} {{ t('ui.sidebar.title') }}
+    </button>
     <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
            class="upload-input" @change="onUploadGcode($event.target.files)">
     <button class="upload-btn" @click="triggerUpload()"
@@ -178,7 +185,26 @@
     <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
   <div v-if="rebootNeeded && !panelMode" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
-  <main v-if="!panelMode">
+  <!-- Auto-retry banner. Full width under the header on purpose: a load
+       can be started from the dashboard, a macro or the print itself, so
+       "slot 2 is on attempt 2 of 3" must be visible wherever you are. -->
+  <div v-if="retryState && !panelMode" class="retry-banner">
+    <span class="retry-spin">↻</span>
+    <span class="retry-text">
+      {{ t('ui.retry.retrying', {
+           head: dispIdx(retryState.head), ace: dispIdx(retryState.ace),
+           slot: dispIdx(retryState.slot),
+           attempt: retryState.attempt, max: retryState.max_attempts }) }}
+      <small v-if="retryState.reason" class="muted">· {{ retryState.reason }}</small>
+    </span>
+    <span class="retry-bar"><i :style="{width: retryPct + '%'}"></i></span>
+    <button class="retry-now" @click="retryControl('now')"
+            :disabled="retryBusy === 'now'">{{ t('ui.retry.now') }}</button>
+    <button class="retry-stop warn" @click="retryControl('cancel')"
+            :disabled="retryBusy === 'cancel'">{{ t('ui.retry.stop') }}</button>
+  </div>
+  <main v-if="!panelMode" :class="{'with-sidebar': sidebar.open}">
+   <div class="main-col">
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
       <div class="status-row">
@@ -449,6 +475,19 @@
         <span v-if="fluiddCamMsg" class="muted small">{{ fluiddCamMsg }}</span>
       </div>
       <p class="muted small">{{ t('ui.config.fluidd_panel_hint') }}</p>
+      <h3>{{ t('ui.config.firmware_title') }}</h3>
+      <div class="fw-card" :class="'fw-' + firmware.status">
+        <div class="fw-row">
+          <strong>{{ firmware.version || t('ui.config.fw_unknown') }}</strong>
+          <span class="fw-pill">{{ t('ui.config.fw_status_' + firmware.status) }}</span>
+          <small v-if="firmware.device" class="muted">{{ firmware.device }}</small>
+        </div>
+        <p v-if="firmware.reason" class="muted small">{{ firmware.reason }}</p>
+        <ul v-if="firmware.known_issues.length" class="fw-issues">
+          <li v-for="(iss, i) in firmware.known_issues" :key="i">{{ iss }}</li>
+        </ul>
+        <p class="muted small">{{ t('ui.config.fw_hint') }}</p>
+      </div>
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
         <div class="config-row">
@@ -530,6 +569,17 @@
           <label>{{ t('ui.config.unload_retry') }}</label>
           <input type="number" v-model.number="configForm.unload_retry" min="0" max="20" step="1" placeholder="-">
         </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.auto_retries') }}</label>
+          <input type="number" v-model.number="configForm.filament_load_max_auto_retries"
+                 min="0" max="10" step="1" placeholder="3">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.auto_retry_delay') }}</label>
+          <input type="number" v-model.number="configForm.filament_load_retry_delay_ms"
+                 min="0" max="30000" step="100" placeholder="1000">
+        </div>
+        <p class="muted small">{{ t('ui.config.auto_retry_hint') }}</p>
         <fieldset>
           <legend>{{ t('ui.config.debug_logs') }}</legend>
           <label><input type="checkbox" v-model="configForm.state_debug"> state_debug</label>
@@ -737,6 +787,59 @@ reboot</pre>
               :title="p.label"
               class="plugin-iframe"></iframe>
     </section>
+   </div>
+   <!-- Side pane: webcam and console. Only one is mounted at a time -
+        an MJPEG stream nobody looks at still costs the printer a
+        connection, and a console feed nobody reads still costs a
+        websocket subscription. -->
+   <aside v-if="sidebar.open" class="side-pane">
+     <div class="side-tabs">
+       <button :class="{active: sidebar.pane==='webcam'}"
+               @click="setSidebarPane('webcam')">{{ t('ui.sidebar.webcam') }}</button>
+       <button :class="{active: sidebar.pane==='console'}"
+               @click="setSidebarPane('console')">{{ t('ui.sidebar.console') }}</button>
+       <button class="side-close" @click="toggleSidebar"
+               :title="t('ui.sidebar.collapse')">×</button>
+     </div>
+     <div v-show="sidebar.pane==='webcam'" class="side-body side-webcam">
+       <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
+            :alt="webcam.name || t('ui.sidebar.webcam')">
+       <div v-else class="webcam-none">
+         <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
+                             : t('ui.sidebar.webcam_loading') }}</p>
+         <p class="muted small" v-if="webcam.reason">{{ webcam.reason }}</p>
+         <p class="muted small">{{ t('ui.sidebar.webcam_hint') }}</p>
+         <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
+       </div>
+       <div class="side-foot" v-if="webcam.available">
+         <span class="muted small">{{ webcam.name }}</span>
+         <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+       </div>
+     </div>
+     <div v-show="sidebar.pane==='console'" class="side-body side-console">
+       <div ref="consoleEl" class="console-log">
+         <div v-for="(ln, i) in consoleLines" :key="ln.id != null ? ln.id : 'x'+i"
+              class="console-line" :class="'console-' + ln.kind">
+           <span class="console-ts">{{ consoleTime(ln.ts) }}</span>
+           <span class="console-msg">{{ ln.msg }}</span>
+         </div>
+         <p v-if="!consoleLines.length" class="muted small">
+           {{ t('ui.sidebar.console_empty') }}</p>
+       </div>
+       <div class="console-controls">
+         <label class="console-follow">
+           <input type="checkbox" v-model="consoleFollow">
+           {{ t('ui.sidebar.console_follow') }}
+         </label>
+         <button @click="loadConsole">{{ t('ui.common.reload') }}</button>
+       </div>
+       <form class="console-entry" @submit.prevent="sendConsole">
+         <input v-model="consoleInput" spellcheck="false"
+                :placeholder="t('ui.sidebar.console_placeholder')">
+         <button type="submit" :disabled="consoleBusy || !consoleInput.trim()">⏎</button>
+       </form>
+     </div>
+   </aside>
   </main>
   <div v-if="screenPopout && screenAvailable && !panelMode" class="screen-popout" :style="popoutStyle">
     <div class="screen-popout-head"
@@ -1195,6 +1298,77 @@ reboot</pre>
         <button @click="closePreflight"
                 :disabled="preflight.sending !== ''">{{ t('ui.common.cancel') }}</button>
       </div>
+    </div>
+  </div>
+  <!-- APPLY CHANGES: what was written, what it needs, and the one button
+       that does it. Saving no longer ends in a vague "please reboot". -->
+  <div v-if="applyModal.open && !panelMode" class="overlay">
+    <div class="dialog apply-modal">
+      <h3 v-if="applyModal.phase !== 'restarting'">{{ t('ui.config.apply_title') }}</h3>
+      <h3 v-else>{{ t('ui.config.apply_restarting') }}</h3>
+      <template v-if="applyModal.phase !== 'restarting'">
+        <p v-if="!applyModal.changes.length" class="muted">
+          {{ t('ui.config.apply_no_changes') }}</p>
+        <ul v-else class="apply-changes">
+          <li v-for="(c, i) in applyModal.changes" :key="i">{{ c }}</li>
+        </ul>
+        <p class="apply-restart" :class="'restart-' + applyModal.restartRequired">
+          {{ restartLabel(applyModal.restartRequired) }}
+        </p>
+        <p v-if="applyModal.error" class="error">{{ applyModal.error }}</p>
+        <div class="row">
+          <button v-if="applyModal.restartRequired !== 'none'"
+                  class="primary" :disabled="applyModal.busy"
+                  @click="applyRestart(applyModal.restartRequired)">
+            {{ t('ui.config.restart_now') }}
+          </button>
+          <button v-if="applyModal.restartRequired !== 'none'"
+                  @click="closeApplyModal">{{ t('ui.config.restart_later') }}</button>
+          <button v-else @click="closeApplyModal">{{ t('ui.common.confirm') }}</button>
+        </div>
+      </template>
+      <template v-else>
+        <p class="muted">{{ t('ui.config.restart_waiting',
+                             {secs: applyModal.reconnectSecs}) }}</p>
+        <div class="apply-spinner"></div>
+        <p v-if="applyModal.error" class="error">{{ applyModal.error }}</p>
+        <div class="row" v-if="applyModal.error">
+          <button @click="closeApplyModal">{{ t('ui.common.cancel') }}</button>
+        </div>
+      </template>
+    </div>
+  </div>
+  <!-- DEBUG PANEL (?debug=1). Read-only facts always; the event injectors
+       only work when the backend runs in mock mode, so this cannot fake a
+       jam on a real printer. -->
+  <div v-if="debugPanel.enabled && !panelMode" class="debug-panel"
+       :class="{open: debugPanel.open}">
+    <button class="debug-panel-toggle" @click="debugPanel.open = !debugPanel.open">
+      🐞 {{ debugPanel.mock ? t('ui.debug.mock') : t('ui.debug.live') }}
+    </button>
+    <div v-if="debugPanel.open" class="debug-panel-body">
+      <div class="debug-kv"><span>WS</span><strong>{{ connText }}</strong></div>
+      <div class="debug-kv"><span>{{ t('ui.debug.messages') }}</span>
+        <strong>{{ debugPanel.messages }}</strong></div>
+      <div class="debug-kv"><span>{{ t('ui.debug.last_message') }}</span>
+        <strong>{{ debugSince() }}</strong></div>
+      <div class="debug-kv"><span>{{ t('ui.debug.data') }}</span>
+        <strong>{{ debugPanel.mock ? t('ui.debug.mock') : t('ui.debug.live') }}</strong></div>
+      <template v-if="debugPanel.mock">
+        <div class="debug-actions">
+          <button @click="simulateEvent('load_failure')">{{ t('ui.debug.sim_load_fail') }}</button>
+          <button @click="simulateEvent('load_failure', {attempt: 3, max_attempts: 3})">
+            {{ t('ui.debug.sim_last_attempt') }}</button>
+          <button @click="simulateEvent('load_exhausted')">{{ t('ui.debug.sim_exhausted') }}</button>
+          <button @click="simulateEvent('console', {msg: '// simulated console line'})">
+            {{ t('ui.debug.sim_console') }}</button>
+          <button @click="simulateEvent('gcode_error', {msg: 'Simulated error'})">
+            {{ t('ui.debug.sim_error') }}</button>
+          <button @click="simulateEvent('clear')">{{ t('ui.debug.sim_clear') }}</button>
+        </div>
+      </template>
+      <p v-else class="muted small">{{ t('ui.debug.mock_only') }}</p>
+      <p v-if="debugPanel.log" class="muted small">{{ debugPanel.log }}</p>
     </div>
   </div>
 </div>

@@ -32,7 +32,10 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 - Parallel preload
 - Pickup-Cleaning (a short nozzle wipe after same‑colour tool pickups that have no cleaning move.) Preflight only atm.
 - Ace per Head mode up to 4 Aces / 7 Colors with U1 + just 1 ACE Pro, 10 with 2, 13 with 3 and 16 with 4
-- Prepared for the 1.5.1 Firmware
+- **Firmware 1.5.2 verified** - the version is now detected and reported in the web UI (see [Supported firmware](#supported-firmware))
+- **Unified dashboard** - webcam and Klipper console live in a side pane of `/multiace`, so you can watch the print while driving a swap
+- **Apply-changes flow** - saving the config now tells you what changed and offers the *weakest* restart that actually applies it (often none)
+- **Automatic load retry** - a failed toolhead load retries by itself and only pauses the print once the attempts run out
 - Many internal improvements
 
 
@@ -70,9 +73,12 @@ Read more: https://github.com/BlackFrogKok/SnapAce/issues/7
 A full real-time control panel for your multi-ACE setup. https://printer-ip/multiace/
 
 - **Live multi-ACE dashboard** with a wiring overlay that shows which slot is feeding which toolhead
+- **Webcam + console side pane** - toggle it from the header; the webcam comes from whatever camera Moonraker/crowsnest already serves, the console is the same Klipper output Fluidd shows, with a follow toggle and a G-code entry line. No camera configured just shows "camera unavailable"; nothing is streamed while the pane is closed.
 - **Editable command queue** - pause, drop pending load / unload / swap jobs before they run
 - **Saveable filament loadouts** - snapshot the current spool configuration and re-apply it on the next print with a single click
-- Dryer settings per ACE, slot-picker, and multi-language UI (EN / DE, more to come)
+- **Apply-changes modal** - after saving the config it lists what changed and whether that needs nothing, a Klipper restart, or a full reboot; "Restart now" does it and the UI reconnects by itself
+- **Live retry banner** - while a failed load is being retried it shows "attempt 2/3" with *Retry now* and *Stop retries & pause*
+- Dryer settings per ACE, slot-picker, and multi-language UI (EN / DE / ZH, more to come)
 
 See it in action: https://youtu.be/9uLE1uydWmo
 
@@ -107,6 +113,25 @@ Both paths use the same hardened load/unload logic as normal toolchanges. See [H
 - **Normal Mode** - Switch back to stock Snapmaker operation at any time (only original files active, no ACE code running). Useful for filaments the ACE Pro cannot handle, such as TPU/TPE
 - **PAXX Firmware Compatible / Installer** - Works with PAXX firmware which provides display mirroring, allowing full load/unload control from your computer / Integrated PAXX Firmware 
 - **Clean Install/Uninstall** - One-command scripts with automatic backup and restore
+
+## Supported firmware
+
+multiACE detects the printer's firmware version (from Moonraker, or from
+`firmware_version:` in `[ace]` if your machine does not report one) and shows it
+in the Config tab together with the note below. Nothing is ever blocked: an
+untested version says so and keeps working.
+
+| Firmware | Device | Status | Known issues |
+|----------|--------|--------|--------------|
+| 1.5.2 | Snapmaker U1 | **supported** (reference version) | none |
+| 1.5.1 | Snapmaker U1 | supported | RFID identity can lag a slot insert by a few seconds |
+| 1.5.0 | Snapmaker U1 | supported | RFID identity can lag a slot insert by a few seconds |
+| 1.4.x | Snapmaker U1 | unsupported | old ACE protocol - slot/RFID fields differ |
+| 1.1.31 | ACE Pro 2 | supported | none |
+
+Anything newer is reported as *untested* rather than refused. The table lives in
+[`multiace/firmware_compat.py`](multiace/firmware_compat.py); `GET /api/version`
+returns the detected version, its status and its known issues.
 
 ## Requirements
 
@@ -463,6 +488,48 @@ extrusion_retry: 7           # outer retries after wheel check fails (0 = disabl
 
 unload_retry: 3              # unload re-heat / re-run attempts
 ```
+
+#### Automatic load retry
+
+When a toolhead load fails outright (jam, mis-seat, slot error), multiACE now
+retries the whole load by itself before involving you. Most of those clear on the
+next attempt; without this an unattended print stalls until somebody walks up to
+the printer.
+
+```ini
+filament_load_max_auto_retries: 3    # 0 = off, 1-10 = extra attempts after the first
+filament_load_retry_delay_ms: 1000   # pause between attempts
+#filament_load_max_auto_retries_0: 5 # per-head override
+```
+
+- The dashboard shows a live "attempt 2/3" banner with **Retry now** (skip the
+  wait) and **Stop retries & pause** (give up early).
+- When the attempts run out *during a print*, multiACE **pauses** for manual
+  recovery instead of aborting the job. Outside a print it fails as before.
+- `filament_load_max_auto_retries: 0` restores the old fail-immediately
+  behaviour exactly.
+- A refusal that retrying cannot fix (the feed channel is not in auto mode) is
+  reported at once rather than burning attempts.
+
+If you find yourself raising this above 3, read
+[docs/FILAMENT_SWAP_GUIDE.md](docs/FILAMENT_SWAP_GUIDE.md) first - repeated
+retries are a symptom, and the guide covers the mechanical causes.
+
+### Config changes and restarts
+
+Saving from the Config tab no longer ends in a blanket "please reboot". The
+backend diffs the old and new `ace.cfg` and the UI shows what changed plus the
+weakest restart that applies it:
+
+| Level | Examples | What happens |
+|-------|----------|--------------|
+| nothing | `display_index_base`, `update_repo` | already live, re-read from the file |
+| Klipper restart | `load_length`, dryer values, tip-forming | `FIRMWARE_RESTART` |
+| printer reboot | `ace_device_count`, serial ports, mode | full reboot (USB re-enumeration) |
+
+"Restart now" performs it and the UI reconnects on its own; "Restart later" lets
+you batch several edits and restart once. Comment/whitespace-only edits are
+correctly reported as *no change*.
 
 ### Dryer
 

@@ -180,8 +180,28 @@
       "tipform_saved_restart": "Gespeichert - Klipper startet neu.",
       "tipform_save_restart": "Speichern + Klipper-Neustart",
       "tipform_restart_pending": "Die gespeicherte Konfiguration weicht vom laufenden Klipper ab - zum Anwenden Klipper neu starten.",
-      "tipform_syntax": "Tokens: <mm>@<feedrate> (Extruder-Move, negativ = Retract, mm/min) - pause:<ms> - temp:<C> (setzen, kein Warten) - waittemp:<C> (setzen + warten, beide Richtungen; unter 175 sind danach keine Moves erlaubt - Klipper min_extrude_temp; im Background-Swap langsam) - fan:<0-255> (nur inline) - unloadtemp:<C> (Unload-/Tipform-Temp f\u00fcr dieses Material/Vendor, Default 250; kann alleiniger Inhalt sein = Stock-Pull bei dieser Temp). Eine Tabelle muss netto retrahieren. Der Background-Swap nutzt dieselben Tabellen.",
-      "tipform_unsupported": "Dieses multiACE-Build hat kein Tip-Forming-Modul - erst multiACE aktualisieren."
+      "tipform_syntax": "Tokens: <mm>@<feedrate> (Extruder-Move, negativ = Retract, mm/min) - pause:<ms> - temp:<C> (setzen, kein Warten) - waittemp:<C> (setzen + warten, beide Richtungen; unter 175 sind danach keine Moves erlaubt - Klipper min_extrude_temp; im Background-Swap langsam) - fan:<0-255> (nur inline) - unloadtemp:<C> (Unload-/Tipform-Temp für dieses Material/Vendor, Default 250; kann alleiniger Inhalt sein = Stock-Pull bei dieser Temp). Eine Tabelle muss netto retrahieren. Der Background-Swap nutzt dieselben Tabellen.",
+      "tipform_unsupported": "Dieses multiACE-Build hat kein Tip-Forming-Modul - erst multiACE aktualisieren.",
+      "firmware_title": "Drucker-Firmware",
+      "fw_unknown": "unbekannt",
+      "fw_status_supported": "unterstützt",
+      "fw_status_untested": "ungetestet",
+      "fw_status_unsupported": "nicht unterstützt",
+      "fw_status_unknown": "nicht erkannt",
+      "fw_hint": "Wird aus Moonraker gelesen; firmware_version in [ace] überschreibt das.",
+      "auto_retries": "Ladefehler automatisch wiederholen",
+      "auto_retry_delay": "Wartezeit (ms)",
+      "auto_retry_hint": "0 schaltet die Wiederholung ab. Sind die Versuche während eines Drucks aufgebraucht, pausiert multiACE zur manuellen Behebung statt abzubrechen.",
+      "apply_title": "Änderungen übernommen",
+      "apply_no_changes": "Nichts geändert – die Datei war bereits identisch.",
+      "apply_restarting": "Neustart läuft…",
+      "restart_none": "Sofort aktiv – kein Neustart nötig.",
+      "restart_klipper_needed": "Diese Änderungen brauchen einen Klipper-Neustart.",
+      "restart_reboot_needed": "Diese Änderungen brauchen einen vollständigen Drucker-Neustart.",
+      "restart_now": "Jetzt neu starten",
+      "restart_later": "Später neu starten",
+      "restart_waiting": "Warte darauf, dass der Drucker zurückkommt… ({secs}s)",
+      "restart_timeout": "Der Drucker ist nach 5 Minuten nicht zurück – bitte direkt prüfen."
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} ist bereits geladen",
@@ -228,9 +248,9 @@
       "config_load_failed": "Config laden fehlgeschlagen: {error}",
       "klipper_restart_requested": "Klipper-Neustart angefordert.",
       "saving_raw": "Speichere (roh)…",
-      "config_conflict_merged": "Config hatte sich auf dem Drucker ge\u00e4ndert - deine Einstellungen wurden auf den aktuellen Stand angewendet.",
-      "config_conflict_raw": "Config hat sich seit dem Laden ge\u00e4ndert. Config-Tab neu laden (dein Text wurde NICHT gespeichert) und \u00c4nderung erneut eintragen.",
-      "config_conflict_failed": "Config hat sich ge\u00e4ndert, automatisches \u00dcbernehmen fehlgeschlagen - Config-Tab neu laden"
+      "config_conflict_merged": "Config hatte sich auf dem Drucker geändert - deine Einstellungen wurden auf den aktuellen Stand angewendet.",
+      "config_conflict_raw": "Config hat sich seit dem Laden geändert. Config-Tab neu laden (dein Text wurde NICHT gespeichert) und Änderung erneut eintragen.",
+      "config_conflict_failed": "Config hat sich geändert, automatisches Übernehmen fehlgeschlagen - Config-Tab neu laden"
     },
     "upload": {
       "button": "G-Code",
@@ -309,6 +329,38 @@
       "send_all_tooltip": "Alle Queue-Befehle an den Drucker senden (UI darf danach geschlossen werden)",
       "send_all_done": "{count} Befehle an den Drucker gesendet",
       "send_all_failed": "Senden fehlgeschlagen"
+    },
+    "sidebar": {
+      "title": "Bereiche",
+      "toggle_hint": "Webcam und Konsole neben dem Dashboard anzeigen",
+      "collapse": "Einklappen",
+      "webcam": "Webcam",
+      "console": "Konsole",
+      "webcam_loading": "Suche nach einer Kamera…",
+      "webcam_unavailable": "Kamera nicht verfügbar",
+      "webcam_hint": "Kamera in Moonraker/crowsnest einrichten und neu laden.",
+      "console_empty": "Noch keine Konsolenausgabe.",
+      "console_follow": "Folgen",
+      "console_placeholder": "G-Code, z. B. ACE_STATUS"
+    },
+    "retry": {
+      "retrying": "Laden an Kopf {head} fehlgeschlagen (ACE {ace} / Slot {slot}) – Versuch {attempt}/{max}…",
+      "now": "Jetzt erneut",
+      "stop": "Abbrechen & pausieren"
+    },
+    "debug": {
+      "mock": "Testdaten",
+      "live": "Echtdaten",
+      "messages": "WS-Nachrichten",
+      "last_message": "Letzte Nachricht",
+      "data": "Quelle",
+      "mock_only": "Ereignisse einspeisen geht nur im Mock-Modus (MULTIACE_MOCK_MODE=1).",
+      "sim_load_fail": "Ladefehler",
+      "sim_last_attempt": "Letzter Versuch",
+      "sim_exhausted": "Versuche erschöpft",
+      "sim_console": "Konsolenzeile",
+      "sim_error": "G-Code-Fehler",
+      "sim_clear": "Zurücksetzen"
     }
   },
   "msg": {

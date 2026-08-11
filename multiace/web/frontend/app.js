@@ -1,7 +1,11 @@
 const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
-const API = "/multiace/api";
+// Behind nginx the UI lives at /multiace; the dev server (scripts/run-dev-ui.*)
+// serves it from the root. Deriving the base from the path keeps ONE bundle
+// working in both, instead of a build-time constant nobody remembers to flip.
+const BASE = location.pathname.startsWith("/multiace") ? "/multiace" : "";
+const API = BASE + "/api";
 const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
-             + location.host + "/multiace/ws";
+             + location.host + BASE + "/ws";
 const SCREEN = "/screen";
 createApp({
   setup() {
@@ -146,6 +150,10 @@ createApp({
       tipform: {available: false, mode: null, tables: []},
     });
     const loadError = ref("");
+    // Auto-retry of a failed toolhead load: {head, ace, slot, attempt,
+    // max_attempts, next_retry_ms, reason} while a retry is pending, null
+    // otherwise - so the banner appears and disappears on its own.
+    const retryState = ref(null);
     const notifications = ref([]);
     const _notifIds = new Set();
     function _addNotif(n) {
@@ -233,6 +241,11 @@ createApp({
       for (const a of state.aces) {
         if (!dryerCfg[a.idx]) dryerCfg[a.idx] = {temp: 50, duration: 240};
       }
+      // Live auto-retry of a failed load. Null whenever nothing is
+      // retrying, so the banner disappears by itself when the load
+      // succeeds, is cancelled, or ace.py stops writing the state file.
+      retryState.value = (s.retry_state && s.retry_state.active)
+        ? s.retry_state : null;
     }
     async function reloadState() {
       try {
@@ -1652,6 +1665,8 @@ createApp({
       load_retry: '',
       extrusion_retry: '',
       unload_retry: '',
+      filament_load_max_auto_retries: '',
+      filament_load_retry_delay_ms: '',
       state_debug: false,
       usb_debug: false,
       fa_debug: false,
@@ -1707,6 +1722,10 @@ createApp({
       configForm.load_retry        = numOrEmpty(params.load_retry);
       configForm.extrusion_retry   = numOrEmpty(params.extrusion_retry);
       configForm.unload_retry      = numOrEmpty(params.unload_retry);
+      configForm.filament_load_max_auto_retries =
+        numOrEmpty(params.filament_load_max_auto_retries);
+      configForm.filament_load_retry_delay_ms =
+        numOrEmpty(params.filament_load_retry_delay_ms);
       configForm.state_debug    = bool('state_debug');
       configForm.usb_debug      = bool('usb_debug');
       configForm.fa_debug       = bool('fa_debug');
@@ -1751,6 +1770,10 @@ createApp({
         load_retry:         numStr(configForm.load_retry),
         extrusion_retry:    numStr(configForm.extrusion_retry),
         unload_retry:       numStr(configForm.unload_retry),
+        filament_load_max_auto_retries:
+                            numStr(configForm.filament_load_max_auto_retries),
+        filament_load_retry_delay_ms:
+                            numStr(configForm.filament_load_retry_delay_ms),
         state_debug:        configForm.state_debug ? 'true' : 'false',
         usb_debug:          configForm.usb_debug   ? 'true' : 'false',
         fa_debug:           configForm.fa_debug    ? 'true' : 'false',
@@ -2026,56 +2049,15 @@ createApp({
         configLoadError.value = t("ui.log.config_load_failed", {error: e});
       }
     }
-    async function saveConfigForm() {
-      configLog.value = t("ui.common.saving");
-      try {
-        // LOST-UPDATE GUARD (HW 2026-07-30): the form PATCHES the browser's
-        // cached copy of the file, so a tab that loaded an older revision
-        // silently writes it back - a cfg repaired via SSH was reverted to a
-        // section-less version, losing SET_ACE_MODE, [ace_bg_swap] and
-        // [ace_tipform]. We send the sha1 we loaded; on 409 the server
-        // returns the CURRENT content and we re-apply the form values on top
-        // of it and retry once, so the user's edit lands without clobbering
-        // whatever else changed on disk meanwhile.
-        let base = config.content;
-        let sha1 = config.sha1;
-        let newContent = formToCfgContent(base);
-        // Do NOT auto-restart Klipper: a bare Klipper restart applies most
-        // [ace] scalars but NOT changes that need a full reboot (USB/serial
-        // re-enumeration, PAXX boot-script settings), and it caused a scary
-        // "503 Klippy Host not connected" mid-restart. Save the file and tell
-        // the user to restart the printer so every change takes effect.
-        let r = await fetch(`${API}/config`, {
-          method: "PUT",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({content: newContent, restart_klipper: false,
-                                base_sha1: sha1}),
-        });
-        if (r.status === 409) {
-          let fresh = null;
-          try { fresh = JSON.parse((await r.json()).detail); } catch (e) { fresh = null; }
-          if (!fresh || typeof fresh.content !== "string") {
-            throw new Error(`HTTP 409 ${t("ui.log.config_conflict_failed")}`);
-          }
-          base = fresh.content;
-          sha1 = fresh.sha1 || "";
-          newContent = formToCfgContent(base);
-          r = await fetch(`${API}/config`, {
-            method: "PUT",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({content: newContent, restart_klipper: false,
-                                  base_sha1: sha1}),
-          });
-          configLog.value = t("ui.log.config_conflict_merged");
-        }
-        if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text()}`);
-        const j = await r.json();
-        config.content = newContent;
-        config.sha1 = j.sha1 || "";
-        rebootNeeded.value = true;
-        configLog.value = `✓ ${j.path}\nBackup: ${j.backup}\n${t("ui.common.please_restart")}`;
-      } catch (e) { configLog.value = `${t("ui.common.error")}: ${e}`; }
-    }
+    // LOST-UPDATE GUARD (HW 2026-07-30): the form PATCHES the browser's
+    // cached copy of the file, so a tab that loaded an older revision
+    // silently writes it back - a cfg repaired via SSH was reverted to a
+    // section-less version, losing SET_ACE_MODE, [ace_bg_swap] and
+    // [ace_tipform]. We send the sha1 we loaded; on 409 the server
+    // returns the CURRENT content and we re-apply the form values on top
+    // of it and retry once, so the user's edit lands without clobbering
+    // whatever else changed on disk meanwhile. See _putConfig() and
+    // saveConfigForm() further down, next to the apply-changes modal.
     async function saveConfigRaw() {
       configLog.value = t("ui.log.saving_raw");
       try {
@@ -2254,11 +2236,19 @@ createApp({
     function wsConnect() {
       try { ws = new WebSocket(WS_URL); }
       catch (e) { conn.value = {state: "err", text: `WS: ${e}`}; scheduleReconnect(); return; }
-      ws.onopen = () => { conn.value = {state: "ok", text: t("ui.header.live")}; };
+      ws.onopen = () => {
+        conn.value = {state: "ok", text: t("ui.header.live")};
+        // Console lines are opt-in: only ask for them while the pane
+        // that shows them is actually open.
+        _sendConsoleSubscription();
+      };
       ws.onmessage = (ev) => {
+        debugPanel.messages++;
+        debugPanel.lastMessage = Date.now();
         try {
           const m = JSON.parse(ev.data);
-          if (m.type === "state") applyState(m);
+          if (m.type === "state") { applyState(m); debugPanel.mock = !!m.mock; }
+          else if (m.type === "console") _appendConsole(m.lines || []);
           else if (m.type === "gcode_error") onGcodeError(m);
           else if (m.type === "error") conn.value = {state: "warn", text: m.error || t("ui.header.ws_error")};
         } catch (_) {}
@@ -3103,6 +3093,318 @@ createApp({
       });
     }
     let resizeObserver = null;
+    // =================================================================
+    // Unified dashboard: webcam + console side pane
+    //
+    // The point is to stop context-switching between Fluidd's camera and
+    // this panel during a swap. Both live in ONE collapsible sidebar and
+    // are lazily started: no camera stream is opened and no console
+    // subscription is sent until the pane that shows them is visible.
+    // =================================================================
+    const sidebar = reactive({
+      open: localStorage.getItem("multiace.sidebar.open") === "1",
+      pane: localStorage.getItem("multiace.sidebar.pane") || "webcam",
+    });
+    watch(() => sidebar.open,
+          v => localStorage.setItem("multiace.sidebar.open", v ? "1" : "0"));
+    watch(() => sidebar.pane,
+          v => localStorage.setItem("multiace.sidebar.pane", v));
+    function toggleSidebar() { sidebar.open = !sidebar.open; }
+    function setSidebarPane(p) { sidebar.pane = p; sidebar.open = true; }
+
+    const webcam = reactive({
+      loaded: false, available: false, reason: "", name: "",
+      // Cache-buster: an MJPEG <img> that was torn down keeps its old
+      // connection cached, so re-opening the pane shows a frozen frame
+      // until the src actually changes.
+      nonce: 0,
+    });
+    const webcamShown = computed(() =>
+      !panelMode && sidebar.open && sidebar.pane === "webcam");
+    const webcamSrc = computed(() =>
+      webcam.available ? `${API}/webcam/stream?n=${webcam.nonce}` : "");
+    async function loadWebcam() {
+      try {
+        const r = await fetch(`${API}/webcam/info`);
+        const j = r.ok ? await r.json() : {available: false, reason: `HTTP ${r.status}`};
+        webcam.available = !!j.available;
+        webcam.reason = j.reason || "";
+        webcam.name = j.name || "";
+      } catch (e) {
+        webcam.available = false;
+        webcam.reason = String(e);
+      } finally {
+        webcam.loaded = true;
+        webcam.nonce++;
+      }
+    }
+    watch(webcamShown, (shown) => {
+      if (shown) { if (!webcam.loaded) loadWebcam(); else webcam.nonce++; }
+    });
+
+    const CONSOLE_MAX = 400;
+    const consoleLines = ref([]);
+    const consoleFollow = ref(localStorage.getItem("multiace.console.follow") !== "0");
+    const consoleInput = ref("");
+    const consoleBusy = ref(false);
+    const consoleEl = ref(null);
+    const consoleShown = computed(() =>
+      !panelMode && sidebar.open && sidebar.pane === "console");
+    let lastConsoleId = 0;
+    watch(consoleFollow,
+          v => localStorage.setItem("multiace.console.follow", v ? "1" : "0"));
+    function _appendConsole(lines) {
+      if (!Array.isArray(lines) || !lines.length) return;
+      for (const ln of lines) {
+        if (ln.id != null && ln.id <= lastConsoleId) continue;
+        if (ln.id != null) lastConsoleId = ln.id;
+        consoleLines.value.push(ln);
+      }
+      if (consoleLines.value.length > CONSOLE_MAX) {
+        consoleLines.value.splice(0, consoleLines.value.length - CONSOLE_MAX);
+      }
+      if (consoleFollow.value) {
+        nextTick(() => {
+          const el = consoleEl.value;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
+    }
+    async function loadConsole() {
+      try {
+        const r = await fetch(`${API}/console-logs?lines=200&since_id=${lastConsoleId}`);
+        if (!r.ok) return;
+        _appendConsole((await r.json()).lines || []);
+      } catch (_) {}
+    }
+    function _sendConsoleSubscription() {
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({type: "subscribe", console: consoleShown.value}));
+        }
+      } catch (_) {}
+    }
+    watch(consoleShown, (shown) => {
+      _sendConsoleSubscription();
+      if (shown) loadConsole();
+    });
+    async function sendConsole() {
+      const script = consoleInput.value.trim();
+      if (!script || consoleBusy.value) return;
+      consoleBusy.value = true;
+      try {
+        const r = await fetch(`${API}/console`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({script}),
+        });
+        if (!r.ok) {
+          _appendConsole([{id: null, ts: Date.now() / 1000, kind: "error",
+                           msg: `!! ${await r.text()}`}]);
+        }
+        consoleInput.value = "";
+      } catch (e) {
+        _appendConsole([{id: null, ts: Date.now() / 1000, kind: "error",
+                         msg: `!! ${e}`}]);
+      } finally { consoleBusy.value = false; }
+    }
+    function consoleTime(ts) {
+      if (!ts) return "";
+      try { return new Date(ts * 1000).toLocaleTimeString(); }
+      catch (_) { return ""; }
+    }
+
+    // =================================================================
+    // Auto-retry controls
+    //
+    // The retry runs inside Klipper's load command, so these go through
+    // the backend's control file rather than G-code - a G-code line
+    // would only be read after the load it is meant to steer has ended.
+    // =================================================================
+    const retryBusy = ref("");
+    const retryPct = computed(() => {
+      const r = retryState.value;
+      if (!r || !r.max_attempts) return 0;
+      return Math.min(100, Math.round((r.attempt / r.max_attempts) * 100));
+    });
+    async function retryControl(action) {
+      if (retryBusy.value) return;
+      retryBusy.value = action;
+      try { await fetch(`${API}/retry/${action}`, {method: "POST"}); }
+      catch (_) {}
+      finally { setTimeout(() => { retryBusy.value = ""; }, 500); }
+    }
+
+    // =================================================================
+    // Firmware compatibility
+    // =================================================================
+    const firmware = reactive({
+      version: "", status: "unknown", known_issues: [], source: "",
+      device: "", reason: "",
+    });
+    const firmwareWarn = computed(() =>
+      firmware.status === "unsupported" || firmware.status === "untested");
+
+    // =================================================================
+    // Apply-changes flow
+    //
+    // Saving used to mean "file written, now go reboot, good luck". The
+    // modal names what changed and asks for the WEAKEST restart that
+    // actually applies it - most edits need a Klipper restart, a few
+    // need nothing at all, and only unit-count/serial changes need a
+    // full reboot.
+    // =================================================================
+    const applyModal = reactive({
+      open: false,
+      busy: false,
+      // "preview" (about to save) | "saved" (written, restart pending)
+      // | "restarting" (waiting for the printer to come back)
+      phase: "preview",
+      changes: [],
+      restartRequired: "none",
+      error: "",
+      pendingContent: "",
+      pendingSha1: "",
+      reconnectSecs: 0,
+    });
+    const RESTART_LABELS = {
+      none: "ui.config.restart_none",
+      klipper_restart: "ui.config.restart_klipper_needed",
+      printer_reboot: "ui.config.restart_reboot_needed",
+    };
+    function restartLabel(kind) {
+      return t(RESTART_LABELS[kind] || RESTART_LABELS.none);
+    }
+    function closeApplyModal() {
+      applyModal.open = false;
+      applyModal.error = "";
+    }
+    async function _putConfig(content, sha1, behavior) {
+      const body = JSON.stringify({content, base_sha1: sha1,
+                                   restart_behavior: behavior});
+      let r = await fetch(`${API}/config`, {
+        method: "PUT", headers: {"Content-Type": "application/json"}, body,
+      });
+      if (r.status === 409) {
+        // Same lost-update guard as before: rebase the form values on the
+        // current on-disk text and retry once.
+        let fresh = null;
+        try { fresh = JSON.parse((await r.json()).detail); } catch (_) { fresh = null; }
+        if (!fresh || typeof fresh.content !== "string") {
+          throw new Error(`HTTP 409 ${t("ui.log.config_conflict_failed")}`);
+        }
+        const rebased = formToCfgContent(fresh.content);
+        r = await fetch(`${API}/config`, {
+          method: "PUT", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({content: rebased, base_sha1: fresh.sha1 || "",
+                                restart_behavior: behavior}),
+        });
+        configLog.value = t("ui.log.config_conflict_merged");
+        if (r.ok) return {resp: r, content: rebased};
+      }
+      return {resp: r, content};
+    }
+    // Save, then show what changed and what it needs. The save itself
+    // never restarts anything ("none"): the user decides in the modal.
+    async function saveConfigForm() {
+      configLog.value = t("ui.common.saving");
+      applyModal.error = "";
+      try {
+        const newContent = formToCfgContent(config.content);
+        const {resp, content} = await _putConfig(newContent, config.sha1, "none");
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+        const j = await resp.json();
+        config.content = content;
+        config.sha1 = j.sha1 || "";
+        applyModal.changes = j.changes || [];
+        applyModal.restartRequired = j.restart_required || "none";
+        applyModal.phase = "saved";
+        applyModal.open = true;
+        rebootNeeded.value = (applyModal.restartRequired !== "none");
+        configLog.value = `✓ ${j.path}\nBackup: ${j.backup}`;
+        // Nothing to restart -> say so and get out of the way.
+        if (applyModal.restartRequired === "none") {
+          configLog.value += `\n${t("ui.config.restart_none")}`;
+          setTimeout(() => { if (applyModal.phase === "saved") closeApplyModal(); }, 2500);
+        }
+      } catch (e) {
+        applyModal.error = String(e);
+        configLog.value = `${t("ui.common.error")}: ${e}`;
+      }
+    }
+    // "Restart now" from the modal. Klipper restart and full reboot both
+    // drop the websocket; the UI switches to a reconnect countdown and
+    // recovers on its own instead of leaving a dead page behind.
+    async function applyRestart(behavior) {
+      if (applyModal.busy) return;
+      applyModal.busy = true;
+      applyModal.error = "";
+      try {
+        const r = await fetch(`${API}/restart`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({behavior}),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text()}`);
+        applyModal.phase = "restarting";
+        applyModal.reconnectSecs = 0;
+        rebootNeeded.value = false;
+        _awaitPrinterBack();
+      } catch (e) {
+        applyModal.error = String(e);
+      } finally { applyModal.busy = false; }
+    }
+    // Poll /api/health until the printer answers again (5 min cap - past
+    // that something needs a human, and a spinner forever is a lie).
+    let _reconnectTimer = null;
+    function _awaitPrinterBack() {
+      clearInterval(_reconnectTimer);
+      const started = Date.now();
+      _reconnectTimer = setInterval(async () => {
+        applyModal.reconnectSecs = Math.round((Date.now() - started) / 1000);
+        if (applyModal.reconnectSecs > 300) {
+          clearInterval(_reconnectTimer);
+          applyModal.error = t("ui.config.restart_timeout");
+          return;
+        }
+        try {
+          const r = await fetch(`${API}/state`, {cache: "no-store"});
+          if (!r.ok) return;
+          const s = await r.json();
+          if (s.klippy === "disconnected" || s.error) return;
+          clearInterval(_reconnectTimer);
+          applyState(s);
+          await loadConfig();
+          closeApplyModal();
+        } catch (_) {}
+      }, 2000);
+    }
+
+    // =================================================================
+    // Debug panel (?debug=1): connection facts and, in mock mode, event
+    // injection - the only way to exercise the retry UI without a jam.
+    // =================================================================
+    const debugPanel = reactive({
+      enabled: _q.get("debug") === "1",
+      open: false,
+      mock: false,
+      lastMessage: 0,
+      messages: 0,
+      log: "",
+    });
+    async function simulateEvent(event, extra) {
+      try {
+        const r = await fetch(`${API}/debug/simulate`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({event, ...(extra || {})}),
+        });
+        debugPanel.log = r.ok ? `✓ ${event}` : `${r.status}: ${await r.text()}`;
+      } catch (e) { debugPanel.log = String(e); }
+    }
+    function debugSince() {
+      if (!debugPanel.lastMessage) return "—";
+      return `${Math.round((Date.now() - debugPanel.lastMessage) / 100) / 10}s`;
+    }
+
     onMounted(async () => {
       await loadLanguageList();
       // No explicit browser choice yet -> follow the printer's persisted
@@ -3126,6 +3428,14 @@ createApp({
           const p = j.printer || {};
           printerName.value = p.device_name || "";
           printerFw.value   = p.firmware_version || "";
+          const fw = j.firmware || {};
+          firmware.version = fw.firmware_version || printerFw.value || "";
+          firmware.status = fw.status || "unknown";
+          firmware.known_issues = fw.known_issues || [];
+          firmware.source = fw.source || "";
+          firmware.device = fw.device || "";
+          firmware.reason = fw.reason || "";
+          debugPanel.mock = !!j.mock;
         }
       } catch (_) {}
       try { const r = await fetch(`${API}/screen-available`); if (r.ok) screenAvailable.value = (await r.json()).available; } catch (_) {}
@@ -3138,6 +3448,10 @@ createApp({
       await refreshDebugState();
       await refreshPlugins();
       if (state.mode === "normal" && tab.value === "dashboard") tab.value = "config";
+      // Sidebar panes are lazy, but one that was left open in a previous
+      // session should come back populated, not empty.
+      if (webcamShown.value) loadWebcam();
+      if (consoleShown.value) loadConsole();
       wsConnect();
       if (window.ResizeObserver && wiringContainerEl.value) {
         resizeObserver = new ResizeObserver(() => recomputeWiring());
@@ -3167,6 +3481,7 @@ createApp({
     onUnmounted(() => {
       clearTimeout(wsReconnectTimer);
       clearInterval(screenTimer);
+      clearInterval(_reconnectTimer);
       try { ws?.close(); } catch (_) {}
       try { resizeObserver?.disconnect(); } catch (_) {}
       window.removeEventListener("resize", recomputeWiring);
@@ -3217,6 +3532,14 @@ createApp({
       sendingAll, sendAllToPrinter,
       fmtArgs, cmdLabel,
       uploading, uploadInput, triggerUpload, onUploadGcode,
+      sidebar, toggleSidebar, setSidebarPane,
+      webcam, webcamShown, webcamSrc, loadWebcam,
+      consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,
+      consoleShown, sendConsole, consoleTime, loadConsole,
+      retryState, retryBusy, retryPct, retryControl,
+      firmware, firmwareWarn,
+      applyModal, closeApplyModal, applyRestart, restartLabel,
+      debugPanel, simulateEvent, debugSince,
     };
   },
 }).mount("#app");

@@ -688,8 +688,10 @@ def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None):
     stats['saved_s'] = stats['bg_ok'] * BG_UNLOAD_INLINE_SAVING_S
     return stats
 
-def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
-                               num_slots, layer_color_sets=None, max_colors=12,
+def compute_head_mode_optimize(events, feeder_heads, ace_heads=None,
+                               ace_num_of_head=None, num_slots=None,
+                               ace_head=None, ace_slots=None,
+                               layer_color_sets=None, max_colors=12,
                                event_times=None, bg_heads=None):
     """Head-mode loadout OPTIMIZER - the swap-minimal PROPOSED loadout that
     IGNORES the current physical load (plan 'optimize' + plan 'layer'/Belady).
@@ -715,6 +717,15 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
       ace_heads:        list of ACE-driven head indices (each a swap bin).
       ace_num_of_head:  {head: ace_index} - the ACE each ACE head feeds from.
       num_slots:        per-ACE slot capacity (pre-loadable colours, e.g. 4).
+      ace_head:         alternative single-head convention: one logical ACE
+                        head backed by several combined ACE units - pass
+                        together with ace_slots instead of ace_heads /
+                        ace_num_of_head / num_slots.
+      ace_slots:        physical slot list for the ace_head convention, e.g.
+                        [{'ace': a, 'slot': s}, ...] across every combined
+                        ACE unit; capacity is len(ace_slots), and assigned
+                        colours are packed into these physical (ace, slot)
+                        pairs in order (spreading across units).
       layer_color_sets: per-layer colour sets; when given, layer-only swap mode.
       max_colors:       distinct-colour cap before bailing (brute-force guard).
       event_times:      per-event remaining minutes (parse_toolchanges_with_
@@ -737,13 +748,18 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
     many colours to brute-force, or a layer needs >1 colour on one ACE head)."""
     from itertools import product
 
+    if ace_slots is not None:
+        ace_heads = [ace_head]
+        ace_num_of_head = {ace_head: (ace_slots[0]['ace'] if ace_slots else 0)}
+        num_slots = len(ace_slots)
+
     colors_list = sorted(set(events))
     n = len(colors_list)
     feeders_sorted = sorted(feeder_heads)
-    ace_sorted = sorted(ace_heads)
+    ace_sorted = sorted(ace_heads or [])
     F = len(feeders_sorted)
     K = len(ace_sorted)
-    S = int(num_slots)
+    S = int(num_slots or 0)
     if n == 0:
         return {}, 0
     if F <= 0 and K <= 0:
@@ -843,9 +859,15 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
                 slot = ace_next_slot.get(head, 0)
                 ace_color_to_slot[(head, t)] = slot
                 ace_next_slot[head] = slot + 1
-            assignment[t] = {'kind': 'ace', 'head': head,
-                             'ace': int(ace_num_of_head.get(head, head)),
-                             'slot': slot, 'tier': 'optimize'}
+            if ace_slots is not None:
+                phys = ace_slots[slot]
+                assignment[t] = {'kind': 'ace', 'head': head,
+                                 'ace': int(phys['ace']),
+                                 'slot': int(phys['slot']), 'tier': 'optimize'}
+            else:
+                assignment[t] = {'kind': 'ace', 'head': head,
+                                 'ace': int(ace_num_of_head.get(head, head)),
+                                 'slot': slot, 'tier': 'optimize'}
         else:
             head = feeder_bin_to_head.get(b)
             if head is None:

@@ -181,7 +181,27 @@
       "tipform_save_restart": "Save + restart Klipper",
       "tipform_restart_pending": "The saved configuration differs from what Klipper is running - restart Klipper to apply.",
       "tipform_syntax": "Tokens: <mm>@<feedrate> (extruder move, negative = retract, mm/min) - pause:<ms> - temp:<C> (set, no wait) - waittemp:<C> (set + wait, both directions; below 175 no further moves allowed - Klipper min_extrude_temp; slow in background swaps) - fan:<0-255> (inline only) - unloadtemp:<C> (unload/tip-form temp for this material/vendor, default 250; may be a table's only content = stock pull at that temp). A table must end with a net retract. The background swap uses the same tables.",
-      "tipform_unsupported": "This multiACE build has no tip-forming module - update multiACE first."
+      "tipform_unsupported": "This multiACE build has no tip-forming module - update multiACE first.",
+      "firmware_title": "Printer firmware",
+      "fw_unknown": "unknown",
+      "fw_status_supported": "supported",
+      "fw_status_untested": "untested",
+      "fw_status_unsupported": "unsupported",
+      "fw_status_unknown": "not detected",
+      "fw_hint": "Detected from Moonraker; set firmware_version in [ace] to override.",
+      "auto_retries": "Auto-retry failed loads",
+      "auto_retry_delay": "Retry delay (ms)",
+      "auto_retry_hint": "0 disables auto-retry. When the attempts run out during a print, multiACE pauses for manual recovery instead of aborting.",
+      "apply_title": "Changes applied",
+      "apply_no_changes": "Nothing changed – the file already matched.",
+      "apply_restarting": "Restarting…",
+      "restart_none": "Applied immediately – nothing to restart.",
+      "restart_klipper_needed": "A Klipper restart is needed for these changes.",
+      "restart_reboot_needed": "A full printer reboot is needed for these changes.",
+      "restart_now": "Restart now",
+      "restart_later": "Restart later",
+      "restart_waiting": "Waiting for the printer to come back… ({secs}s)",
+      "restart_timeout": "The printer has not come back after 5 minutes – check it directly."
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} is already loaded",
@@ -309,6 +329,38 @@
       "send_all_tooltip": "Send all queued commands to the printer (UI can be closed afterwards)",
       "send_all_done": "{count} commands sent to the printer",
       "send_all_failed": "Send failed"
+    },
+    "sidebar": {
+      "title": "Panes",
+      "toggle_hint": "Show webcam and console next to the dashboard",
+      "collapse": "Collapse",
+      "webcam": "Webcam",
+      "console": "Console",
+      "webcam_loading": "Looking for a camera…",
+      "webcam_unavailable": "Camera unavailable",
+      "webcam_hint": "Configure a camera in Moonraker/crowsnest, then reload.",
+      "console_empty": "No console output yet.",
+      "console_follow": "Follow",
+      "console_placeholder": "G-code, e.g. ACE_STATUS"
+    },
+    "retry": {
+      "retrying": "Load failed on head {head} (ACE {ace} / slot {slot}) – retrying {attempt}/{max}…",
+      "now": "Retry now",
+      "stop": "Stop retries & pause"
+    },
+    "debug": {
+      "mock": "Mock data",
+      "live": "Live data",
+      "messages": "WS messages",
+      "last_message": "Last message",
+      "data": "Source",
+      "mock_only": "Event injection needs the backend in mock mode (MULTIACE_MOCK_MODE=1).",
+      "sim_load_fail": "Load failure",
+      "sim_last_attempt": "Last attempt",
+      "sim_exhausted": "Retries exhausted",
+      "sim_console": "Console line",
+      "sim_error": "G-code error",
+      "sim_clear": "Clear"
     }
   },
   "msg": {

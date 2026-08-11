@@ -1,0 +1,78 @@
+# Python Core & Caching
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments (Local development setups)
+.venv/
+venv/
+ENV/
+env/
+ActivePython-*/
+
+# Testing, Coverage, & Automation
+.pytest_cache/
+.tox/
+.noscript/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# Distribution / Packaging (Built artifacts)
+bin/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm / JetBrains
+.idea/
+
+# General editor crash/swap files
+*.swp
+*.swo
+*~
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Dev UI scratch state (scripts/run-dev-ui.*) - a local copy of ace.cfg the
+# UI can save to without touching a printer.
+.devdata/

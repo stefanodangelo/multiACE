@@ -133,7 +133,27 @@
       "debug_reboot_title": "重启打印机？",
       "debug_reboot_msg": "将向 Moonraker 发送 /machine/reboot。正在运行的任务会被中止。",
       "debug_reboot_sent": "已向 Moonraker 发送重启命令。",
-      "debug_reboot_failed": "重启失败"
+      "debug_reboot_failed": "重启失败",
+      "firmware_title": "打印机固件",
+      "fw_unknown": "未知",
+      "fw_status_supported": "已支持",
+      "fw_status_untested": "未测试",
+      "fw_status_unsupported": "不支持",
+      "fw_status_unknown": "未检测到",
+      "fw_hint": "从 Moonraker 读取；可在 [ace] 中设置 firmware_version 覆盖。",
+      "auto_retries": "自动重试进料失败",
+      "auto_retry_delay": "重试间隔（毫秒）",
+      "auto_retry_hint": "0 为关闭。打印中重试用尽时，multiACE 会暂停等待人工处理，而不是中止。",
+      "apply_title": "更改已应用",
+      "apply_no_changes": "无变化 – 文件内容相同。",
+      "apply_restarting": "正在重启…",
+      "restart_none": "已立即生效 – 无需重启。",
+      "restart_klipper_needed": "这些更改需要重启 Klipper。",
+      "restart_reboot_needed": "这些更改需要重启整台打印机。",
+      "restart_now": "立即重启",
+      "restart_later": "稍后重启",
+      "restart_waiting": "等待打印机恢复…（{secs} 秒）",
+      "restart_timeout": "打印机 5 分钟后仍未恢复 – 请直接检查。"
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} 已经进料",
@@ -230,6 +250,38 @@
       "send_all_tooltip": "将所有排队命令发送到打印机（之后可以关闭界面）",
       "send_all_done": "已向打印机发送 {count} 条命令",
       "send_all_failed": "发送失败"
+    },
+    "sidebar": {
+      "title": "面板",
+      "toggle_hint": "在仪表盘旁显示摄像头与控制台",
+      "collapse": "收起",
+      "webcam": "摄像头",
+      "console": "控制台",
+      "webcam_loading": "正在查找摄像头…",
+      "webcam_unavailable": "摄像头不可用",
+      "webcam_hint": "请在 Moonraker/crowsnest 中配置摄像头后重新加载。",
+      "console_empty": "暂无控制台输出。",
+      "console_follow": "跟随",
+      "console_placeholder": "G-code，例如 ACE_STATUS"
+    },
+    "retry": {
+      "retrying": "打印头 {head}（ACE {ace} / 槽 {slot}）进料失败 – 重试 {attempt}/{max}…",
+      "now": "立即重试",
+      "stop": "停止重试并暂停"
+    },
+    "debug": {
+      "mock": "模拟数据",
+      "live": "实时数据",
+      "messages": "WS 消息",
+      "last_message": "最后消息",
+      "data": "数据源",
+      "mock_only": "注入事件需要后端处于模拟模式（MULTIACE_MOCK_MODE=1）。",
+      "sim_load_fail": "进料失败",
+      "sim_last_attempt": "最后一次尝试",
+      "sim_exhausted": "重试耗尽",
+      "sim_console": "控制台行",
+      "sim_error": "G-code 错误",
+      "sim_clear": "清除"
     }
   },
   "msg": {

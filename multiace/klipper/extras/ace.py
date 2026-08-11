@@ -233,6 +233,35 @@ class MultiAce:
             self.head_load_retry[i] = config.getint('load_retry_%d' % i, self.load_retry)
             self.head_load_retry_retract[i] = config.getint('load_retry_retract_%d' % i, self.load_retry_retract)
 
+        # --- automatic retry of a failed toolhead load ------------------
+        # A load that fails on jam/mis-seat clears on the next attempt far
+        # more often than not, and the old behaviour (fail, wait for a
+        # human) stalls an unattended print for hours over something the
+        # printer could have fixed itself. 0 disables the feature and
+        # restores exactly the old fail-immediately path.
+        self.filament_load_max_auto_retries = config.getint(
+            'filament_load_max_auto_retries', 3, minval=0, maxval=10)
+        self.filament_load_retry_delay_ms = config.getint(
+            'filament_load_retry_delay_ms', 1000, minval=0, maxval=30000)
+        self.head_auto_retries = {}
+        for i in range(4):
+            self.head_auto_retries[i] = config.getint(
+                'filament_load_max_auto_retries_%d' % i,
+                self.filament_load_max_auto_retries, minval=0, maxval=10)
+        # Where the web backend reads the live attempt counter and writes
+        # "retry now" / "cancel". Files, not G-code: while a load retries,
+        # this module is INSIDE the load command and cannot process a
+        # second command until it returns.
+        self._retry_state_path = config.get(
+            'retry_state_path', '/tmp/multiace_retry_state.json')
+        self._retry_control_path = config.get(
+            'retry_control_path', '/tmp/multiace_retry_control')
+
+        # Optional manual firmware version for machines whose Moonraker
+        # product_info does not report one. Purely informational: nothing
+        # in this module gates on it (see multiace/firmware_compat.py).
+        self.firmware_version = config.get('firmware_version', '')
+
         self.head_manual = {}
         for i in range(4):
             self.head_manual[i] = config.getboolean('head_manual_%d' % i, False)
@@ -1389,6 +1418,7 @@ class MultiAce:
             build=MULTIACE_BUILD_TAG, ts=ace_timestamp))
         logging.info('[multiACE] Version %s (%s) build=%s file=%s' % (
             MULTIACE_VERSION, MULTIACE_CODENAME, MULTIACE_BUILD_TAG, ace_timestamp))
+        self._log_firmware_compat()
 
         try:
             _bg = self.printer.lookup_object('ace_bg_swap', None)
@@ -2327,6 +2357,145 @@ class MultiAce:
                 'RESUME                           (continue the print)',
             ]
         return detail, steps
+
+    #: Printer firmware this module has been run against. Mirror of the
+    #: canonical table in multiace/firmware_compat.py, inlined because
+    #: klippy/extras/ace.py is installed on its own and cannot import the
+    #: repo package - keep the two in step when adding a version.
+    FIRMWARE_COMPAT = {
+        '1.4': 'unsupported',
+        '1.5.0': 'supported',
+        '1.5.1': 'supported',
+        '1.5.2': 'supported',
+        '1.1.31': 'supported',
+    }
+
+    def _log_firmware_compat(self):
+        """Log the configured printer firmware and whether multiACE has
+        been tested against it. Informational only - nothing here refuses
+        to run, an untested firmware just says so."""
+        ver = (self.firmware_version or '').strip()
+        if not ver:
+            logging.info('[multiACE] printer firmware: not set in [ace] '
+                         '(the web UI reads it from Moonraker)')
+            return
+        status = self.FIRMWARE_COMPAT.get(ver)
+        if status is None:
+            status = self.FIRMWARE_COMPAT.get('.'.join(ver.split('.')[:2]),
+                                              'untested')
+        line = '[multiACE] printer firmware %s: %s' % (ver, status)
+        if status == 'supported':
+            logging.info(line)
+        else:
+            self.log_always(line)
+            logging.warning(line)
+
+    # ------------------------------------------------------------------
+    # Automatic load-retry: state file + control file
+    #
+    # The web UI needs to show "retrying 2/3" WHILE the retry is running,
+    # and offer "retry now" / "stop retrying". Neither can go through
+    # G-code: this module is sitting inside cmd_ACE_LOAD_HEAD for the
+    # whole sequence, so a second command would only be processed after
+    # the load has already finished. Two small files bridge that gap -
+    # we write the attempt counter, the backend writes the user's wish.
+    # ------------------------------------------------------------------
+
+    def _auto_retries_for(self, head):
+        try:
+            return int(self.head_auto_retries.get(
+                head, self.filament_load_max_auto_retries))
+        except Exception:
+            return int(self.filament_load_max_auto_retries)
+
+    def _retry_state_write(self, payload):
+        try:
+            tmp = self._retry_state_path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(payload, f)
+            os.replace(tmp, self._retry_state_path)
+        except Exception as e:
+            logging.info('[multiACE] retry state write failed: %s' % e)
+
+    def _retry_state_publish(self, head, ace_index, slot, attempt,
+                             max_attempts, reason, next_retry_ms):
+        self._retry_state_write({
+            'active':       True,
+            'ts':           time.time(),
+            'head':         head,
+            'ace':          ace_index,
+            'ace_idx':      ace_index,
+            'slot':         slot,
+            'attempt':      attempt,
+            'max_attempts': max_attempts,
+            'next_retry_ms': int(next_retry_ms),
+            'reason':       reason,
+        })
+
+    def _retry_state_clear(self):
+        try:
+            os.remove(self._retry_state_path)
+        except OSError:
+            pass
+
+    def _retry_control_take(self):
+        """Read and consume the pending UI wish: 'now', 'cancel' or None."""
+        try:
+            with open(self._retry_control_path, 'r') as f:
+                word = f.read().strip().lower()
+        except OSError:
+            return None
+        try:
+            os.remove(self._retry_control_path)
+        except OSError:
+            pass
+        return word if word in ('now', 'cancel') else None
+
+    def _retry_wait(self, delay_ms, head, ace_index, slot, attempt,
+                    max_attempts, reason):
+        """Sleep between attempts, polling the control file.
+
+        Returns 'cancel' if the user gave up, else None. reactor.pause
+        keeps Klipper's reactor alive, so status queries (and therefore
+        the dashboard) stay responsive during the wait.
+        """
+        remaining = max(0, int(delay_ms))
+        step = 100
+        while True:
+            self._retry_state_publish(head, ace_index, slot, attempt,
+                                      max_attempts, reason, remaining)
+            word = self._retry_control_take()
+            if word == 'cancel':
+                return 'cancel'
+            if word == 'now' or remaining <= 0:
+                return None
+            self.reactor.pause(self.reactor.monotonic() + step / 1000.0)
+            remaining -= step
+
+    def _reset_feed_channel(self, ff, module, channel):
+        """Put a filament_feed channel back into the state FEED_AUTO
+        expects before a (re)try - without this a second attempt is
+        refused, because load_finish is still False from the failed one
+        and channel_state has moved on."""
+        try:
+            if ff is None:
+                logging.info('[multiACE] channel_state reset: %s not loaded'
+                             % module)
+                return
+            if channel >= len(ff.channel_state):
+                logging.info(
+                    '[multiACE] channel_state reset: channel %d out of range (%d)' % (
+                        channel, len(ff.channel_state)))
+                return
+            prev_state = ff.channel_state[channel]
+            ff.channel_state[channel] = 'inited'
+            if 'load_finish' in ff.config:
+                ff.config['load_finish'][channel] = False
+            logging.info(
+                '[multiACE] channel_state reset: %s ch=%d prev=%s -> inited, '
+                'load_finish=False' % (module, channel, prev_state))
+        except Exception as e:
+            logging.info('[multiACE] channel_state reset error: %s' % e)
 
     def _pause_for_recovery(self, gcmd, detail_msg, recovery_steps, code=0):
         for i, step in enumerate(recovery_steps, 1):
@@ -7225,78 +7394,144 @@ class MultiAce:
         ff = None
         try:
             ff = self.printer.lookup_object(ff_module, None)
-            if ff is None:
-                logging.info('[multiACE] channel_state reset: %s not loaded' % ff_module)
-            elif channel >= len(ff.channel_state):
-                logging.info(
-                    '[multiACE] channel_state reset: channel %d out of range (%d)' % (
-                        channel, len(ff.channel_state)))
-            else:
-                prev_state = ff.channel_state[channel]
-                ff.channel_state[channel] = 'inited'
-                if 'load_finish' in ff.config:
-                    ff.config['load_finish'][channel] = False
-                logging.info(
-                    '[multiACE] channel_state reset: %s ch=%d prev=%s -> inited, load_finish=False' % (
-                        ff_module, channel, prev_state))
         except Exception as e:
-            logging.info('[multiACE] channel_state reset error: %s' % e)
+            logging.info('[multiACE] %s lookup failed: %s' % (ff_module, e))
+        self._reset_feed_channel(ff, ff_module, channel)
 
         wheel_before = self._read_wheel_counts(module, channel)
 
-        self._in_internal_load_head = True
-        try:
-            try:
-                self.gcode.run_script_from_command(
-                    "FEED_AUTO MODULE=%s CHANNEL=%d EXTRUDER=%d LOAD=1"
-                    % (module, channel, head))
-            except Exception as e:
-                self._audit_state('LOAD_HEAD_FAILED', {'head': head, 'ace': ace_index, 'slot': slot, 'reason': 'feed_auto_error', 'error': str(e)})
+        # --- attempt loop ------------------------------------------------
+        # attempt 1 is the normal load; anything after it only happens when
+        # filament_load_max_auto_retries > 0. With the default 0 retries the
+        # loop runs exactly once and every failure path below is the old
+        # behaviour, unchanged.
+        max_auto = self._auto_retries_for(head)
+        delay_ms = self.filament_load_retry_delay_ms
+        attempt = 0
+        cancelled = False
+        while True:
+            attempt += 1
+            fail_reason = None
+            fail_detail = None
+            fail_exc = None
 
+            self._in_internal_load_head = True
+            try:
                 try:
-                    src = self._head_source.get(head)
-                    if src is not None:
-                        src['load_failed'] = True
-                        self._save_head_source()
-                except Exception:
-                    pass
-                self._last_load_ok = False
-                raise
-        finally:
-            self._in_internal_load_head = False
+                    self.gcode.run_script_from_command(
+                        "FEED_AUTO MODULE=%s CHANNEL=%d EXTRUDER=%d LOAD=1"
+                        % (module, channel, head))
+                except Exception as e:
+                    fail_reason = 'feed_auto_error'
+                    fail_detail = str(e)
+                    fail_exc = e
+            finally:
+                self._in_internal_load_head = False
 
-        if self.head_uses_ace(head):
-            _load_ok = True
-            _skip_reason = None
-            try:
-                if ff is not None and channel < len(ff.channel_state):
-                    _load_ok = bool(ff.config['load_finish'][channel])
-                    if not _load_ok:
-                        if not ff.config['auto_mode'][channel]:
-                            _skip_reason = 'auto_mode'
-                        else:
-                            _skip_reason = str(ff.channel_state[channel])
-            except Exception as ve:
-                logging.info(
-                    '[multiACE] load_finish verify unavailable: %s' % ve)
+            if fail_reason is None and self.head_uses_ace(head):
                 _load_ok = True
-            if not _load_ok:
-                self._audit_state('LOAD_HEAD_FAILED', {
-                    'head': head, 'ace': ace_index, 'slot': slot,
-                    'reason': 'load_not_finished', 'detail': _skip_reason})
+                _skip_reason = None
                 try:
-                    src = self._head_source.get(head)
-                    if src is not None:
-                        src['load_failed'] = True
-                        self._save_head_source()
-                except Exception:
-                    pass
-                self._last_load_ok = False
-                if _skip_reason == 'auto_mode':
-                    raise gcmd.error(self._t('msg.load_refused_auto_mode',
-                        head=self._disp(head)))
-                raise gcmd.error(self._t('msg.load_not_finished',
-                    head=self._disp(head), state=_skip_reason))
+                    if ff is not None and channel < len(ff.channel_state):
+                        _load_ok = bool(ff.config['load_finish'][channel])
+                        if not _load_ok:
+                            if not ff.config['auto_mode'][channel]:
+                                _skip_reason = 'auto_mode'
+                            else:
+                                _skip_reason = str(ff.channel_state[channel])
+                except Exception as ve:
+                    logging.info(
+                        '[multiACE] load_finish verify unavailable: %s' % ve)
+                    _load_ok = True
+                if not _load_ok:
+                    fail_reason = 'load_not_finished'
+                    fail_detail = _skip_reason
+
+            if fail_reason is None:
+                if attempt > 1:
+                    # Undo the failure marks the earlier attempts left, or
+                    # a recovered load would still read as failed - the
+                    # dashboard shows a "load failed" badge off load_failed
+                    # and callers gate on _last_load_ok.
+                    self._last_load_ok = True
+                    try:
+                        src = self._head_source.get(head)
+                        if src is not None and src.pop('load_failed', None):
+                            self._save_head_source()
+                    except Exception:
+                        pass
+                    self.log_always(
+                        '[multiACE] head %d: load succeeded on attempt %d/%d'
+                        % (self._disp(head), attempt, max_auto + 1))
+                    self._audit_state('LOAD_HEAD_RETRY_OK', {
+                        'head': head, 'ace': ace_index, 'slot': slot,
+                        'attempt': attempt})
+                self._retry_state_clear()
+                break
+
+            self._audit_state('LOAD_HEAD_FAILED', {
+                'head': head, 'ace': ace_index, 'slot': slot,
+                'reason': fail_reason, 'detail': fail_detail,
+                'attempt': attempt, 'max_attempts': max_auto + 1})
+            try:
+                src = self._head_source.get(head)
+                if src is not None:
+                    src['load_failed'] = True
+                    self._save_head_source()
+            except Exception:
+                pass
+            self._last_load_ok = False
+
+            # 'auto_mode' means the channel is not in automatic feeding at
+            # all - retrying cannot change that, so never burn attempts on it.
+            retriable = (fail_detail != 'auto_mode')
+            if not retriable or attempt > max_auto:
+                break
+
+            self.log_always(
+                '[multiACE] head %d: load failed (%s) - retrying %d/%d in %d ms'
+                % (self._disp(head), fail_reason, attempt, max_auto, delay_ms))
+            self._ace_event('load_retry', head=head, ace=ace_index, slot=slot,
+                            attempt=attempt, max_attempts=max_auto,
+                            reason=fail_reason)
+            if self._retry_wait(delay_ms, head, ace_index, slot, attempt,
+                                max_auto, fail_reason) == 'cancel':
+                self.log_always(
+                    '[multiACE] head %d: auto-retry cancelled by the user'
+                    % self._disp(head))
+                cancelled = True
+                break
+            self._reset_feed_channel(ff, ff_module, channel)
+
+        if fail_reason is not None:
+            self._retry_state_clear()
+            attempts_used = attempt
+            if fail_reason == 'feed_auto_error':
+                detail = ('[multiACE] head %d: load failed: %s'
+                          % (self._disp(head), fail_detail))
+            elif fail_detail == 'auto_mode':
+                detail = self._t('msg.load_refused_auto_mode',
+                                 head=self._disp(head))
+            else:
+                detail = self._t('msg.load_not_finished',
+                                 head=self._disp(head), state=fail_detail)
+            if max_auto > 0 and attempts_used > 1:
+                detail = '%s (%d attempts)' % (detail, attempts_used)
+            self._ace_event('load_failed', head=head, ace=ace_index, slot=slot,
+                            attempts=attempts_used, reason=fail_reason,
+                            cancelled=1 if cancelled else 0)
+            # Exhausted auto-retries during a print: pause for the human
+            # instead of aborting the job - the print is recoverable, the
+            # abort is not.
+            if max_auto > 0 and self._is_actively_printing():
+                self._pause_for_recovery(gcmd, detail, [
+                    'Check ACE %d slot %d for a jam or an empty spool'
+                    % (self._disp(ace_index), self._disp(slot)),
+                    'Clear the filament path, then RESUME to continue',
+                ])
+            if fail_exc is not None:
+                raise fail_exc
+            raise gcmd.error(detail)
 
         if not self.head_uses_ace(head):
             self._head_source[head] = None
@@ -9848,6 +10083,12 @@ class MultiAce:
             'head_ace': {str(h): int(self.head_ace.get(h, h))
                          for h in range(4)},
             'swap_in_progress': self._swap_in_progress,
+            'retry_config': {
+                'max_auto_retries': self.filament_load_max_auto_retries,
+                'retry_delay_ms':   self.filament_load_retry_delay_ms,
+                'per_head':         dict(self.head_auto_retries),
+            },
+            'firmware_version': self.firmware_version,
             'aces': aces,
         }
 

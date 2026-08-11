@@ -44,7 +44,42 @@ from pydantic import BaseModel
 
 import preflight_core
 
+def _import_sibling(mod_name: str):
+    """Import a top-level multiACE module (multiace/<name>.py).
+
+    Installed on the printer the backend lives at .../multiace/web/backend
+    with the repo root usually NOT on sys.path, so the plain package
+    import fails there while it works in a checkout. Try the package
+    first, then load the file directly - both point at the same file, so
+    the two paths cannot drift.
+    """
+    try:
+        import importlib
+        return importlib.import_module(f"multiace.{mod_name}")
+    except Exception:
+        pass
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / f"{mod_name}.py"
+    spec = importlib.util.spec_from_file_location(f"_multiace_{mod_name}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+firmware_compat = _import_sibling("firmware_compat")
+config_changes = _import_sibling("config_changes")
+
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
+
+#: Dev/demo mode: serve fixtures instead of talking to Moonraker, so the
+#: UI can be worked on without a printer. See scripts/run-dev-ui.*.
+MOCK_MODE = os.environ.get("MULTIACE_MOCK_MODE", "").strip().lower() in (
+    "1", "true", "yes", "on")
+MOCK_DATA_DIR = os.environ.get(
+    "MULTIACE_MOCK_DIR",
+    str(Path(__file__).resolve().parents[3] / "tests" / "fixtures"),
+)
 MULTIACE_CFG_PATH = os.environ.get(
     "MULTIACE_CFG_PATH",
     "/home/lava/printer_data/config/extended/ace.cfg",
@@ -566,6 +601,12 @@ class ConfigUpdate(BaseModel):
     content: str
     restart_klipper: bool = False
     base_sha1: str | None = None
+    # "auto"           -> do whatever the diff says is needed
+    # "none"           -> save only, never restart (the pre-0.99 behaviour)
+    # "klipper_restart"/"printer_reboot" -> force that, even if the diff
+    #                     would have settled for less
+    # None             -> fall back to restart_klipper for old clients
+    restart_behavior: str | None = None
 
 class TipformUpdate(BaseModel):
     mode: str
@@ -609,12 +650,72 @@ async def _mr_post(path: str, body: dict | None = None, timeout: float = 30.0) -
         r.raise_for_status()
         return r.json()
 
+_mock_cache: dict[str, tuple[float, Any]] = {}
+
+def _mock_load(name: str, default: Any = None) -> Any:
+    """Read tests/fixtures/<name>. mtime-aware so a dev can edit the
+    fixture and just refresh the browser."""
+    p = Path(MOCK_DATA_DIR) / name
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return default
+    hit = _mock_cache.get(name)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    _mock_cache[name] = (mtime, data)
+    return data
+
+def _mock_enabled(request: Request | None = None) -> bool:
+    """Mock mode is process-wide (env), but the debug panel can force it
+    per-request with ?mock=1 / ?mock=0 so a dev can compare mocked and
+    live data without restarting the server."""
+    if request is not None:
+        q = request.query_params.get("mock")
+        if q is not None:
+            return q.strip().lower() in ("1", "true", "yes", "on")
+    return MOCK_MODE
+
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "version": VERSION, "ts": time.time()}
+    return {"status": "ok", "version": VERSION, "ts": time.time(),
+            "mock_mode": MOCK_MODE}
+
+async def _detect_firmware_version() -> tuple[str, str]:
+    """(version, source) for the printer firmware.
+
+    Moonraker's product_info is the authoritative source; the `[ace]`
+    section's optional `firmware_version:` is the manual override for
+    machines that do not report one (and wins, since a user who typed it
+    means it).
+    """
+    cfg_ver = str(_read_cfg_scalars().get("firmware_version", "") or "").strip()
+    if cfg_ver:
+        return cfg_ver, "config"
+    try:
+        sysinfo = await _mr_get("/machine/system_info")
+        pi = (sysinfo.get("result", {})
+                     .get("system_info", {})
+                     .get("product_info", {})) or {}
+        raw = pi.get("firmware_version") or ""
+        if raw:
+            return str(raw), "moonraker"
+    except Exception:
+        pass
+    return "", "unknown"
 
 @app.get("/api/version")
-async def version() -> dict:
+async def version(request: Request) -> dict:
+
+    if _mock_enabled(request):
+        mock = _mock_load("mock_version.json") or {}
+        fw = firmware_compat.compat_for(
+            (mock.get("printer") or {}).get("firmware_version"))
+        return {**mock, "web": VERSION, "mock": True, "firmware": fw}
 
     printer = {}
     try:
@@ -629,12 +730,21 @@ async def version() -> dict:
         }
     except Exception:
         pass
+    fw_ver, fw_source = await _detect_firmware_version()
+    fw = firmware_compat.compat_for(fw_ver)
+    fw["source"] = fw_source
+    if fw_ver and not printer.get("firmware_version"):
+        printer["firmware_version"] = fw_ver
     return {
         "web": VERSION,
         "moonraker_url": MOONRAKER_URL,
         "config_path": MULTIACE_CFG_PATH,
         "frontend_dir": FRONTEND_DIR,
         "printer": printer,
+        "firmware": fw,
+        "firmware_version": fw["firmware_version"],
+        "compatibility": fw["status"],
+        "known_issues": fw["known_issues"],
     }
 
 _PREFLIGHT_DIR = Path("/tmp/multiace-preflight")
@@ -1341,8 +1451,13 @@ async def upload_and_print(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
 
 @app.get("/api/state")
-async def get_state() -> dict:
+async def get_state(request: Request) -> dict:
     """Aggregated dashboard state (ACEs + toolheads + dryer + status)."""
+    if _mock_enabled(request):
+        mock = dict(_mock_load("mock_state.json") or {})
+        mock["mock"] = True
+        mock["retry_state"] = _read_retry_state()
+        return mock
     try:
         status = await _query_state_gated()
     except httpx.HTTPStatusError as e:
@@ -1351,7 +1466,9 @@ async def get_state() -> dict:
         return {"error": f"moonraker: {e}"}
     except httpx.HTTPError as e:
         return {"error": f"moonraker: {e}"}
-    return _parse_state(status)
+    parsed = _parse_state(status)
+    parsed["retry_state"] = _read_retry_state()
+    return parsed
 
 @app.get("/api/aces")
 async def list_aces() -> dict:
@@ -1662,13 +1779,49 @@ async def get_config() -> dict:
     return {"path": str(p), "content": text, "params": main,
             "per_ace_params": per_ace, "sha1": _cfg_sha1(text)}
 
+def _resolve_restart_behavior(payload: ConfigUpdate, needed: str) -> str:
+    """What this save should actually restart.
+
+    `needed` is what the diff says. "auto" (and a bare legacy
+    restart_klipper=True) accept that verdict; an explicit level is taken
+    literally, including "none" for a user who wants to batch several
+    edits and reboot once at the end.
+    """
+    want = (payload.restart_behavior or "").strip().lower()
+    if want in (config_changes.RESTART_NONE,
+                config_changes.RESTART_KLIPPER,
+                config_changes.RESTART_PRINTER):
+        return want
+    if want == "auto":
+        return needed
+    # Legacy clients: the checkbox meant "restart Klipper after saving",
+    # but a change that needs a full reboot must not be under-served.
+    if payload.restart_klipper:
+        return (config_changes.RESTART_PRINTER
+                if needed == config_changes.RESTART_PRINTER
+                else config_changes.RESTART_KLIPPER)
+    return config_changes.RESTART_NONE
+
+async def _perform_restart(behavior: str) -> dict | None:
+    if behavior == config_changes.RESTART_KLIPPER:
+        try:
+            return await _mr_post("/printer/firmware_restart", {})
+        except httpx.HTTPError as e:
+            return {"error": str(e)}
+    if behavior == config_changes.RESTART_PRINTER:
+        try:
+            return await _mr_post("/machine/reboot", timeout=10.0)
+        except httpx.HTTPError as e:
+            return {"error": str(e)}
+    return None
+
 @app.put("/api/config")
 async def update_config(payload: ConfigUpdate) -> dict:
     p = Path(MULTIACE_CFG_PATH)
     if not p.exists():
         raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+    cur = p.read_text(encoding="utf-8")
     if payload.base_sha1:
-        cur = p.read_text(encoding="utf-8")
         cur_sha1 = _cfg_sha1(cur)
         if cur_sha1 != payload.base_sha1:
             raise HTTPException(409, json.dumps({
@@ -1676,18 +1829,51 @@ async def update_config(payload: ConfigUpdate) -> dict:
                 "sha1": cur_sha1,
                 "content": cur,
             }))
+    summary = config_changes.summarize_changes(cur, payload.content)
     backup = p.with_suffix(p.suffix + ".bak")
-    backup.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    backup.write_text(cur, encoding="utf-8")
     p.write_text(payload.content, encoding="utf-8")
     new_sha1 = _cfg_sha1(payload.content)
-    restart: dict | None = None
-    if payload.restart_klipper:
-        try:
-            restart = await _mr_post("/printer/firmware_restart", {})
-        except httpx.HTTPError as e:
-            restart = {"error": str(e)}
+    behavior = _resolve_restart_behavior(payload, summary["restart_required"])
+    restart = await _perform_restart(behavior)
     return {"path": str(p), "backup": str(backup), "restart": restart,
-            "sha1": new_sha1}
+            "sha1": new_sha1,
+            "applied": True,
+            "changed": summary["changed"],
+            "changes": summary["changes"],
+            "details": summary["details"],
+            "restart_required": summary["restart_required"],
+            "restart_performed": behavior}
+
+@app.post("/api/config/preview")
+async def preview_config(payload: ConfigUpdate) -> dict:
+    """Diff a candidate config against what is on disk WITHOUT writing it.
+
+    Lets the UI show the "here is what will change and what has to
+    restart" modal before the user commits, instead of after.
+    """
+    p = Path(MULTIACE_CFG_PATH)
+    if not p.exists():
+        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+    cur = p.read_text(encoding="utf-8")
+    summary = config_changes.summarize_changes(cur, payload.content)
+    return {"sha1": _cfg_sha1(cur), **summary}
+
+@app.post("/api/restart")
+async def restart_printer(payload: dict | None = None) -> dict:
+    """Trigger the restart the config-apply modal asked for.
+
+    Separate from /api/reboot so "Restart Later" followed by "Restart
+    Now" does not have to re-save the file.
+    """
+    behavior = str((payload or {}).get("behavior")
+                   or config_changes.RESTART_KLIPPER).strip().lower()
+    if behavior not in (config_changes.RESTART_NONE,
+                        config_changes.RESTART_KLIPPER,
+                        config_changes.RESTART_PRINTER):
+        raise HTTPException(400, f"unknown restart behavior: {behavior}")
+    result = await _perform_restart(behavior)
+    return {"ok": True, "behavior": behavior, "moonraker": result}
 
 _LANG_NAME_RE = re.compile(r"^[A-Za-z]{2}(-[A-Za-z]{2})?$")
 
@@ -2281,6 +2467,7 @@ async def _moonraker_log_listener() -> None:
                     if not params:
                         continue
                     text = params[0]
+                    _record_console_line(text)
                     rec = _record_notification(text)
                     if rec is not None:
                         _trace.warning("Klipper error captured: %s", rec["msg"])
@@ -2295,9 +2482,317 @@ async def _moonraker_log_listener() -> None:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2.0, 30.0)
 
+CONSOLE_BUFFER_MAX = int(os.environ.get("MULTIACE_CONSOLE_BUFFER", "300"))
+_console_lines: deque = deque(maxlen=CONSOLE_BUFFER_MAX)
+_next_console_id = 0
+
+def _console_kind(text: str) -> str:
+    s = (text or "").strip()
+    body = s[3:].strip() if s.startswith("// ") else s
+    if body.startswith("!!") or "Error:" in body:
+        return "error"
+    if s.startswith("//"):
+        return "response"
+    return "command"
+
+def _record_console_line(text: str) -> dict | None:
+    """Append one Klipper console line to the ring buffer.
+
+    Fed by the SAME Moonraker websocket that already powers error
+    notifications, so the console pane costs no extra printer polling -
+    it is the stream we were throwing away after the error filter.
+    """
+    global _next_console_id
+    if not isinstance(text, str) or not text.strip():
+        return None
+    _next_console_id += 1
+    line = {"id": _next_console_id, "ts": time.time(),
+            "msg": text.rstrip(), "kind": _console_kind(text)}
+    _console_lines.append(line)
+    return line
+
+async def _seed_console_from_gcode_store() -> None:
+    """Backfill the buffer once at startup from Moonraker's own history,
+    so a freshly opened UI is not staring at an empty console."""
+    global _next_console_id
+    try:
+        data = await _mr_get(f"/server/gcode_store?count={CONSOLE_BUFFER_MAX}")
+    except Exception:
+        return
+    entries = (data.get("result") or {}).get("gcode_store") or []
+    for e in entries:
+        msg = e.get("message")
+        if not msg:
+            continue
+        _next_console_id += 1
+        _console_lines.append({
+            "id": _next_console_id,
+            "ts": float(e.get("time") or time.time()),
+            "msg": str(msg).rstrip(),
+            "kind": "command" if e.get("type") == "command" else _console_kind(str(msg)),
+        })
+
 @app.on_event("startup")
 async def _start_log_listener() -> None:
     asyncio.create_task(_moonraker_log_listener())
+    if not MOCK_MODE:
+        asyncio.create_task(_seed_console_from_gcode_store())
+
+@app.get("/api/console-logs")
+async def console_logs(request: Request, lines: int = 100,
+                       since_id: int = 0) -> dict:
+    """Recent console lines. `since_id` returns only what is newer, which
+    is what the WS push uses to stay incremental."""
+    if _mock_enabled(request):
+        mock = _mock_load("mock_console.json") or {"lines": []}
+        out = [ln for ln in mock.get("lines", []) if ln.get("id", 0) > since_id]
+        return {"lines": out[-max(1, min(lines, CONSOLE_BUFFER_MAX)):],
+                "mock": True}
+    if not _console_lines:
+        await _seed_console_from_gcode_store()
+    n = max(1, min(int(lines or 100), CONSOLE_BUFFER_MAX))
+    out = [ln for ln in _console_lines if ln["id"] > since_id]
+    return {"lines": out[-n:], "buffer_max": CONSOLE_BUFFER_MAX}
+
+@app.post("/api/console")
+async def console_send(payload: dict) -> dict:
+    """Run one G-code line typed into the console pane."""
+    script = str((payload or {}).get("script") or "").strip()
+    if not script:
+        raise HTTPException(400, "empty script")
+    if "\n" in script or "\r" in script:
+        raise HTTPException(400, "one command per request")
+    _record_console_line(script)
+    try:
+        result = await _mr_post("/printer/gcode/script",
+                                {"script": script}, timeout=30.0)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"moonraker: {e}")
+    return {"ok": True, "moonraker": result}
+
+WEBCAM_BASE = os.environ.get("MULTIACE_WEBCAM_BASE", "")
+
+def _webcam_base() -> str:
+    """Where a relative camera URL ('/webcam/?action=stream') points.
+
+    Moonraker stores those relative to the printer's own web root, not to
+    Moonraker's port, so strip the port off MOONRAKER_URL rather than
+    reusing it whole."""
+    if WEBCAM_BASE:
+        return WEBCAM_BASE.rstrip("/")
+    m = re.match(r"^(https?)://([^/:]+)", MOONRAKER_URL)
+    if not m:
+        return "http://127.0.0.1"
+    return f"{m.group(1)}://{m.group(2)}"
+
+def _abs_webcam_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://")):
+        return url
+    return f"{_webcam_base()}/{url.lstrip('/')}"
+
+async def _resolve_webcam() -> dict:
+    """First real camera Moonraker knows about.
+
+    Skips our own Fluidd panel entry: it is an iframe pointing back at
+    this UI, and embedding it in the UI's own sidebar would be a mirror
+    tunnel rather than a webcam.
+    """
+    try:
+        listing = await _mr_get("/server/webcams/list")
+    except Exception as e:
+        return {"available": False, "reason": f"moonraker: {e}"}
+    cams = (listing.get("result") or {}).get("webcams") or []
+    for cam in cams:
+        name = str(cam.get("name", ""))
+        if name.strip().lower() == FLUIDD_CAMERA_NAME.lower():
+            continue
+        if str(cam.get("service", "")).lower() == "iframe":
+            continue
+        if cam.get("enabled") is False:
+            continue
+        stream = str(cam.get("stream_url") or "")
+        if not stream:
+            continue
+        return {
+            "available": True,
+            "name": name,
+            "service": str(cam.get("service") or "mjpegstreamer"),
+            "stream_url": _abs_webcam_url(stream),
+            "snapshot_url": _abs_webcam_url(str(cam.get("snapshot_url") or "")),
+            "aspect_ratio": cam.get("aspect_ratio") or "16:9",
+        }
+    return {"available": False,
+            "reason": "no camera configured in Moonraker"}
+
+@app.get("/api/webcam/info")
+async def webcam_info(request: Request) -> dict:
+    if _mock_enabled(request):
+        return {**(_mock_load("mock_webcam.json") or {"available": False,
+                                                      "reason": "no fixture"}),
+                "mock": True}
+    info = await _resolve_webcam()
+    if info.get("available"):
+        # The browser always goes through our proxy: the camera may live
+        # on a host/port the UI's origin cannot reach (and https pages
+        # refuse plain-http streams). Relative to the client's own API
+        # base - the UI is mounted at /multiace behind nginx but at / on
+        # the dev server.
+        info["proxy_path"] = "/api/webcam/stream"
+    return info
+
+@app.get("/api/webcam/stream")
+async def webcam_stream(request: Request):
+    """Pipe the camera's MJPEG stream through this service."""
+    from fastapi.responses import StreamingResponse
+
+    if _mock_enabled(request):
+        raise HTTPException(503, "webcam stream unavailable in mock mode")
+    info = await _resolve_webcam()
+    if not info.get("available"):
+        raise HTTPException(503, info.get("reason") or "no webcam")
+    url = info["stream_url"]
+
+    async def _pump():
+        client = httpx.AsyncClient(timeout=None)
+        try:
+            async with client.stream("GET", url) as r:
+                r.raise_for_status()
+                async for chunk in r.aiter_raw():
+                    yield chunk
+        except Exception:
+            return
+        finally:
+            await client.aclose()
+
+    ctype = "multipart/x-mixed-replace; boundary=boundarydonotcross"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as probe:
+            head = await probe.head(url)
+            if head.headers.get("content-type"):
+                ctype = head.headers["content-type"]
+    except Exception:
+        pass
+    return StreamingResponse(_pump(), media_type=ctype,
+                             headers={"Cache-Control": "no-store"})
+
+@app.get("/api/webcam/snapshot")
+async def webcam_snapshot(request: Request):
+    if _mock_enabled(request):
+        raise HTTPException(503, "webcam snapshot unavailable in mock mode")
+    info = await _resolve_webcam()
+    url = info.get("snapshot_url") or ""
+    if not info.get("available") or not url:
+        raise HTTPException(503, info.get("reason") or "no webcam snapshot")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"webcam: {e}")
+    return Response(content=r.content,
+                    media_type=r.headers.get("content-type", "image/jpeg"),
+                    headers={"Cache-Control": "no-store"})
+
+RETRY_STATE_PATH = os.environ.get(
+    "MULTIACE_RETRY_STATE", "/tmp/multiace_retry_state.json")
+RETRY_CONTROL_PATH = os.environ.get(
+    "MULTIACE_RETRY_CONTROL", "/tmp/multiace_retry_control")
+_RETRY_STATE_TTL = float(os.environ.get("MULTIACE_RETRY_STATE_TTL", "120"))
+_mock_retry_state: dict | None = None
+
+def _read_retry_state() -> dict | None:
+    """Current auto-retry attempt, as written by ace.py.
+
+    A file rather than a Klipper status field on purpose: while a load is
+    retrying, the Klippy gcode greenlet is inside the load command, so a
+    fresh status query is the one thing we cannot count on. The file is
+    written before each attempt and removed when the sequence ends;
+    anything older than the TTL is treated as stale (Klipper died
+    mid-retry) and ignored.
+    """
+    if _mock_retry_state is not None:
+        return _mock_retry_state
+    try:
+        raw = Path(RETRY_STATE_PATH).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        st = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(st, dict) or not st.get("active"):
+        return None
+    ts = float(st.get("ts") or 0.0)
+    if ts and (time.time() - ts) > _RETRY_STATE_TTL:
+        return None
+    return st
+
+@app.get("/api/retry-state")
+async def retry_state() -> dict:
+    return {"retry_state": _read_retry_state()}
+
+@app.post("/api/retry/{action}")
+async def retry_control(action: str) -> dict:
+    """Steer an in-flight auto-retry: "now" skips the remaining delay,
+    "cancel" stops retrying and lets the load fail into a paused print.
+
+    Written to a file because a G-code command could not reach ace.py
+    here - it is busy inside the very load we are steering.
+    """
+    action = action.strip().lower()
+    if action not in ("now", "cancel"):
+        raise HTTPException(400, "action must be 'now' or 'cancel'")
+    if _mock_retry_state is not None:
+        if action == "cancel":
+            _set_mock_retry(None)
+        return {"ok": True, "action": action, "mock": True}
+    try:
+        Path(RETRY_CONTROL_PATH).write_text(action, encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(500, f"cannot write retry control file: {e}")
+    return {"ok": True, "action": action}
+
+def _set_mock_retry(st: dict | None) -> None:
+    global _mock_retry_state
+    _mock_retry_state = st
+
+@app.post("/api/debug/simulate")
+async def debug_simulate(payload: dict) -> dict:
+    """Inject a fake event so the retry / notification UI can be built
+    and reviewed without a printer. Only reachable in mock mode."""
+    if not MOCK_MODE:
+        raise HTTPException(403, "simulation is only available in mock mode")
+    event = str((payload or {}).get("event") or "").strip().lower()
+    if event == "load_failure":
+        _set_mock_retry({
+            "active": True, "ts": time.time(),
+            "head": int(payload.get("head", 0)),
+            "ace": int(payload.get("ace", 0)),
+            "slot": int(payload.get("slot", 0)),
+            "attempt": int(payload.get("attempt", 1)),
+            "max_attempts": int(payload.get("max_attempts", 3)),
+            "next_retry_ms": int(payload.get("next_retry_ms", 1000)),
+            "reason": str(payload.get("reason") or "load_not_finished"),
+        })
+    elif event == "load_exhausted":
+        _set_mock_retry(None)
+        _record_notification(
+            "!! [multiACE] Slot 0 load failed after 3 attempts. Printer paused.")
+    elif event == "clear":
+        _set_mock_retry(None)
+    elif event == "console":
+        _record_console_line(str(payload.get("msg") or "// simulated line"))
+    elif event == "gcode_error":
+        _record_notification("!! [multiACE] " + str(
+            payload.get("msg") or "Simulated error"))
+    else:
+        raise HTTPException(400, f"unknown event: {event}")
+    return {"ok": True, "event": event, "retry_state": _read_retry_state()}
 
 @app.get("/api/notifications")
 async def list_notifications() -> dict:
@@ -2608,16 +3103,52 @@ async def get_materials() -> dict:
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     """
-    Push channel for live updates. v1: simple ping every 5s plus a
-    periodic ACE snapshot every 1s. Clients can rely on this for
-    dashboard liveness without polling REST themselves.
+    Push channel for live updates: an ACE snapshot every 1s, error
+    notifications as they arrive, and - for clients that asked for it -
+    new console lines.
+
+    Console lines are opt-in via an inbound
+    ``{"type":"subscribe","console":true}`` message so the panel/iframe
+    embed does not pay for a stream it never shows.
     """
     await websocket.accept()
     last_seen_notif_id = 0
+    last_console_id = _console_lines[-1]["id"] if _console_lines else 0
+    opts = {"console": False}
+
+    async def _reader() -> None:
+        """Consume client messages (subscription changes). Ends on
+        disconnect, which also ends the send loop below."""
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                m = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("type") == "subscribe":
+                if "console" in m:
+                    opts["console"] = bool(m["console"])
+
+    reader = asyncio.create_task(_reader())
     try:
         last_ts = 0.0
         while True:
+            if reader.done():
+                return
             now = time.time()
+
+            if opts["console"]:
+                pending = [ln for ln in list(_console_lines)
+                           if ln["id"] > last_console_id]
+                if pending:
+                    last_console_id = pending[-1]["id"]
+                    try:
+                        await websocket.send_json({
+                            "type": "console", "ts": now,
+                            "lines": pending[-100:],
+                        })
+                    except Exception:
+                        return
 
             for n in list(_notifications):
                 if n["id"] > last_seen_notif_id:
@@ -2635,8 +3166,12 @@ async def ws(websocket: WebSocket) -> None:
                     last_seen_notif_id = n["id"]
             if now - last_ts >= 1.0 and not _homing_active():
                 try:
-                    status = await _query_state()
-                    payload = _parse_state(status)
+                    if MOCK_MODE:
+                        payload = dict(_mock_load("mock_state.json") or {})
+                        payload["mock"] = True
+                    else:
+                        payload = _parse_state(await _query_state())
+                    payload["retry_state"] = _read_retry_state()
                     payload["type"] = "state"
                     payload["ts"] = now
                     await websocket.send_json(payload)
@@ -2654,6 +3189,8 @@ async def ws(websocket: WebSocket) -> None:
         return
     except Exception:
         return
+    finally:
+        reader.cancel()
 
 _SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css"}
 
