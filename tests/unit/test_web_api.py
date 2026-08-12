@@ -40,6 +40,16 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MULTIACE_OVERRIDE_FILE", str(tmp_path / "overrides.json"))
     monkeypatch.setenv("MULTIACE_MOCK_DIR", str(ROOT / "tests" / "fixtures"))
     monkeypatch.setenv("MULTIACE_WEB_VERSION", "test")
+    # Every other MULTIACE_* path this fixture cares about is pinned above;
+    # this one has to be pinned too, or a leftover MULTIACE_MOCK_MODE=1 from
+    # a dev-ui session in the SAME shell (run-dev-ui.ps1/.sh sets it for the
+    # life of that terminal, not just that one script run) silently forces
+    # every test in this file into permanent mock mode. That is a global
+    # MOCK_MODE at import time, not a per-request ?mock=1 - it broke the
+    # endpoints that specifically assert non-mock behaviour, twice, before
+    # this line existed. The suite has to be hermetic against shell state,
+    # not rely on the caller remembering to clear it.
+    monkeypatch.delenv("MULTIACE_MOCK_MODE", raising=False)
     monkeypatch.syspath_prepend(str(BACKEND))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")

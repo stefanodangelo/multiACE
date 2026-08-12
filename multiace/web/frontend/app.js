@@ -3688,8 +3688,13 @@ createApp({
     // subscription is sent for a pane that is not the visible one, so
     // exactly one of the three is ever live.
     // =================================================================
+    // Console by default, not the camera: the pane is now always on
+    // screen, so whatever this defaults to opens a connection on every
+    // single page load. A console subscription is cheap; an MJPEG stream
+    // costs the printer a connection whether or not anyone is watching
+    // it. Picking the camera is a decision the user gets to make.
     const sidebar = reactive({
-      pane: localStorage.getItem("multiace.sidebar.pane") || "webcam",
+      pane: localStorage.getItem("multiace.sidebar.pane") || "console",
     });
     watch(() => sidebar.pane,
           v => localStorage.setItem("multiace.sidebar.pane", v));
