@@ -15,7 +15,8 @@
       "dashboard": "Dashboard",
       "dry": "Dry",
       "config": "Config",
-      "display": "Display"
+      "display": "Display",
+      "history": "History"
     },
     "common": {
       "active": "active",
@@ -323,7 +324,22 @@
       "head_go_optimize": "Print suggested loadout",
       "head_go_layer": "Print Belady loadout",
       "pref_bed_mesh": "Bed mesh",
-      "pref_camera": "Timelapse camera"
+      "pref_camera": "Timelapse camera",
+      "est_conf_modelled": "estimated",
+      "est_conf_calibrated": "calibrated",
+      "est_conf_degraded": "estimate degraded",
+      "est_confidence_hint": "Modelled from your ace.cfg, not measured on this machine. Print history calibrates it after 5 completed jobs.",
+      "est_filament": "{m} m / {g} g filament",
+      "est_waste": "{g} g purge ({pct} %)",
+      "est_purge_in_slicer": "already in the slicer total",
+      "est_swaps": "{inline} inline / {bg} background swaps",
+      "est_per_color": "Per colour",
+      "est_purge": "purge",
+      "download": "Download rewritten g-code",
+      "download_hint": "Save the file multiACE would print, instead of printing it.",
+      "download_done": "Downloaded {name}",
+      "download_local_only": "Download is only available for the in-browser preflight.",
+      "timeline": "Swap timeline"
     },
     "queue": {
       "send_all_tooltip": "Send all queued commands to the printer (UI can be closed afterwards)",
@@ -341,12 +357,17 @@
       "webcam_hint": "Configure a camera in Moonraker/crowsnest, then reload.",
       "console_empty": "No console output yet.",
       "console_follow": "Follow",
-      "console_placeholder": "G-code, e.g. ACE_STATUS"
+      "console_placeholder": "G-code, e.g. ACE_STATUS",
+      "print": "Print"
     },
     "retry": {
       "retrying": "Load failed on head {head} (ACE {ace} / slot {slot}) – retrying {attempt}/{max}…",
       "now": "Retry now",
       "stop": "Stop retries & pause"
+    },
+    "ace_startup": {
+      "waiting": "Waiting for {expected} ACE(s) – found {found}. Power the ACE on; it is picked up automatically within a few seconds. No restart needed.",
+      "rescan": "Rescan now"
     },
     "debug": {
       "mock": "Mock data",
@@ -361,6 +382,64 @@
       "sim_console": "Console line",
       "sim_error": "G-code error",
       "sim_clear": "Clear"
+    },
+    "print_control": {
+      "speed": "Speed",
+      "flow": "Flow",
+      "fan": "Fan",
+      "nozzle": "Nozzle",
+      "bed": "Bed",
+      "babystep": "Z offset",
+      "babystep_used": "{used} mm of the ±{max} mm per-job allowance used. Buttons, not a slider - one press is one small step.",
+      "reset_hint": "Back to 100 %",
+      "pause": "Pause",
+      "resume": "Resume",
+      "cancel": "Cancel print",
+      "cancel_title": "Cancel this print?",
+      "cancel_msg": "The print stops immediately and cannot be resumed.",
+      "cancel_ok": "Cancel the print"
+    },
+    "history": {
+      "title": "Print history",
+      "empty": "No prints recorded yet.",
+      "date": "Date",
+      "file": "File",
+      "duration": "Duration",
+      "colors": "Colours",
+      "swaps": "Swaps",
+      "filament": "Filament",
+      "result": "Result",
+      "plan": "Plan",
+      "retries": "Load retries",
+      "accuracy": "Estimate accuracy",
+      "accuracy_line": "estimated {predicted}, actually took {actual} ({pct} % off)",
+      "neighbor_retracts": "Neighbour clearance (mm per slot)",
+      "no_multiace_record": "No multiACE record for this job - it was printed without a preflight, or before history was recording.",
+      "ambiguous": "ambiguous match",
+      "ambiguous_hint": "Two prints of this file started within 90 s of each other, so multiACE cannot tell which record belongs to it. Shown unjoined rather than guessed.",
+      "open_printer_ui": "Open in the printer's own UI"
+    },
+    "virtual": {
+      "title": "What-if loadout (does not touch the printer)",
+      "enable": "Plan against this instead of the live loadout",
+      "seed_1": "Seed 1 ACE",
+      "seed_2": "Seed 2 ACEs",
+      "seed_3": "Seed 3 ACEs",
+      "export": "Export",
+      "slot": "slot",
+      "material": "material",
+      "hint": "A read-only overlay for questions like “would 2 ACEs beat 1?”. It never writes slot state, and it never reaches the rewrite - printing always uses the spools actually in the machine.",
+      "active_warning": "Planning against a virtual {aces}-ACE loadout. These plans are hypothetical; printing still uses the live loadout.",
+      "report_banner": "This plan was computed against a WHAT-IF loadout, not the spools in the machine."
+    },
+    "gpreview": {
+      "show": "Show preview",
+      "hide": "Hide preview",
+      "play": "Play",
+      "pause": "Pause",
+      "layer": "Layer {n} / {total}",
+      "cumulative": "Show all layers so far",
+      "show_travel": "Show travel moves"
     }
   },
   "msg": {
@@ -395,7 +474,8 @@
     "feed_assist_disarmed": "Feed assist disarmed on ACE {ace} slot {slot}",
     "feed_assist_armed": "Feed assist armed on ACE {ace} slot {slot}",
     "waiting_for_devices": "[multiACE] Waiting for {expected} ACE device(s), found {count}...",
-    "usb_unstable": "[multiACE] USB unstable, expected {expected} ACEs, found {count} - ACE inactive, Klipper continues. FIRMWARE_RESTART required after reconnecting.",
+    "usb_unstable": "[multiACE] Waiting for {expected} ACE(s), found {count} - power the ACE on and it is picked up within a few seconds, or run ACE_RESCAN. No FIRMWARE_RESTART needed.",
+    "late_ace_connected": "[multiACE] ACE {count}/{expected} found and connected - no restart needed",
     "all_expected_found": "[multiACE] All {expected} expected ACE device(s) found, canonical mapping locked",
     "no_ace_serial_configured": "[multiACE] No ACE devices found and no serial configured - ACE inactive, Klipper continues",
     "open_ace_failed_attempts": "[multiACE] Failed to open ACE {ace} at startup after {attempts} attempts",
@@ -540,6 +620,8 @@
     "fa_test_more": "[ACE_FA_TEST]     ... {count} more",
     "fa_test_no_ack_header": "[ACE_FA_TEST]   NO_ACK (firmware never responded):",
     "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}",
-    "unload_gate_empty": "[multiACE] Head {head}: ACE {ace} / Slot {slot} reports EMPTY while the toolhead still holds filament - it likely ran out or broke ABOVE the ACE gate. The machine cannot retract it (the tail is out of the ACE gears): heat the head, open the bowden coupling at the toolhead and pull the filament out by hand, then reload the slot."
+    "unload_gate_empty": "[multiACE] Head {head}: ACE {ace} / Slot {slot} reports EMPTY while the toolhead still holds filament - it likely ran out or broke ABOVE the ACE gate. The machine cannot retract it (the tail is out of the ACE gears): heat the head, open the bowden coupling at the toolhead and pull the filament out by hand, then reload the slot.",
+    "purge_bin_nearly_full": "[multiACE] Purge bin at {percent}% ({used}/{capacity} mm) - empty it before the next multicolour print. Purges are refused once it is full.",
+    "purge_skipped_cold": "[multiACE] Purge skipped: the nozzle is not hot enough to extrude. Pushing filament through a cold hotend grinds it flat."
   }
 }

@@ -15,7 +15,8 @@
       "dashboard": "控制台",
       "dry": "烘干",
       "config": "配置",
-      "display": "显示屏"
+      "display": "显示屏",
+      "history": "历史"
     },
     "common": {
       "active": "当前",
@@ -244,7 +245,22 @@
       "not_feasible": "不可行",
       "slicer": "切片",
       "printer": "打印机",
-      "match_tier": "匹配"
+      "match_tier": "匹配",
+      "est_conf_modelled": "估算",
+      "est_conf_calibrated": "已校准",
+      "est_conf_degraded": "估算不可靠",
+      "est_confidence_hint": "根据你的 ace.cfg 建模得出，并非在本机实测。完成 5 次打印后，打印历史会对其进行校准。",
+      "est_filament": "{m} m / {g} g 耗材",
+      "est_waste": "{g} g 清料 ({pct} %)",
+      "est_purge_in_slicer": "已包含在切片总量中",
+      "est_swaps": "{inline} 次内联 / {bg} 次后台换料",
+      "est_per_color": "按颜色",
+      "est_purge": "清料",
+      "download": "下载重写后的 G-code",
+      "download_hint": "保存 multiACE 将要打印的文件，而不是直接打印。",
+      "download_done": "已下载 {name}",
+      "download_local_only": "仅浏览器内预检支持下载。",
+      "timeline": "换料时间线"
     },
     "queue": {
       "send_all_tooltip": "将所有排队命令发送到打印机（之后可以关闭界面）",
@@ -262,12 +278,17 @@
       "webcam_hint": "请在 Moonraker/crowsnest 中配置摄像头后重新加载。",
       "console_empty": "暂无控制台输出。",
       "console_follow": "跟随",
-      "console_placeholder": "G-code，例如 ACE_STATUS"
+      "console_placeholder": "G-code，例如 ACE_STATUS",
+      "print": "打印"
     },
     "retry": {
       "retrying": "打印头 {head}（ACE {ace} / 槽 {slot}）进料失败 – 重试 {attempt}/{max}…",
       "now": "立即重试",
       "stop": "停止重试并暂停"
+    },
+    "ace_startup": {
+      "waiting": "正在等待 {expected} 个 ACE – 已找到 {found}。请打开 ACE 电源，几秒内自动识别。无需重启。",
+      "rescan": "立即重新扫描"
     },
     "debug": {
       "mock": "模拟数据",
@@ -282,6 +303,64 @@
       "sim_console": "控制台行",
       "sim_error": "G-code 错误",
       "sim_clear": "清除"
+    },
+    "print_control": {
+      "speed": "速度",
+      "flow": "流量",
+      "fan": "风扇",
+      "nozzle": "喷嘴",
+      "bed": "热床",
+      "babystep": "Z 偏移",
+      "babystep_used": "本次任务已用 {used} mm，上限 ±{max} mm。使用按钮而非滑块 — 一次点击只走一小步。",
+      "reset_hint": "恢复 100 %",
+      "pause": "暂停",
+      "resume": "继续",
+      "cancel": "取消打印",
+      "cancel_title": "取消这次打印？",
+      "cancel_msg": "打印会立即停止且无法恢复。",
+      "cancel_ok": "取消打印"
+    },
+    "history": {
+      "title": "打印历史",
+      "empty": "尚无打印记录。",
+      "date": "日期",
+      "file": "文件",
+      "duration": "时长",
+      "colors": "颜色",
+      "swaps": "换料",
+      "filament": "耗材",
+      "result": "结果",
+      "plan": "方案",
+      "retries": "进料重试",
+      "accuracy": "估算准确度",
+      "accuracy_line": "估算 {predicted}，实际 {actual}（偏差 {pct} %）",
+      "neighbor_retracts": "相邻槽位清空（每槽 mm）",
+      "no_multiace_record": "该任务没有 multiACE 记录 — 可能未经过预检，或在历史记录启用之前打印。",
+      "ambiguous": "匹配不明确",
+      "ambiguous_hint": "同一文件的两次打印在 90 秒内启动，multiACE 无法确定归属。宁可不关联，也不猜测。",
+      "open_printer_ui": "在打印机自带界面中打开"
+    },
+    "virtual": {
+      "title": "假设装载（不影响打印机）",
+      "enable": "用它替代实际装载进行规划",
+      "seed_1": "预置 1 个 ACE",
+      "seed_2": "预置 2 个 ACE",
+      "seed_3": "预置 3 个 ACE",
+      "export": "导出",
+      "slot": "槽位",
+      "material": "材料",
+      "hint": "只读的假设层，用于回答“2 个 ACE 会比 1 个更好吗”这类问题。它绝不会写入槽位状态，也绝不会进入重写流程 — 打印始终使用机器中实际的料卷。",
+      "active_warning": "正在基于 {aces} 个 ACE 的虚拟装载进行规划。这些方案是假设性的；打印仍使用实际装载。",
+      "report_banner": "此方案是基于“假设装载”计算的，并非机器中实际的料卷。"
+    },
+    "gpreview": {
+      "show": "显示预览",
+      "hide": "隐藏预览",
+      "play": "播放",
+      "pause": "暂停",
+      "layer": "层 {n} / {total}",
+      "cumulative": "显示至今所有层",
+      "show_travel": "显示空驶路径"
     }
   },
   "msg": {
@@ -313,7 +392,8 @@
     "feed_assist_disarmed": "ACE {ace} Slot {slot} 进料辅助已关闭",
     "feed_assist_armed": "ACE {ace} Slot {slot} 进料辅助已启用",
     "waiting_for_devices": "[multiACE] 正在等待 {expected} 个 ACE 设备, 已找到 {count}...",
-    "usb_unstable": "[multiACE] USB 不稳定, 期望 {expected} 个 ACE, 找到 {count} - ACE 未激活, Klipper 继续。重新连接后需 FIRMWARE_RESTART。",
+    "usb_unstable": "[multiACE] 正在等待 {expected} 个 ACE, 已找到 {count} - 打开 ACE 电源后几秒内即可识别, 或运行 ACE_RESCAN。无需 FIRMWARE_RESTART。",
+    "late_ace_connected": "[multiACE] 已找到并连接 ACE {count}/{expected} - 无需重启",
     "all_expected_found": "[multiACE] 已找到全部 {expected} 个 ACE 设备, 锁定标准映射",
     "no_ace_serial_configured": "[multiACE] 未找到 ACE 设备且未配置串口 - ACE 未激活, Klipper 继续",
     "open_ace_failed_attempts": "[multiACE] 启动时打开 ACE {ace} 失败, 已尝试 {attempts} 次",
@@ -449,6 +529,8 @@
     "fa_test_failed_line": "[ACE_FA_TEST]     step={step} slot={slot} ({attempts} 次尝试) → {msg}",
     "fa_test_more": "[ACE_FA_TEST]     ... 还有 {count} 个",
     "fa_test_no_ack_header": "[ACE_FA_TEST]   NO_ACK (固件从未响应):",
-    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}"
+    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}",
+    "purge_bin_nearly_full": "[multiACE] 清料盒已达 {percent}% ({used}/{capacity} mm) - 请在下次多色打印前清空。装满后将拒绝清料。",
+    "purge_skipped_cold": "[multiACE] 已跳过清料：喷嘴温度不足以挤出。冷态挤压会把耗材压扁。"
   }
 }

@@ -299,6 +299,58 @@ Before installing multiACE, ensure the following:
 5. Reboot the printer
 6. multiACE starts in **Multi mode** - all connected ACE units are detected automatically
 
+### Developing: pushing your own tree
+
+The update button in the Config tab installs **published releases**. To
+install the code you have right now, use the push script. It exists in both
+flavours and they share one behaviour spec:
+
+```bash
+scripts/push-to-printer.sh  --host 192.168.1.50           # web-only (default)
+scripts/push-to-printer.ps1 -PrinterHost 192.168.1.50     # same, on Windows
+```
+
+There are two push classes, and the safe one is the default:
+
+| | What it touches | Restarts |
+|---|---|---|
+| **`--web-only`** (default) | `multiace/web` + `multiace/tools` | the panel service only |
+| **`--full`** | everything, via `install_multiace.sh` | Klipper |
+
+`--web-only` is the inner loop and it is mechanically inert - the worst case
+is a broken web page. `--full` is the deliberate class, because
+`install_multiace.sh` replaces stock Klipper code (`filament_feed.py`,
+`filament_switch_sensor.py`, `extruder.py`) and patches `TRSYNC_TIMEOUT` in
+`mcu.py`. `TRSYNC_TIMEOUT` governs multi-MCU homing, and homing failures are
+how a toolhead drives into the bed. So `--full` is gated on, in order:
+
+1. `pytest` passing locally (`--skip-tests` exists, must be typed
+   explicitly, and prints exactly what it is bypassing);
+2. the printer being idle - installing mid-print aborts the job, cuts the
+   heaters and leaves the nozzle set into cold plastic;
+3. the target's `mcu.py` being either stock or already patched. A third,
+   hand-edited value **aborts** rather than being patched again;
+4. post-restart verification: `/api/health` answering, and the expected ACE
+   count reconnected.
+
+If a push half-lands, the recovery path is written and tested alongside it:
+
+```bash
+scripts/push-to-printer.sh --host 192.168.1.50 --rollback
+```
+
+It restores the installer's own `extruder_pre_multiace.py` and
+`mcu.py.pre_multiace` backups and restarts, so recovery does not depend on
+remembering the filenames while the printer is down.
+
+Other flags: `--dry-run`, `--no-restart`, `--user`, and
+`$MULTIACE_PRINTER_HOST` instead of `--host`. There is deliberately **no**
+mid-print override on the HTTP endpoints; the script keeps
+`--force-mid-print`, because that requires a human typing an unmistakable
+flag into a shell.
+
+> Update *checks* may be automatic. Applying an update is always an explicit
+> human action.
 
 ### Uninstall
 
@@ -515,6 +567,137 @@ If you find yourself raising this above 3, read
 [docs/FILAMENT_SWAP_GUIDE.md](docs/FILAMENT_SWAP_GUIDE.md) first - repeated
 retries are a symptom, and the guide covers the mechanical causes.
 
+#### Neighbour clearance before each retry
+
+Filament sitting in the *other* slots of the same ACE can crowd the shared
+path and be the reason the load failed. Before each retry, multiACE pulls
+those neighbours back a little so the active filament has room to advance.
+It is harmless: a later load of those slots re-feeds from the spool anyway.
+
+```ini
+load_retry_neighbor_retract: 100      # mm base, 0 = off
+load_retry_neighbor_retract_max: 300  # cumulative cap per slot
+#load_retry_neighbor_retract_0: 100   # per-head override
+```
+
+The retracts **escalate** rather than starting at the cap - 50 mm on the
+first retry, 100 on the second, 150 on the third, 300 mm in total. A jam is
+usually cleared by the first small pull, and if the load failed because of a
+blob on the tip, dragging 5 cm back into the ACE hub is a great deal better
+than 10.
+
+What is never retracted:
+
+- **ACE slots only.** A head on a stock feeder has one filament and no
+  shared path, so there is nothing to clear; the skip is logged
+  (`reason: stock_feeder`) so its absence is visible rather than looking
+  like a bug.
+- **Anything loaded into a head.** Pulling a printing filament against the
+  extruder gear strips it. multiACE checks the head's own filament sensor,
+  not just the saved head→slot map, because that map can be stale after a
+  crash.
+- **Empty slots**, and any slot that refused once - a slot that would not
+  retract is left alone for the rest of the attempt chain, because
+  re-driving it is how a hub jam becomes a hard jam.
+
+The retry banner shows the cumulative millimetres per slot, and the print
+history records them. Watch for one slot accumulating past ~200 mm: that is
+slack inside the unit, and slack is how an ACE tangles.
+
+> **Not the same as `load_retry_retract`** above. That one retracts the
+> *active* filament inside the low-level feed retry; this one clears its
+> *neighbours*.
+
+### Purge safety and colour-aware purge
+
+Purge is the one thing multiACE commands the hotend to extrude by a
+computed volume, so it is clamped twice.
+
+```ini
+swap_purge_max: 150         # hard per-swap ceiling (mm)
+swap_purge_min: 0           # floor when colour-aware purge is on
+#purge_bin_capacity_mm: 3000 # YOUR bin's capacity; 0 = no accounting
+purge_color_aware: false    # off by default - see below
+```
+
+`swap_purge_max` bounds one swap. `purge_bin_capacity_mm` bounds the
+**total**, and that is the guard that actually prevents a blob: ten
+individually safe purges still fill a bin, and an overflowing bin is the
+classic blob that accumulates on the nozzle and heater block, rips the
+silicone sock and takes the thermistor and heater leads with it.
+
+Capacity is **hardware-version dependent** - the v1 and v2 purge bins
+differ - so a volume that is safe on one machine is not on another. Set it
+to your bin's real capacity. multiACE warns at 80 % and refuses to purge
+above 100 %. After emptying the bin:
+
+```gcode
+ACE_PURGE_BIN_RESET
+```
+
+`purge_color_aware: true` scales each transition's purge by colour distance
+(white after black needs far more flushing than black after white). It is
+**off by default and should stay off** until you have compared a few
+prints' reported purge grams against what your bin actually caught - the
+preflight estimate reports the number without emitting it, which is exactly
+the safe way to gather that evidence.
+
+With a **prime tower or flush-into-support** in the file - the normal way to
+slice multicolour - multiACE emits no purge at all and only reports it. The
+slicer is already handling it, in a place with unbounded capacity and at a
+flow rate it computed itself. There is no hardware risk in that mode, and it
+is the common case.
+
+A `PURGE=` value in the g-code is always an upper **request**, never an
+instruction: `ACE_SWAP_HEAD` clamps it against *this* machine's limits,
+because that file may have been sliced against a different one, and it never
+purges into a nozzle that is not hot enough to extrude.
+
+### Print time and filament estimate
+
+The preflight now shows, per plan, the total print time with multiACE's
+swaps added, filament in metres and grams, and the purge waste - so the
+plans are comparable in minutes and grams rather than swap counts. A plan
+with more swaps, all of them backgrounded, can be the faster one.
+
+The mechanical terms are computed from your `ace.cfg` (`load_length /
+feed_speed` and so on), so a longer bowden really does produce a longer
+estimate. The terms nobody can compute - the ACE's internal spool change,
+sensor waits, tool pickup - are named constants seeded so the shipped
+defaults reproduce multiACE's historical swap costs.
+
+**Those constants are unmeasured.** Every estimate is labelled *estimated*,
+never *measured*, until the print history has enough completed jobs to
+regress against - at which point it flips to *calibrated* and the numbers
+are this machine's, not a plausible guess.
+
+### Print history
+
+multiACE records its own job data to `printer_data/multiace/jobs.jsonl`:
+the plan that ran, where each colour sat, how many swaps happened and how
+long each took, load retries and neighbour clearance. Moonraker already
+records duration and result, so the **History** tab joins the two rather
+than duplicating either.
+
+The file is append-only JSONL, capped at 200 jobs / 2 MB with rotation, and
+a corrupt line (a power cut mid-write) is skipped rather than hiding the
+rest. Completed swap durations feed `swap_stats.json`, which is what turns
+the estimate above from modelled into calibrated.
+
+### Live print control
+
+The **Print** pane in the sidebar does what the printer's own screen does
+mid-print: speed, flow, fan, temperatures, Z offset, pause/resume/cancel.
+Values are read back from Moonraker, so a change made on the physical
+display shows up in the browser and the two never disagree.
+
+Every value is clamped **server-side**, so the printer is protected whatever
+the browser sends. Z offset is buttons rather than a slider, capped at
+±0.5 mm per job: repeated negative steps are how a nozzle ends up gouging
+the plate, and a slider makes a large negative delta one gesture away.
+Heater limits come from Klipper's configured `min_temp`/`max_temp` and the
+loaded material's range, whichever is tighter.
+
 ### Config changes and restarts
 
 Saving from the Config tab no longer ends in a blanket "please reboot". The
@@ -605,6 +788,33 @@ If things get out of sync (wrong filament displayed, unexpected behavior), reset
 - Check USB connection: `ls /dev/serial/by-path/`
 - ACE Pro should show as vendor `28e9`, product `018a`
 - Try power-cycling the ACE
+
+### ACE switched on after the printer
+
+This used to require a `FIRMWARE_RESTART`. It no longer does. If fewer ACEs
+are found at startup than `ace_device_count`, multiACE stays up in a
+**waiting** state, rescans every `ace_rescan_interval` seconds (default 5)
+and finishes startup by itself as soon as the expected units appear. The
+dashboard shows a banner with a **Rescan now** button; `ACE_RESCAN` does the
+same from the console.
+
+```ini
+ace_rescan_interval: 5.0   # seconds; 0 disables the timer (ACE_RESCAN still works)
+```
+
+The rescan is skipped while a swap, auto-feed or homing is in flight - an
+`_open_ace` in the middle of a swap is the one way this could disturb a
+running print.
+
+Indices are only locked once **all** the expected units are present. That is
+deliberate: index identity comes from the sorted USB path, so locking with 1
+of 3 units up would make the late arrivals append at the end, and slots would
+silently mismap. If you genuinely want to run with fewer units - you
+unplugged one on purpose - say so explicitly:
+
+```gcode
+ACE_RESCAN LOCK=1
+```
 
 ### Old code running despite update
 - Delete Python cache: `rm -rf /home/lava/klipper/klippy/extras/__pycache__/`

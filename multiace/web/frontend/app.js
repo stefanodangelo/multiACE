@@ -154,6 +154,8 @@ createApp({
     // max_attempts, next_retry_ms, reason} while a retry is pending, null
     // otherwise - so the banner appears and disappears on its own.
     const retryState = ref(null);
+    const aceStartup = ref(null);
+    const aceRescanBusy = ref(false);
     const notifications = ref([]);
     const _notifIds = new Set();
     function _addNotif(n) {
@@ -246,6 +248,12 @@ createApp({
       // succeeds, is cancelled, or ace.py stops writing the state file.
       retryState.value = (s.retry_state && s.retry_state.active)
         ? s.retry_state : null;
+      applyPrintControlState(s);
+      // §7: fewer ACEs found at startup than configured. Klipper is up and
+      // multiACE keeps rescanning - the banner exists so the user knows to
+      // switch the unit on, not to demand a FIRMWARE_RESTART.
+      const st = s.ace_startup || {};
+      aceStartup.value = (st.state === "waiting") ? st : null;
     }
     async function reloadState() {
       try {
@@ -2658,6 +2666,11 @@ createApp({
             pyodideIndexURL: PYODIDE_INDEX_URL,
             postprocessSrc: src.postprocess,
             coreSrc: src.core,
+            // Optional third module: without it the preflight still works,
+            // it just carries no time/filament estimate.
+            swapCostSrc: src.swap_cost || null,
+            costParams: src.cost_params || null,
+            calibration: src.calibration || null,
           });
         });
       })();
@@ -2746,15 +2759,20 @@ createApp({
       try {
         await ensurePreflightWorker();
         const live = await loadLiveSlotsForPreflight();
+        // Analysis only. _startLocalPreflightPrint and
+        // downloadRewrittenGcode both re-fetch the live loadout before the
+        // rewrite, so an overlay cannot reach the file that gets printed.
+        const vp = virtualPayload();
         const j = await runPreflightWorker("analyze", {
           jobId: preflightJobId, file: f,
-          liveSlots: live.live_slots, headCtx: live.head_ctx,
+          liveSlots: vp || live.live_slots, headCtx: live.head_ctx,
         }, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
             stage:   String(msg.stage || ""), running: true};
         });
-        preflight.report = Object.assign({local: true}, j.report || {});
+        preflight.report = Object.assign(
+          {local: true, virtual_loadout: !!vp}, j.report || {});
         preflight.slicerOverrides = {};
         preflight.slicerSwaps = null;
         preflight.slicerDirty = false;
@@ -2777,9 +2795,14 @@ createApp({
       preflight.local   = false;
       preflight.progress = null;
       uploading.value   = true;
+      // Kept for the g-code preview, which needs nothing but this File
+      // object and runs identically on the server-preflight path.
+      preflightFile = f;
       try {
         const fd = new FormData();
         fd.append("file", f, f.name);
+        const vp = virtualPayload();
+        if (vp) fd.append("virtual_slots", JSON.stringify(vp));
         const r = await fetch(`${API}/preflight`, {method: "POST", body: fd});
         if (!r.ok) {
           let msg = `${r.status} ${r.statusText}`;
@@ -2800,7 +2823,188 @@ createApp({
         preflight.busy  = false;
       }
     }
+    // =================================================================
+    // Virtual loadout (plan section 2.2)
+    //
+    // A what-if overlay: "would 2 ACEs beat 1?", "what if green sat in ACE
+    // 1 instead?". It is READ-ONLY with respect to the printer - it can
+    // never write slot state, and it lives in its own field all the way to
+    // the backend, because the rewrite path reads live_slots and only
+    // live_slots. A virtual loadout that leaked into a real rewrite would
+    // swap to spools holding a different material and run them at the
+    // wrong temperature.
+    // =================================================================
+    const VIRTUAL_KEY = "multiace.virtualLoadout";
+    const virtualLoadout = reactive({
+      enabled: false,
+      slots: [],          // [{ace, slot, material, color}]
+    });
+
+    function loadVirtualLoadout() {
+      try {
+        const raw = localStorage.getItem(VIRTUAL_KEY);
+        if (!raw) return;
+        const j = JSON.parse(raw);
+        virtualLoadout.enabled = !!j.enabled;
+        virtualLoadout.slots = Array.isArray(j.slots) ? j.slots : [];
+      } catch (_) {}
+    }
+    function saveVirtualLoadout() {
+      try {
+        localStorage.setItem(VIRTUAL_KEY, JSON.stringify({
+          enabled: virtualLoadout.enabled, slots: virtualLoadout.slots}));
+      } catch (_) {}
+    }
+    watch(() => JSON.stringify(virtualLoadout), saveVirtualLoadout);
+    loadVirtualLoadout();
+
+    function virtualSeed(aceCount) {
+      // Start from what is actually in the machine, so the first edit is a
+      // change to reality rather than a blank slate.
+      const rows = [];
+      for (const a of state.aces.slice(0, aceCount)) {
+        for (const s of a.slots || []) {
+          rows.push({
+            ace: a.idx, slot: s.idx,
+            material: s.material || "",
+            color: _hex6(s.color) || "#888888",
+          });
+        }
+      }
+      // Pad out any ACE the printer does not have, so "would 2 beat 1?" is
+      // answerable on a machine with one.
+      for (let a = state.aces.length; a < aceCount; a++) {
+        for (let s = 0; s < 4; s++) {
+          rows.push({ace: a, slot: s, material: "PLA", color: "#888888"});
+        }
+      }
+      virtualLoadout.slots = rows;
+    }
+    function virtualAceCount() {
+      return new Set(virtualLoadout.slots.map(r => r.ace)).size;
+    }
+    function virtualExport() {
+      const url = URL.createObjectURL(new Blob(
+        [JSON.stringify(virtualLoadout.slots, null, 2)],
+        {type: "application/json"}));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "multiace-virtual-loadout.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+    // The payload sent alongside the upload. Empty unless the user turned
+    // the overlay on AND filled it in - so the default path is untouched.
+    function virtualPayload() {
+      if (!virtualLoadout.enabled || !virtualLoadout.slots.length) return null;
+      return virtualLoadout.slots
+        .filter(r => r.material || r.color)
+        .map(r => ({ace: Number(r.ace), slot: Number(r.slot),
+                    material: r.material || "", color: _hex6(r.color)}));
+    }
+
+    // =================================================================
+    // G-code preview (plan section 9)
+    //
+    // Parses and renders entirely in the browser, off the file already
+    // selected. No upload, no Moonraker, no printer required - the earlier
+    // design uploaded the file into the printer's own gcodes folder and
+    // embedded that printer's web UI in an iframe, which needs a real
+    // printer behind it and renders nothing without one. This needs
+    // nothing but the File object already sitting in memory, so it works
+    // identically on a laptop with no printer attached, in mock mode, or
+    // against a live printer.
+    //
+    // Colours by the SLICER's tool index (the file's own colours), so it
+    // answers "does this file look right at all" - not "what will
+    // multiACE's plan actually print", which the swim-lane timeline above
+    // already answers without needing any geometry.
+    // =================================================================
+    const gpreview = reactive({
+      open: false, busy: false, error: "", progress: 0,
+      layer: 0, totalLayers: 0, playing: false,
+      cumulative: true, showTravel: false,
+    });
+    const gpreviewCanvasEl = ref(null);
+    let gpreviewData = null;
+    let gpreviewRenderer = null;
+    let gpreviewTimer = null;
+    let gpreviewResizeObs = null;
+
+    function _gpreviewColorForT(t) {
+      const rep = preflight.report;
+      const c = rep && (rep.slicer_colors || []).find(x => x.t === t);
+      return (c && c.hex) || "#888888";
+    }
+
+    function _gpreviewRedraw() {
+      if (!gpreviewRenderer) return;
+      gpreviewRenderer.setLayer(gpreview.layer);
+      gpreviewRenderer.setCumulative(gpreview.cumulative);
+      gpreviewRenderer.setShowTravel(gpreview.showTravel);
+      gpreviewRenderer.draw();
+    }
+    watch(() => [gpreview.layer, gpreview.cumulative, gpreview.showTravel],
+          _gpreviewRedraw);
+
+    async function openGcodePreview() {
+      if (!preflightFile || gpreview.busy) return;
+      gpreview.busy = true;
+      gpreview.error = "";
+      gpreview.progress = 0;
+      try {
+        gpreviewData = await MultiAceGcodePreview.parse(preflightFile, {
+          onProgress: (pct) => { gpreview.progress = pct; },
+        });
+        gpreview.totalLayers = gpreviewData.layers.length;
+        // Start on the whole print rather than layer 0 - the first thing
+        // worth seeing is "does the finished object look right".
+        gpreview.layer = Math.max(0, gpreview.totalLayers - 1);
+        gpreview.open = true;
+        await nextTick();
+        gpreviewRenderer = new MultiAceGcodePreview.Renderer(gpreviewCanvasEl.value);
+        gpreviewRenderer.setData(gpreviewData, _gpreviewColorForT);
+        gpreviewRenderer.resize();
+        _gpreviewRedraw();
+        if (!gpreviewResizeObs && window.ResizeObserver) {
+          gpreviewResizeObs = new ResizeObserver(() => {
+            if (!gpreviewRenderer) return;
+            gpreviewRenderer.resize();
+            _gpreviewRedraw();
+          });
+          gpreviewResizeObs.observe(gpreviewCanvasEl.value);
+        }
+      } catch (e) {
+        gpreview.error = e.message || String(e);
+      } finally {
+        gpreview.busy = false;
+      }
+    }
+
+    function closeGcodePreview() {
+      gpreview.open = false;
+      gpreview.playing = false;
+      if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
+      if (gpreviewResizeObs) { gpreviewResizeObs.disconnect(); gpreviewResizeObs = null; }
+      gpreviewRenderer = null;
+      gpreviewData = null;
+    }
+
+    function gpreviewTogglePlay() {
+      gpreview.playing = !gpreview.playing;
+      if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
+      if (gpreview.playing) {
+        gpreviewTimer = setInterval(() => {
+          gpreview.layer = (gpreview.layer >= gpreview.totalLayers - 1)
+            ? 0 : gpreview.layer + 1;
+        }, 120);
+      }
+    }
+
     function closePreflight() {
+      closeGcodePreview();
       preflight.open    = false;
       preflight.report  = null;
       preflight.error   = "";
@@ -2809,6 +3013,56 @@ createApp({
       preflight.local   = false;
       clearLocalPreflightJob();
     }
+    // ---- estimate formatting (plan 1.4) ---------------------------------
+    function fmtDuration(seconds) {
+      if (seconds === null || seconds === undefined) return "–";
+      const s = Math.max(0, Math.round(Number(seconds)));
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (d) return `${d}d ${h}h`;
+      if (h) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+    // The delta against the slicer's own estimate - the number the user is
+    // actually asking for ("how much does multiACE cost me?").
+    function estimateDelta(est) {
+      if (!est || est.base_s === null || est.base_s === undefined) return "";
+      if (!est.added_s) return "";
+      return "+" + fmtDuration(est.added_s);
+    }
+    function wastePercent(est) {
+      if (!est || !est.totals || !est.totals.g || !est.purge) return 0;
+      return Math.round((est.purge.g / est.totals.g) * 1000) / 10;
+    }
+
+    // ---- plan timeline (plan section 3.2 / 3.3) --------------------------
+    // One swim lane per head, one block per toolchange along the print.
+    // The point is that an inline swap and a background swap look
+    // different: the first stalls the print, the second does not.
+    function swimLanes(plan) {
+      const byHead = new Map();
+      for (const ev of (plan && plan.timeline) || []) {
+        const h = ev.head === null || ev.head === undefined ? -1 : ev.head;
+        if (!byHead.has(h)) byHead.set(h, []);
+        byHead.get(h).push(ev);
+      }
+      return [...byHead.keys()].sort((a, b) => a - b)
+        .map(head => ({head, events: byHead.get(head)}));
+    }
+    function swapColor(ev) {
+      const rep = preflight.report;
+      const c = rep && (rep.slicer_colors || []).find(x => x.t === ev.t);
+      return (c && c.hex) || "#666";
+    }
+    function swapTitle(ev) {
+      const secs = Math.round(ev.seconds || 0);
+      const win = ev.window_min === null || ev.window_min === undefined
+        ? "" : `, window ${ev.window_min} min`;
+      const purge = ev.purge_mm ? `, purge ${ev.purge_mm} mm` : "";
+      return `T${ev.t} · ${ev.kind} · ${secs} s${win}${purge}\n${ev.note || ""}`;
+    }
+
     function stageLabel(stage) {
       const map = {
         queued:            t("ui.preflight.stage_queued"),
@@ -2844,6 +3098,33 @@ createApp({
       await _startServerPreflightPrint(mode, headPlan);
     }
 
+    // The worker "rewrite" payload for a mode/plan - shared by "print" and
+    // "download" so the file you download is byte-identical to the one that
+    // would have been printed.
+    function _rewritePayload(mode, headPlan) {
+      const payload = {jobId: preflightJobId, file: preflightFile, mode};
+      if (mode === "slicer") {
+        // Same (possibly user-edited) remap the server path sends.
+        const remap = {};
+        for (const m of _slicerEffectiveMapping()) {
+          if (!m.slot) continue;
+          const synth = m.slot.ace * 4 + m.slot.slot;
+          if (synth !== m.t) remap[String(m.t)] = synth;
+        }
+        payload.remapOverride = remap;
+      } else if (mode === "head") {
+        const hp = headPlan || "loadout";
+        payload.headPlan = hp;
+        if (hp === "loadout") {
+          const asn = {};
+          const eff = _headEffectiveAssignment();
+          for (const k of Object.keys(eff)) { if (eff[k]) asn[String(k)] = eff[k]; }
+          payload.headAssignment = asn;
+        }
+      }
+      return payload;
+    }
+
     // Browser path: rewrite in the worker, upload straight to Moonraker.
     async function _startLocalPreflightPrint(mode, headPlan) {
       const rep = preflight.report;
@@ -2854,26 +3135,7 @@ createApp({
       const startedAt = Date.now();
       const MIN_VISIBLE_MS = 1500;
       try {
-        const payload = {jobId: preflightJobId, file: preflightFile, mode};
-        if (mode === "slicer") {
-          // Same (possibly user-edited) remap the server path sends.
-          const remap = {};
-          for (const m of _slicerEffectiveMapping()) {
-            if (!m.slot) continue;
-            const synth = m.slot.ace * 4 + m.slot.slot;
-            if (synth !== m.t) remap[String(m.t)] = synth;
-          }
-          payload.remapOverride = remap;
-        } else if (mode === "head") {
-          const hp = headPlan || "loadout";
-          payload.headPlan = hp;
-          if (hp === "loadout") {
-            const asn = {};
-            const eff = _headEffectiveAssignment();
-            for (const k of Object.keys(eff)) { if (eff[k]) asn[String(k)] = eff[k]; }
-            payload.headAssignment = asn;
-          }
-        }
+        const payload = _rewritePayload(mode, headPlan);
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
@@ -2902,6 +3164,53 @@ createApp({
         if (wait > 0) await new Promise(res => setTimeout(res, wait));
         setMacroLog(t("ui.upload.started", {name: rep.filename || preflightFile.name}));
         closePreflight();
+      } catch (e) {
+        preflight.error = e.message || String(e);
+      } finally {
+        preflight.sending = "";
+        if (preflight.progress) preflight.progress.running = false;
+      }
+    }
+
+    // Download the rewritten g-code instead of printing it. The worker
+    // already holds the rewritten text, so this is the same pipeline with a
+    // Blob instead of an upload - useful offline (mock mode has no printer to
+    // print on) and on a real printer for slicer-side workflows.
+    async function downloadRewrittenGcode(mode, headPlan) {
+      const rep = preflight.report;
+      if (!rep || preflight.busy || preflight.sending) return;
+      if (!rep.local || !preflightFile || !preflightJobId) {
+        preflight.error = t("ui.preflight.download_local_only");
+        return;
+      }
+      preflight.sending = "download";
+      preflight.error = "";
+      preflight.progress = {percent: 0, stage: "queued", running: true};
+      try {
+        const payload = _rewritePayload(mode, headPlan);
+        const live = await loadLiveSlotsForPreflight();
+        payload.liveSlots = live.live_slots;
+        payload.headCtx   = live.head_ctx;
+        const j = await runPreflightWorker("rewrite", payload, msg => {
+          preflight.progress = {
+            percent: Number(msg.percent || 0),
+            stage:   String(msg.stage || ""), running: true};
+        });
+        const base = (rep.filename || preflightFile.name || "print.gcode")
+          .replace(/\.(gcode|gco|g)$/i, "");
+        const suffix = (mode === "head") ? (headPlan || "loadout") : mode;
+        const url = URL.createObjectURL(
+          new Blob([j.text], {type: "text/plain"}));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${base}.multiace-${suffix}.gcode`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke late: Safari cancels the download if the URL dies first.
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        preflight.progress = {percent: 100, stage: "done", running: false};
+        setMacroLog(t("ui.preflight.download_done", {name: a.download}));
       } catch (e) {
         preflight.error = e.message || String(e);
       } finally {
@@ -3112,6 +3421,165 @@ createApp({
     function toggleSidebar() { sidebar.open = !sidebar.open; }
     function setSidebarPane(p) { sidebar.pane = p; sidebar.open = true; }
 
+    // =================================================================
+    // Live print control (plan section 8)
+    //
+    // Everything you can do by tapping the printer's own screen mid-print.
+    // The values shown are READ BACK from /api/state, never remembered
+    // locally: a change made on the physical display has to show up here,
+    // and a local copy is how the two front-ends start disagreeing about
+    // the machine.
+    // =================================================================
+    const printCtl = reactive({
+      speed_factor: 100, extrude_factor: 100, fan: 0, z_offset: 0,
+      nozzle: {temp: null, target: null}, bed: {temp: null, target: null},
+      progress: 0, message: "", state: "", filename: "",
+    });
+    const printCtlLimits = reactive({
+      ranges: {speed: {min: 25, max: 300}, flow: {min: 75, max: 125},
+               fan: {min: 0, max: 100}},
+      nozzle: {min: 0, max: 300}, bed: {min: 0, max: 120},
+      babystep: {step: 0.05, total: 0.5, used: 0},
+    });
+    // Local slider positions. Only these are local - they follow the
+    // readback except while the user is actually dragging one.
+    const printCtlDraft = reactive({speed: 100, flow: 100, fan: 0});
+    const printCtlDragging = ref("");
+    const printCtlBusy = ref("");
+    const printCtlError = ref("");
+
+    function applyPrintControlState(s) {
+      const pc = s && s.print_control;
+      if (!pc) return;
+      Object.assign(printCtl, pc);
+      // Do not fight the finger: leave the slider the user is holding
+      // where they put it.
+      if (printCtlDragging.value !== "speed") printCtlDraft.speed = pc.speed_factor;
+      if (printCtlDragging.value !== "flow")  printCtlDraft.flow  = pc.extrude_factor;
+      if (printCtlDragging.value !== "fan")   printCtlDraft.fan   = pc.fan;
+    }
+
+    async function loadPrintControlLimits() {
+      try {
+        const r = await fetch(`${API}/print-control/limits`);
+        if (r.ok) Object.assign(printCtlLimits, await r.json());
+      } catch (_) {}
+    }
+
+    async function sendPrintControl(verb, value) {
+      printCtlBusy.value = verb;
+      printCtlError.value = "";
+      try {
+        const r = await fetch(`${API}/print-control`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(value === undefined ? {verb} : {verb, value}),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        // Snap the slider to what the server ACTUALLY applied - it clamps,
+        // and a control showing a value the printer refused is a control
+        // that lies about the machine.
+        if (j.applied !== null && j.applied !== undefined) {
+          if (verb === "speed") printCtlDraft.speed = j.applied;
+          if (verb === "flow")  printCtlDraft.flow  = j.applied;
+          if (verb === "fan")   printCtlDraft.fan   = j.applied;
+        }
+        if (j.ok === false && j.detail) printCtlError.value = j.detail;
+        if (verb === "babystep" && j.total_mm !== undefined) {
+          printCtlLimits.babystep.used = j.total_mm;
+        }
+        await reloadState();
+        return j;
+      } catch (e) {
+        printCtlError.value = e.message || String(e);
+      } finally {
+        printCtlBusy.value = "";
+      }
+    }
+
+    // One command per ~250 ms of dragging, and ALWAYS a final command on
+    // release: an undelivered last event is how a slider lies about the
+    // machine's state.
+    let _ctlDebounce = null;
+    function printCtlSlide(verb, value) {
+      printCtlDragging.value = verb;
+      if (_ctlDebounce) clearTimeout(_ctlDebounce);
+      _ctlDebounce = setTimeout(() => sendPrintControl(verb, Number(value)), 250);
+    }
+    function printCtlRelease(verb, value) {
+      if (_ctlDebounce) { clearTimeout(_ctlDebounce); _ctlDebounce = null; }
+      printCtlDragging.value = "";
+      sendPrintControl(verb, Number(value));
+    }
+    function printCtlReset(verb) {
+      printCtlRelease(verb, verb === "fan" ? 0 : 100);
+    }
+    function printCtlCancel() {
+      confirm({
+        title: t("ui.print_control.cancel_title"),
+        message: t("ui.print_control.cancel_msg"),
+        okLabel: t("ui.print_control.cancel_ok"),
+        onOk: () => sendPrintControl("cancel"),
+      });
+    }
+    // Pause deliberately gets NO confirm: pausing is recoverable, and a
+    // dialog on the control you reach for in a hurry is its own hazard.
+
+    const printControlShown = computed(() =>
+      !panelMode && sidebar.open && sidebar.pane === "print");
+    watch(printControlShown, on => { if (on) loadPrintControlLimits(); });
+
+    // =================================================================
+    // Print history (plan section 4)
+    //
+    // Moonraker owns duration and result; multiACE owns the plan, the
+    // assignment and the swaps. This tab shows the join, not a copy.
+    // =================================================================
+    const history = reactive({
+      loaded: false, busy: false, error: "", jobs: [], printerUi: "",
+      detail: null,
+    });
+
+    async function loadHistory() {
+      history.busy = true;
+      history.error = "";
+      try {
+        const r = await fetch(`${API}/history?limit=50`);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        history.jobs = j.jobs || [];
+        history.printerUi = j.printer_ui || "";
+        history.loaded = true;
+      } catch (e) {
+        history.error = e.message || String(e);
+      } finally {
+        history.busy = false;
+      }
+    }
+    function openHistoryDetail(row) {
+      history.detail = (history.detail && history.detail.id === row.id)
+        ? null : row;
+    }
+    function historyColors(row) {
+      const asn = (row && row.multiace && row.multiace.assignment) || {};
+      return Object.keys(asn).map(h => ({
+        head: h, ace: asn[h].ace_index, slot: asn[h].slot,
+        color: asn[h].color ? ("#" + String(asn[h].color).replace(/^#/, ""))
+                            : "#666",
+      }));
+    }
+    // Estimate vs actual, for the one line that tells you whether the
+    // number on the preflight screen was worth anything.
+    function historyAccuracy(row) {
+      const est = row && row.multiace && row.multiace.estimate;
+      const actual = row && row.duration;
+      if (!est || !est.total_s || !actual) return null;
+      const pct = Math.round(((actual - est.total_s) / est.total_s) * 1000) / 10;
+      return {predicted: est.total_s, actual, pct};
+    }
+    watch(() => tab.value, v => { if (v === "history" && !history.loaded) loadHistory(); });
+
     const webcam = reactive({
       loaded: false, available: false, reason: "", name: "",
       // Cache-buster: an MJPEG <img> that was torn down keeps its old
@@ -3233,6 +3701,22 @@ createApp({
       try { await fetch(`${API}/retry/${action}`, {method: "POST"}); }
       catch (_) {}
       finally { setTimeout(() => { retryBusy.value = ""; }, 500); }
+    }
+
+    // ACE_RESCAN from the §7 banner. Users should not have to know a
+    // macro exists to recover from "I switched the ACE on afterwards".
+    async function aceRescan() {
+      if (aceRescanBusy.value) return;
+      aceRescanBusy.value = true;
+      try {
+        await fetch(`${API}/plugin-api/gcode`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({script: "ACE_RESCAN"}),
+        });
+        await reloadState();
+      } catch (_) {}
+      finally { aceRescanBusy.value = false; }
     }
 
     // =================================================================
@@ -3506,6 +3990,11 @@ createApp({
       tipform, loadTipform, tipformAddRow, tipformRemoveRow, saveTipform, tipformRestartPending, tipformNameOptions,
       TIPFORM_STEP_TYPES, tipformToggleBuilder, tipformAddStep, tipformRemoveStep, tipformStepsToTable, tipformStepPlaceholder, tipformInsertStock,
       preflight, closePreflight, startPreflightPrint, applyLoadout, stageLabel,
+      downloadRewrittenGcode, fmtDuration, estimateDelta, wastePercent,
+      gpreview, gpreviewCanvasEl, openGcodePreview, closeGcodePreview,
+      gpreviewTogglePlay,
+      swimLanes, swapColor, swapTitle,
+      virtualLoadout, virtualSeed, virtualAceCount, virtualExport,
       tierLabel, tierWarn, rgbDec, sortedMapping, slicerColorsInPrintOrder,
       slotKey, textOn, slicerSlotOptions, slicerEffectiveSlot, onSlicerSlotChange,
       recalcSlicer, slicerSwapsDisplay,
@@ -3533,10 +4022,16 @@ createApp({
       fmtArgs, cmdLabel,
       uploading, uploadInput, triggerUpload, onUploadGcode,
       sidebar, toggleSidebar, setSidebarPane,
+      printCtl, printCtlLimits, printCtlDraft, printCtlBusy, printCtlError,
+      printCtlSlide, printCtlRelease, printCtlReset, printCtlCancel,
+      sendPrintControl,
+      history, loadHistory, openHistoryDetail, historyColors,
+      historyAccuracy,
       webcam, webcamShown, webcamSrc, loadWebcam,
       consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,
       consoleShown, sendConsole, consoleTime, loadConsole,
       retryState, retryBusy, retryPct, retryControl,
+      aceStartup, aceRescanBusy, aceRescan,
       firmware, firmwareWarn,
       applyModal, closeApplyModal, applyRestart, restartLabel,
       debugPanel, simulateEvent, debugSince,

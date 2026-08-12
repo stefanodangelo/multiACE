@@ -159,6 +159,7 @@
     <nav>
       <button v-if="state.mode !== 'normal'"
               :class="{active: tab==='dashboard'}" @click="tab='dashboard'">{{ t('ui.tabs.dashboard') }}</button>
+      <button :class="{active: tab==='history'}" @click="tab='history'">{{ t('ui.tabs.history') }}</button>
       <button :class="{active: tab==='config'}" @click="tab='config'">{{ t('ui.tabs.config') }}</button>
       <button v-for="p in plugins.items" :key="p.name"
               :class="{active: tab===('plugin:'+p.name)}"
@@ -185,6 +186,19 @@
     <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
   <div v-if="rebootNeeded && !panelMode" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
+  <!-- §7: an ACE that was powered on after the printer. Klipper is up and
+       multiACE is still scanning, so this is a "switch it on" prompt with
+       a Rescan button - not the old FIRMWARE_RESTART dead end. -->
+  <div v-if="aceStartup && !panelMode" class="retry-banner">
+    <span class="retry-spin">↻</span>
+    <span class="retry-text">
+      {{ t('ui.ace_startup.waiting', {
+           found: aceStartup.found, expected: aceStartup.expected }) }}
+    </span>
+    <button class="retry-now" @click="aceRescan" :disabled="aceRescanBusy">
+      {{ t('ui.ace_startup.rescan') }}
+    </button>
+  </div>
   <!-- Auto-retry banner. Full width under the header on purpose: a load
        can be started from the dashboard, a macro or the print itself, so
        "slot 2 is on attempt 2 of 3" must be visible wherever you are. -->
@@ -450,6 +464,89 @@
         <pre v-if="macroLog" class="macro-log">{{ macroLog }}</pre>
       </transition>
     </section>
+    <!-- HISTORY: Moonraker's job list joined with multiACE's own record.
+         Moonraker owns duration and result; multiACE owns the plan, the
+         assignment and the swaps. Never a copy of Moonraker's data. -->
+    <section v-show="tab==='history'">
+      <div class="row">
+        <h3>{{ t('ui.history.title') }}</h3>
+        <button @click="loadHistory" :disabled="history.busy">
+          {{ history.busy ? t('ui.common.saving') : t('ui.common.reload') }}
+        </button>
+        <a v-if="history.printerUi" :href="history.printerUi" target="_blank"
+           rel="noopener" class="muted small">{{ t('ui.history.open_printer_ui') }}</a>
+      </div>
+      <p v-if="history.error" class="error">{{ history.error }}</p>
+      <p v-else-if="history.loaded && !history.jobs.length" class="muted">
+        {{ t('ui.history.empty') }}
+      </p>
+      <table v-else class="history-table">
+        <thead>
+          <tr>
+            <th>{{ t('ui.history.date') }}</th>
+            <th>{{ t('ui.history.file') }}</th>
+            <th>{{ t('ui.history.duration') }}</th>
+            <th>{{ t('ui.history.colors') }}</th>
+            <th>{{ t('ui.history.swaps') }}</th>
+            <th>{{ t('ui.history.filament') }}</th>
+            <th>{{ t('ui.history.result') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="row in history.jobs" :key="row.id || row.job_id">
+            <tr class="history-row" @click="openHistoryDetail(row)">
+              <td>{{ new Date((row.start_time || 0) * 1000).toLocaleString() }}</td>
+              <td>{{ row.filename }}
+                <span v-if="row.ambiguous" class="muted small"
+                      :title="t('ui.history.ambiguous_hint')">· {{ t('ui.history.ambiguous') }}</span>
+              </td>
+              <td>{{ fmtDuration(row.duration) }}</td>
+              <td>
+                <span v-for="c in historyColors(row)" :key="'hc-'+c.head"
+                      class="swatch" :style="{background: c.color}"
+                      :title="'T' + c.head + ' · ACE ' + c.ace + ' / slot ' + c.slot"></span>
+              </td>
+              <td>{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
+              <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
+              <td><span class="pill">{{ row.status || '–' }}</span></td>
+            </tr>
+            <tr v-if="history.detail && history.detail.id === row.id"
+                class="history-detail">
+              <td colspan="7">
+                <div v-if="row.multiace">
+                  <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
+                     · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>
+                  <!-- The one line that says whether the preflight number
+                       was worth anything. -->
+                  <p v-if="historyAccuracy(row)">
+                    <b>{{ t('ui.history.accuracy') }}:</b>
+                    {{ t('ui.history.accuracy_line', {
+                         predicted: fmtDuration(historyAccuracy(row).predicted),
+                         actual: fmtDuration(historyAccuracy(row).actual),
+                         pct: historyAccuracy(row).pct }) }}
+                  </p>
+                  <table class="history-swaps" v-if="(row.multiace.swaps || []).length">
+                    <tr v-for="(sw, i) in row.multiace.swaps" :key="'sw-'+i">
+                      <td>{{ sw.kind }}</td>
+                      <td>T{{ sw.head }} · ACE {{ sw.ace }} / {{ sw.slot }}</td>
+                      <td>{{ Math.round(sw.seconds) }} s</td>
+                    </tr>
+                  </table>
+                  <p v-if="row.multiace.neighbor_retracts
+                           && Object.keys(row.multiace.neighbor_retracts).length"
+                     class="muted small">
+                    {{ t('ui.history.neighbor_retracts') }}:
+                    {{ JSON.stringify(row.multiace.neighbor_retracts) }}
+                  </p>
+                </div>
+                <p v-else class="muted small">{{ t('ui.history.no_multiace_record') }}</p>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </section>
+
     <section v-show="tab==='config'">
       <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
       <h3>{{ t('ui.config.mode') }}</h3>
@@ -798,6 +895,8 @@ reboot</pre>
                @click="setSidebarPane('webcam')">{{ t('ui.sidebar.webcam') }}</button>
        <button :class="{active: sidebar.pane==='console'}"
                @click="setSidebarPane('console')">{{ t('ui.sidebar.console') }}</button>
+       <button :class="{active: sidebar.pane==='print'}"
+               @click="setSidebarPane('print')">{{ t('ui.sidebar.print') }}</button>
        <button class="side-close" @click="toggleSidebar"
                :title="t('ui.sidebar.collapse')">×</button>
      </div>
@@ -814,6 +913,103 @@ reboot</pre>
        <div class="side-foot" v-if="webcam.available">
          <span class="muted small">{{ webcam.name }}</span>
          <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+       </div>
+     </div>
+     <!-- Live print control. A pane rather than a tab: while a print runs
+          you want it one click from the dashboard, not on another page.
+          Every value here is read BACK from the printer, so a change made
+          on the physical display shows up immediately. -->
+     <div v-show="sidebar.pane==='print'" class="side-body side-print">
+       <p v-if="printCtlError" class="error small">{{ printCtlError }}</p>
+       <div class="pc-status">
+         <span class="pill">{{ printCtl.state || '–' }}</span>
+         <span v-if="printCtl.progress" class="pill">{{ printCtl.progress }} %</span>
+         <span v-if="printCtl.message" class="muted small">{{ printCtl.message }}</span>
+       </div>
+
+       <label class="pc-row">
+         <span>{{ t('ui.print_control.speed') }}</span>
+         <input type="range" :min="printCtlLimits.ranges.speed.min"
+                :max="printCtlLimits.ranges.speed.max" step="5"
+                v-model.number="printCtlDraft.speed"
+                @input="printCtlSlide('speed', printCtlDraft.speed)"
+                @change="printCtlRelease('speed', printCtlDraft.speed)">
+         <b>{{ printCtl.speed_factor }} %</b>
+         <button class="pc-reset" @click="printCtlReset('speed')"
+                 :title="t('ui.print_control.reset_hint')">100 %</button>
+       </label>
+
+       <label class="pc-row">
+         <span>{{ t('ui.print_control.flow') }}</span>
+         <input type="range" :min="printCtlLimits.ranges.flow.min"
+                :max="printCtlLimits.ranges.flow.max" step="1"
+                v-model.number="printCtlDraft.flow"
+                @input="printCtlSlide('flow', printCtlDraft.flow)"
+                @change="printCtlRelease('flow', printCtlDraft.flow)">
+         <b>{{ printCtl.extrude_factor }} %</b>
+         <button class="pc-reset" @click="printCtlReset('flow')"
+                 :title="t('ui.print_control.reset_hint')">100 %</button>
+       </label>
+
+       <label class="pc-row">
+         <span>{{ t('ui.print_control.fan') }}</span>
+         <input type="range" min="0" max="100" step="5"
+                v-model.number="printCtlDraft.fan"
+                @input="printCtlSlide('fan', printCtlDraft.fan)"
+                @change="printCtlRelease('fan', printCtlDraft.fan)">
+         <b>{{ printCtl.fan }} %</b>
+         <button class="pc-reset" @click="printCtlReset('fan')">0 %</button>
+       </label>
+
+       <div class="pc-row pc-temps">
+         <span>{{ t('ui.print_control.nozzle') }}</span>
+         <b>{{ printCtl.nozzle.temp !== null ? Math.round(printCtl.nozzle.temp) : '–' }}
+            / {{ printCtl.nozzle.target !== null ? Math.round(printCtl.nozzle.target) : '–' }} °C</b>
+         <input type="number" class="pc-temp-in"
+                :min="printCtlLimits.nozzle.min" :max="printCtlLimits.nozzle.max"
+                :placeholder="printCtlLimits.nozzle.max"
+                @change="sendPrintControl('nozzle', Number($event.target.value))">
+       </div>
+       <div class="pc-row pc-temps">
+         <span>{{ t('ui.print_control.bed') }}</span>
+         <b>{{ printCtl.bed.temp !== null ? Math.round(printCtl.bed.temp) : '–' }}
+            / {{ printCtl.bed.target !== null ? Math.round(printCtl.bed.target) : '–' }} °C</b>
+         <input type="number" class="pc-temp-in"
+                :min="printCtlLimits.bed.min" :max="printCtlLimits.bed.max"
+                :placeholder="printCtlLimits.bed.max"
+                @change="sendPrintControl('bed', Number($event.target.value))">
+       </div>
+
+       <!-- Babystep is BUTTONS, never a slider: a slider makes it trivial
+            to send a large negative delta in one gesture, and that drives
+            the nozzle into the plate. -->
+       <div class="pc-row pc-baby">
+         <span>{{ t('ui.print_control.babystep') }}</span>
+         <button @click="sendPrintControl('babystep', -0.05)">−0.05</button>
+         <button @click="sendPrintControl('babystep', -0.01)">−0.01</button>
+         <b>{{ printCtl.z_offset.toFixed(3) }} mm</b>
+         <button @click="sendPrintControl('babystep', 0.01)">+0.01</button>
+         <button @click="sendPrintControl('babystep', 0.05)">+0.05</button>
+       </div>
+       <p class="muted small">
+         {{ t('ui.print_control.babystep_used', {
+              used: printCtlLimits.babystep.used,
+              max: printCtlLimits.babystep.total }) }}
+       </p>
+
+       <div class="pc-row pc-actions">
+         <button @click="sendPrintControl('pause')"
+                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.pause') }}</button>
+         <button @click="sendPrintControl('resume')"
+                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.resume') }}</button>
+         <button class="warn" @click="printCtlCancel"
+                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.cancel') }}</button>
+       </div>
+       <!-- The controls Fluidd cannot offer, which is why this pane exists
+            here rather than as a link out. -->
+       <div class="pc-row pc-actions" v-if="retryState">
+         <button @click="retryControl('now')">{{ t('ui.retry.now') }}</button>
+         <button class="warn" @click="retryControl('cancel')">{{ t('ui.retry.stop') }}</button>
        </div>
      </div>
      <div v-show="sidebar.pane==='console'" class="side-body side-console">
@@ -992,6 +1188,10 @@ reboot</pre>
                :style="{width: preflight.progress.percent + '%'}"></div>
         </div>
       </div>
+      <p v-if="preflight.report && preflight.report.virtual_loadout"
+         class="virtual-banner">
+        {{ t('ui.virtual.report_banner') }}
+      </p>
       <template v-if="preflight.report">
         <div class="preflight-prefs">
           <label><input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}</label>
@@ -1055,6 +1255,76 @@ reboot</pre>
                 <span v-if="preflight.report.plans[mode].reason"
                       class="muted small">- {{ preflight.report.plans[mode].reason }}</span>
               </span>
+            </div>
+            <!-- Time & filament estimate. Deliberately says "estimated",
+                 and shows the assumptions: the numbers are MODELLED from
+                 ace.cfg until print history calibrates them (plan 1.2). -->
+            <div v-if="preflight.report.plans[mode].estimate"
+                 class="estimate-card">
+              <div class="estimate-row">
+                <span class="estimate-big">{{ fmtDuration(preflight.report.plans[mode].estimate.total_s) }}</span>
+                <span class="estimate-delta"
+                      v-if="estimateDelta(preflight.report.plans[mode].estimate)">
+                  {{ estimateDelta(preflight.report.plans[mode].estimate) }}
+                </span>
+                <span class="pill estimate-conf"
+                      :class="'conf-' + preflight.report.plans[mode].estimate.confidence"
+                      :title="t('ui.preflight.est_confidence_hint')">
+                  {{ t('ui.preflight.est_conf_' + preflight.report.plans[mode].estimate.confidence) }}
+                </span>
+              </div>
+              <div class="estimate-row muted small">
+                {{ t('ui.preflight.est_filament', {
+                     m: preflight.report.plans[mode].estimate.totals.m,
+                     g: preflight.report.plans[mode].estimate.totals.g }) }}
+                <span v-if="preflight.report.plans[mode].estimate.purge.g">
+                  · {{ t('ui.preflight.est_waste', {
+                         g: preflight.report.plans[mode].estimate.purge.g,
+                         pct: wastePercent(preflight.report.plans[mode].estimate) }) }}
+                  <span v-if="!preflight.report.plans[mode].estimate.purge.counted_in_total">
+                    ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
+                </span>
+                · {{ t('ui.preflight.est_swaps', {
+                       inline: preflight.report.plans[mode].estimate.inline_swaps,
+                       bg: preflight.report.plans[mode].estimate.bg_swaps }) }}
+              </div>
+              <details v-if="preflight.report.plans[mode].estimate.per_color.length">
+                <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
+                <table class="estimate-per-color">
+                  <tr v-for="row in preflight.report.plans[mode].estimate.per_color"
+                      :key="'ec-mode-' + row.t">
+                    <td><span class="swatch"
+                              :style="{background: (preflight.report.slicer_colors.find(c => c.t === row.t) || {}).hex || '#444'}"></span>
+                        T{{ row.t }}</td>
+                    <td>{{ row.total_m }} m</td>
+                    <td>{{ row.print_g }} g</td>
+                    <td v-if="row.purge_g">+{{ row.purge_g }} g {{ t('ui.preflight.est_purge') }}</td>
+                  </tr>
+                </table>
+              </details>
+              <ul class="estimate-assumptions muted small">
+                <li v-for="(a, i) in preflight.report.plans[mode].estimate.assumptions"
+                    :key="'ea-mode-' + i">{{ a }}</li>
+              </ul>
+              <!-- Swim lane per head, one block per toolchange along the
+                   print. Inline swaps are a red stall block (the print is
+                   waiting); background swaps are hatched on the idle head
+                   (the print is not). That difference IS the plan. -->
+              <details v-if="(preflight.report.plans[mode].timeline || []).length">
+                <summary class="muted small">{{ t('ui.preflight.timeline') }}</summary>
+                <div class="swimlanes">
+                  <div v-for="lane in swimLanes(preflight.report.plans[mode])"
+                       :key="'sl-mode-' + lane.head" class="swimlane">
+                    <span class="swimlane-head">T{{ dispIdx(lane.head) }}</span>
+                    <span class="swimlane-track">
+                      <i v-for="(ev, i) in lane.events" :key="'sle-'+i"
+                         class="swim-block" :class="'swim-' + ev.kind"
+                         :style="{background: swapColor(ev)}"
+                         :title="swapTitle(ev)"></i>
+                    </span>
+                  </div>
+                </div>
+              </details>
             </div>
             <table class="preflight-mapping" v-if="preflight.report.plans[mode].mapping.length">
               <thead>
@@ -1123,6 +1393,16 @@ reboot</pre>
                 {{ preflight.sending === mode
                      ? t('ui.preflight.sending')
                      : t('ui.preflight.go_' + mode) }}
+              </button>
+              <!-- Offline (mock mode has no printer to print on) and for
+                   slicer-side workflows on a real one. -->
+              <button v-if="preflight.report.local"
+                      :disabled="preflight.sending !== ''"
+                      :title="t('ui.preflight.download_hint')"
+                      @click="downloadRewrittenGcode(mode)">
+                {{ preflight.sending === 'download'
+                     ? t('ui.preflight.sending')
+                     : t('ui.preflight.download') }}
               </button>
             </div>
           </div>
@@ -1239,6 +1519,72 @@ reboot</pre>
                 </tbody>
               </table>
 
+            <!-- Time & filament estimate. Deliberately says "estimated",
+                 and shows the assumptions: the numbers are MODELLED from
+                 ace.cfg until print history calibrates them (plan 1.2). -->
+            <div v-if="preflight.report.plans[hp].estimate"
+                 class="estimate-card">
+              <div class="estimate-row">
+                <span class="estimate-big">{{ fmtDuration(preflight.report.plans[hp].estimate.total_s) }}</span>
+                <span class="estimate-delta"
+                      v-if="estimateDelta(preflight.report.plans[hp].estimate)">
+                  {{ estimateDelta(preflight.report.plans[hp].estimate) }}
+                </span>
+                <span class="pill estimate-conf"
+                      :class="'conf-' + preflight.report.plans[hp].estimate.confidence"
+                      :title="t('ui.preflight.est_confidence_hint')">
+                  {{ t('ui.preflight.est_conf_' + preflight.report.plans[hp].estimate.confidence) }}
+                </span>
+              </div>
+              <div class="estimate-row muted small">
+                {{ t('ui.preflight.est_filament', {
+                     m: preflight.report.plans[hp].estimate.totals.m,
+                     g: preflight.report.plans[hp].estimate.totals.g }) }}
+                <span v-if="preflight.report.plans[hp].estimate.purge.g">
+                  · {{ t('ui.preflight.est_waste', {
+                         g: preflight.report.plans[hp].estimate.purge.g,
+                         pct: wastePercent(preflight.report.plans[hp].estimate) }) }}
+                  <span v-if="!preflight.report.plans[hp].estimate.purge.counted_in_total">
+                    ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
+                </span>
+                · {{ t('ui.preflight.est_swaps', {
+                       inline: preflight.report.plans[hp].estimate.inline_swaps,
+                       bg: preflight.report.plans[hp].estimate.bg_swaps }) }}
+              </div>
+              <details v-if="preflight.report.plans[hp].estimate.per_color.length">
+                <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
+                <table class="estimate-per-color">
+                  <tr v-for="row in preflight.report.plans[hp].estimate.per_color"
+                      :key="'ec-hp-' + row.t">
+                    <td><span class="swatch"
+                              :style="{background: (preflight.report.slicer_colors.find(c => c.t === row.t) || {}).hex || '#444'}"></span>
+                        T{{ row.t }}</td>
+                    <td>{{ row.total_m }} m</td>
+                    <td>{{ row.print_g }} g</td>
+                    <td v-if="row.purge_g">+{{ row.purge_g }} g {{ t('ui.preflight.est_purge') }}</td>
+                  </tr>
+                </table>
+              </details>
+              <ul class="estimate-assumptions muted small">
+                <li v-for="(a, i) in preflight.report.plans[hp].estimate.assumptions"
+                    :key="'ea-hp-' + i">{{ a }}</li>
+              </ul>
+              <details v-if="(preflight.report.plans[hp].timeline || []).length">
+                <summary class="muted small">{{ t('ui.preflight.timeline') }}</summary>
+                <div class="swimlanes">
+                  <div v-for="lane in swimLanes(preflight.report.plans[hp])"
+                       :key="'sl-hp-' + lane.head" class="swimlane">
+                    <span class="swimlane-head">T{{ dispIdx(lane.head) }}</span>
+                    <span class="swimlane-track">
+                      <i v-for="(ev, i) in lane.events" :key="'sleh-'+i"
+                         class="swim-block" :class="'swim-' + ev.kind"
+                         :style="{background: swapColor(ev)}"
+                         :title="swapTitle(ev)"></i>
+                    </span>
+                  </div>
+                </div>
+              </details>
+            </div>
               <table v-else-if="preflight.report.plans[hp].mapping.length"
                      class="preflight-mapping">
                 <thead>
@@ -1289,11 +1635,95 @@ reboot</pre>
                        ? t('ui.preflight.sending')
                        : t('ui.preflight.head_go_' + hp) }}
                 </button>
+                <button v-if="preflight.report.local"
+                        :disabled="preflight.sending !== ''"
+                        :title="t('ui.preflight.download_hint')"
+                        @click="downloadRewrittenGcode('head', hp)">
+                  {{ preflight.sending === 'download'
+                       ? t('ui.preflight.sending')
+                       : t('ui.preflight.download') }}
+                </button>
               </div>
             </div>
           </template>
         </template>
       </template>
+      <!-- VIRTUAL LOADOUT (plan section 2.2): a what-if overlay - "would 2
+           ACEs beat 1?". It NEVER writes slot state and never reaches the
+           rewrite, which reads the live loadout and only the live loadout.
+           A plan computed against spools that are not in the machine is
+           labelled as such wherever it appears. -->
+      <details class="virtual-loadout">
+        <summary class="muted small">{{ t('ui.virtual.title') }}</summary>
+        <div class="row">
+          <label>
+            <input type="checkbox" v-model="virtualLoadout.enabled">
+            {{ t('ui.virtual.enable') }}
+          </label>
+          <button @click="virtualSeed(1)">{{ t('ui.virtual.seed_1') }}</button>
+          <button @click="virtualSeed(2)">{{ t('ui.virtual.seed_2') }}</button>
+          <button @click="virtualSeed(3)">{{ t('ui.virtual.seed_3') }}</button>
+          <button @click="virtualExport"
+                  :disabled="!virtualLoadout.slots.length">{{ t('ui.virtual.export') }}</button>
+        </div>
+        <p class="muted small">{{ t('ui.virtual.hint') }}</p>
+        <table class="virtual-table" v-if="virtualLoadout.slots.length">
+          <tr v-for="(row, i) in virtualLoadout.slots" :key="'vs-'+i">
+            <td>ACE {{ dispIdx(row.ace) }} / {{ t('ui.virtual.slot') }} {{ dispIdx(row.slot) }}</td>
+            <td><input v-model="row.material" class="virtual-mat"
+                       :placeholder="t('ui.virtual.material')"></td>
+            <td><input type="color" v-model="row.color"></td>
+          </tr>
+        </table>
+        <p v-if="virtualLoadout.enabled && virtualLoadout.slots.length"
+           class="warn small">
+          {{ t('ui.virtual.active_warning', {aces: virtualAceCount()}) }}
+        </p>
+      </details>
+
+      <!-- G-CODE PREVIEW (plan section 9): parsed and rendered entirely in
+           the browser, from the file already selected - no upload, no
+           Moonraker, no printer required. Colours by the SLICER's tool
+           index (the file's own colours), so it answers "does this file
+           look right at all", not "what will multiACE's plan actually
+           print" - the swim-lane timeline above answers that one. -->
+      <div class="row" v-if="preflight.report">
+        <button @click="gpreview.open ? closeGcodePreview() : openGcodePreview()"
+                :disabled="gpreview.busy">
+          {{ gpreview.busy ? t('ui.common.saving')
+             : (gpreview.open ? t('ui.gpreview.hide') : t('ui.gpreview.show')) }}
+        </button>
+        <span v-if="gpreview.busy" class="muted small">{{ gpreview.progress }}%</span>
+        <span v-if="gpreview.error" class="error small">{{ gpreview.error }}</span>
+      </div>
+      <div v-if="gpreview.open" class="gpreview-pane">
+        <canvas ref="gpreviewCanvasEl" class="gpreview-canvas"></canvas>
+        <div class="gpreview-controls">
+          <button @click="gpreviewTogglePlay">
+            {{ gpreview.playing ? t('ui.gpreview.pause') : t('ui.gpreview.play') }}
+          </button>
+          <input type="range" min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
+                 v-model.number="gpreview.layer" class="gpreview-slider">
+          <span class="gpreview-layer-label">
+            {{ t('ui.gpreview.layer', {n: gpreview.layer + 1, total: gpreview.totalLayers}) }}
+          </span>
+          <label class="gpreview-toggle">
+            <input type="checkbox" v-model="gpreview.cumulative">
+            {{ t('ui.gpreview.cumulative') }}
+          </label>
+          <label class="gpreview-toggle">
+            <input type="checkbox" v-model="gpreview.showTravel">
+            {{ t('ui.gpreview.show_travel') }}
+          </label>
+        </div>
+        <div class="gpreview-legend" v-if="preflight.report.slicer_colors">
+          <span v-for="c in preflight.report.slicer_colors" :key="'gpl-'+c.t"
+                class="gpreview-legend-item">
+            <i class="swatch" :style="{background: c.hex}"></i>
+            T{{ c.t }} · {{ c.material || '?' }}
+          </span>
+        </div>
+      </div>
       <div class="row">
         <button @click="closePreflight"
                 :disabled="preflight.sending !== ''">{{ t('ui.common.cancel') }}</button>
@@ -1376,6 +1806,7 @@ reboot</pre>
      internet at the browser: the CDN reference left the page as a bare,
      unmounted HTML skeleton whenever unpkg.com was unreachable. -->
 <script src="vendor/vue.global.prod.js"></script>
+<script src="gcode_preview.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

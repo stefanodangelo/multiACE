@@ -1,5 +1,5 @@
 {
-  "_comment": "Mock /api/state payload for the dev UI (MULTIACE_MOCK_MODE=1). Shape mirrors _parse_state() in multiace/web/backend/main.py - slot keys are idx/state/source, NOT index/status, because that is what the frontend and _live_slots_from_state() read. Regenerate with: curl http://<printer>/multiace/api/state > tests/fixtures/mock_state.json",
+  "_comment": "Mock state: two ACEs, two heads each - the placement the loadout planner can actually background-swap through.",
   "_generated": "2026-08-11",
   "klippy": "ready",
   "printer_state": "printing",

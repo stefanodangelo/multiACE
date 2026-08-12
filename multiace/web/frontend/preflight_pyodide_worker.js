@@ -12,7 +12,8 @@
  * compute byte-identical results, no differ, no drift.
  *
  * Message contract (matches the frontend wiring):
- *   <- {type:"init", pyodideIndexURL, postprocessSrc, coreSrc}
+ *   <- {type:"init", pyodideIndexURL, postprocessSrc, coreSrc, swapCostSrc,
+ *                        costParams, calibration}
  *   -> {type:"ready"}                                   (or {type:"error"})
  *   <- {type:"analyze", jobId, file, liveSlots, headCtx}
  *   -> {type:"analyze-done", jobId, report}             (+ {type:"progress"})
@@ -37,13 +38,23 @@ const files = new Map();
 const slotsByJob = new Map();
 const ctxByJob = new Map();
 
+// The section-1 cost model's inputs, handed over at init from
+// /api/preflight/pysrc so the browser estimate uses the printer's real
+// ace.cfg rather than the shipped defaults.
+let costParams = null;
+let calibration = null;
+
 function progress(jobId, stage, percent) {
   self.postMessage({type: "progress", jobId, stage, percent});
 }
 
-// One-time Pyodide bring-up: load the runtime, then write the two unmodified
-// .py sources into the in-memory FS and import them. The post-processor is pure
-// stdlib (no pip/micropip needed), so a bare Pyodide can run it as-is.
+// One-time Pyodide bring-up: load the runtime, then write the unmodified .py
+// sources into the in-memory FS and import them. All of them are pure stdlib
+// (no pip/micropip needed), so a bare Pyodide can run them as-is.
+//
+// Adding a module here means adding it to /api/preflight/pysrc too - the two
+// lists have to name the same files, or the browser silently runs an older
+// shape than the backend.
 async function ensureInit(msg) {
   if (ready) return;
   if (!initPromise) {
@@ -60,6 +71,14 @@ async function ensureInit(msg) {
       pyodide.FS.writeFile(
         "/multiace/post_process_virtual_toolheads.py", msg.postprocessSrc);
       pyodide.FS.writeFile("/multiace/preflight_core.py", msg.coreSrc);
+      // swap_cost is optional: an install that predates it still gets a
+      // working preflight, just without the estimate. preflight_core imports
+      // it softly for exactly that reason.
+      if (msg.swapCostSrc) {
+        pyodide.FS.writeFile("/multiace/swap_cost.py", msg.swapCostSrc);
+      }
+      costParams = msg.costParams || null;
+      calibration = msg.calibration || null;
       pyodide.runPython(`
 import sys, json
 sys.path.insert(0, "/multiace")
@@ -87,20 +106,24 @@ async function doAnalyze(jobId, file, liveSlots, headCtx) {
   py.globals.set("_hctx", JSON.stringify(headCtx || {mode: "multi"}));
   py.globals.set("_fname", file.name || "upload.gcode");
   py.globals.set("_fsize", file.size || text.length);
+  py.globals.set("_cost", JSON.stringify(costParams || {}));
+  py.globals.set("_calib", JSON.stringify(calibration || {}));
   const reportJson = py.runPython(`
 _live_slots = json.loads(_live)
 _head_ctx   = json.loads(_hctx)
-_colors, _types, _naces, _used, _plan = _core.parse_meta(
-    _pp, _gtext.splitlines(True))
+_colors, _types, _naces, _used, _plan, _hdr = _core.parse_meta(
+    _pp, _gtext.splitlines(True), with_header=True)
 _report = _core.build_report(
     _pp,
     slicer_colors=_colors, slicer_types=_types, num_aces=_naces,
     plan_proxy=_plan, live_slots=_live_slots, head_ctx=_head_ctx,
-    token="", filename=_fname, size=int(_fsize))
+    token="", filename=_fname, size=int(_fsize),
+    header_text=_hdr, cost_params=json.loads(_cost),
+    calibration=json.loads(_calib))
 json.dumps(_report)
 `);
   // free the big string from the Python globals
-  py.runPython("del _gtext, _plan\n");
+  py.runPython("del _gtext, _plan, _hdr\n");
   progress(jobId, "done", 100);
   return JSON.parse(reportJson);
 }
@@ -148,6 +171,7 @@ _final = _core.rewrite_pipeline(
     slicer_colors=_colors, slicer_types=_types, num_aces=_naces,
     live_slots=_live_slots, head_ctx=_head_ctx, mode=_mode,
     remap_override=_remap_ov, head_assignment=_hassign_ov, head_plan=_hplan,
+    cost_params=json.loads(_cost),
     set_stage=lambda s, p: _on_stage(s, p))
 open(_final, "r", encoding="utf-8", errors="replace").read()
 `);

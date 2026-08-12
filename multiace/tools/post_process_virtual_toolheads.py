@@ -627,7 +627,8 @@ def head_mode_swap_count(events, assignment):
             cur[head] = key
     return swaps
 
-def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None):
+def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None,
+                       cost_model=None):
     """Background-unload balance of a head-mode assignment: for every unload
     the rewrite WOULD stamp (same conditions as rewrite_head_mode_to_file -
     a released ACE head whose next arrival needs a different slot), classify
@@ -677,7 +678,8 @@ def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None):
         elif window is None:
             verdict = 'unknown'
             stats['bg_unknown'] += 1
-        elif window < BG_UNLOAD_MIN_WINDOW_MIN:
+        elif window < _model_bg_window(cost_model, rel_e.get('ace'),
+                                       rel_e.get('slot')):
             verdict = 'small'
             stats['bg_small'] += 1
         else:
@@ -685,14 +687,17 @@ def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None):
             stats['bg_ok'] += 1
         stats['details'].append(
             {'head': head, 'window': window, 'verdict': verdict})
-    stats['saved_s'] = stats['bg_ok'] * BG_UNLOAD_INLINE_SAVING_S
+    stats['saved_s'] = stats['bg_ok'] * (
+        _model_cost(cost_model, 'cross_ace_inline')
+        - _model_cost(cost_model, 'cross_ace_bg'))
     return stats
 
 def compute_head_mode_optimize(events, feeder_heads, ace_heads=None,
                                ace_num_of_head=None, num_slots=None,
                                ace_head=None, ace_slots=None,
                                layer_color_sets=None, max_colors=12,
-                               event_times=None, bg_heads=None):
+                               event_times=None, bg_heads=None,
+                               cost_model=None):
     """Head-mode loadout OPTIMIZER - the swap-minimal PROPOSED loadout that
     IGNORES the current physical load (plan 'optimize' + plan 'layer'/Belady).
 
@@ -827,14 +832,14 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads=None,
                     rr = released_r.get(b)
                     if (head in bg_set and rr is not None
                             and r_now is not None
-                            and rr - r_now >= BG_UNLOAD_MIN_WINDOW_MIN):
+                            and rr - r_now >= _model_bg_window(cost_model)):
                         bg_ok += 1
                 cur[b] = t
             released_r.pop(b, None)
 
         pins = sum(1 for b in combo if b < F)
-        cost = ((swaps - bg_ok) * BG_SWAP_COST_INLINE_S
-                + bg_ok * BG_SWAP_COST_BG_S)
+        cost = ((swaps - bg_ok) * _model_cost(cost_model, 'cross_ace_inline')
+                + bg_ok * _model_cost(cost_model, 'cross_ace_bg'))
         key = (cost, swaps, pins)
         if best_key is None or key < best_key:
             best_key = key
@@ -885,6 +890,163 @@ BG_UNLOAD_MIN_WINDOW_MIN = 1
 BG_SWAP_COST_INLINE_S = 210
 BG_SWAP_COST_BG_S = 30
 BG_UNLOAD_INLINE_SAVING_S = BG_SWAP_COST_INLINE_S - BG_SWAP_COST_BG_S
+
+
+# --------------------------------------------------------------------------
+# Cost-model plumbing (plan §3.1)
+# --------------------------------------------------------------------------
+# The three optimizers accept an optional `cost_model=` (a
+# multiace.tools.swap_cost.SwapCostModel). With no model they use the
+# constants above and reproduce today's output exactly - that guarantee is
+# what lets a printer with an older installed post-processor keep working.
+
+def _model_bg_window(cost_model, ace=None, slot=None):
+    """Minutes of idle time a background swap actually needs.
+
+    A 1-minute constant calls a window feasible that a 2100 mm load cannot
+    possibly fit, so with a model we ask it; without one we keep the
+    historical constant.
+    """
+    if cost_model is None:
+        return BG_UNLOAD_MIN_WINDOW_MIN
+    try:
+        return float(cost_model.bg_window_minutes(ace, slot))
+    except Exception:
+        return BG_UNLOAD_MIN_WINDOW_MIN
+
+
+def _model_cost(cost_model, kind, ace=None, slot=None,
+                from_color=None, to_color=None, material=None):
+    """Seconds for one swap of `kind`, model-first, constants otherwise."""
+    if cost_model is not None:
+        try:
+            return float(cost_model.swap_seconds(
+                kind, ace=ace, slot=slot, from_color=from_color,
+                to_color=to_color, material=material))
+        except Exception:
+            pass
+    if kind == 'cross_ace_bg':
+        return float(BG_SWAP_COST_BG_S)
+    if kind == 'feeder_pin':
+        return 0.0
+    return float(BG_SWAP_COST_INLINE_S)
+
+
+def _model_purge_mm(cost_model, from_color, to_color, material):
+    if cost_model is None:
+        return 0.0
+    try:
+        return float(cost_model.purge_mm(from_color, to_color, material))
+    except Exception:
+        return 0.0
+
+
+def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
+                        cost_model=None, colors=None, materials=None):
+    """Per-toolchange trace of what the plan actually costs and why (§3.2).
+
+    One entry per toolchange that needs a filament change; a toolchange to a
+    head that already holds the right filament costs a tool pickup and is
+    reported as 'feeder_pin' rather than dropped, because the plan editor
+    draws every event on the swim lane.
+
+    Entry shape:
+      {i, t, from_t, head, ace, slot, kind, window_min, seconds, purge_mm,
+       note}
+    where `kind` is one of swap_cost.SWAP_KINDS. Returns [] rather than
+    raising on anything it cannot classify - an estimate is never worth
+    failing a preflight over.
+    """
+    colors = colors or {}
+    materials = materials or {}
+    bg_set = set(bg_heads or [])
+    events = list(events or [])
+    n = len(events)
+    have_t = bool(event_times) and len(event_times) == n
+
+    head_key = {}        # head -> (ace, slot) currently loaded
+    head_color = {}      # head -> the T last loaded there
+    last_use = {}        # head -> index of its last event
+    out = []
+
+    for i, t in enumerate(events):
+        e = (assignment or {}).get(t)
+        if not e or e.get('kind') == 'none':
+            continue
+        head = e.get('head')
+        kind_in = e.get('kind')
+        if kind_in == 'pin':
+            # A stock feeder pinned to its own head: tool pickup only, no
+            # ACE work at all. This is the cheapest position a colour can
+            # occupy and the reason §3.1 cares about placement.
+            out.append({
+                'i': i, 't': t, 'from_t': head_color.get(head), 'head': head,
+                'ace': None, 'slot': None, 'kind': 'feeder_pin',
+                'window_min': None,
+                'seconds': _model_cost(cost_model, 'feeder_pin'),
+                'purge_mm': 0.0, 'note': 'pinned feeder'})
+            head_color[head] = t
+            last_use[head] = i
+            continue
+        if kind_in != 'ace':
+            continue
+
+        key = (e.get('ace'), e.get('slot'))
+        prev_key = head_key.get(head)
+        if prev_key == key:
+            last_use[head] = i
+            head_color[head] = t
+            continue
+
+        from_t = head_color.get(head)
+        from_color = colors.get(from_t)
+        to_color = colors.get(t)
+        material = materials.get(t)
+
+        window = None
+        if have_t:
+            j = last_use.get(head)
+            idle_from = 0 if j is None else j + 1
+            if idle_from <= i:
+                a = event_times[idle_from]
+                b = event_times[i]
+                if a is not None and b is not None:
+                    window = a - b
+
+        if prev_key is None:
+            kind = 'first_load'
+            note = 'first load of head %s' % head
+        else:
+            need = _model_bg_window(cost_model, e.get('ace'), e.get('slot'))
+            if head in bg_set and window is not None and window >= need:
+                kind = 'cross_ace_bg'
+                note = 'preloaded in the background (%.1f min window)' % window
+            elif prev_key[0] == key[0]:
+                # Same ACE, different slot: this head must unload, the ACE
+                # changes spool, then it reloads - and the ACE is busy the
+                # whole time. The most expensive position there is.
+                kind = 'same_ace'
+                note = 'same ACE, different slot'
+            else:
+                kind = 'cross_ace_inline'
+                note = ('no window before use - degrades to inline'
+                        if head in bg_set else 'inline swap')
+
+        out.append({
+            'i': i, 't': t, 'from_t': from_t, 'head': head,
+            'ace': e.get('ace'), 'slot': e.get('slot'), 'kind': kind,
+            'window_min': (round(window, 2) if window is not None else None),
+            'seconds': round(_model_cost(
+                cost_model, kind, e.get('ace'), e.get('slot'),
+                from_color, to_color, material), 1),
+            'purge_mm': round(_model_purge_mm(
+                cost_model, from_color, to_color, material), 1),
+            'note': note})
+
+        head_key[head] = key
+        head_color[head] = t
+        last_use[head] = i
+    return out
 
 BG_INITIAL_LOAD = True
 
@@ -967,7 +1129,8 @@ def _scan_body_tools(in_path):
     return tools, times, line_nos
 
 def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
-                              progress=None, pickup_cleaning=False):
+                              progress=None, pickup_cleaning=False,
+                              purge_mm_for=None):
     """Streaming head-mode rewrite of the ORIGINAL slicer gcode. Each slicer
     T<n> is rewritten per `assignment` (compute_head_mode_layout):
       - 'pin' -> T<pin_head>                       (feeder head, no swap)
@@ -1012,6 +1175,9 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
 
     in_body = False
     cur = {}
+    #: last slicer T loaded on each head - the "from" colour of that head's
+    #: next transition, which is what the colour-aware purge model needs.
+    cur_t = {}
     active = 0
     skipped = 0
     primed_ace = set()
@@ -1126,10 +1292,26 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         v = post_t_unret.get(line_no)
                         if v is None:
                             v = ANTI_OOZE_NO_UNRETRACT
+                        # Colour-aware purge (§3.4), emitted as an extra
+                        # KEY=VAL that the plan-line regex already tolerates.
+                        # It is a REQUEST: cmd_ACE_SWAP_HEAD clamps it
+                        # against THIS machine's purge bin, because the file
+                        # may have been sliced against a different one.
+                        purge_kv = ''
+                        if purge_mm_for is not None:
+                            try:
+                                pm = purge_mm_for(head, a, s,
+                                                  cur_t.get(head), n)
+                            except Exception:
+                                pm = None
+                            if pm:
+                                purge_kv = ' PURGE=%d' % int(round(pm))
                         fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
-                                   ' ANTI_OOZE=%s\n'
-                                   % (head, a, s, _fmt_anti_ooze(v)))
+                                   ' ANTI_OOZE=%s%s\n'
+                                   % (head, a, s, _fmt_anti_ooze(v),
+                                      purge_kv))
                         cur[head] = (a, s)
+                        cur_t[head] = n
                         active += 1
                     if head not in primed_ace:
                         primed_ace.add(head)
@@ -1450,10 +1632,16 @@ def _suggest_layer_friendly_remap(layer_colors, num_aces):
     return new_t if any(v != k for k, v in new_t.items()) else None
 
 def compute_swap_aware_layout(events, num_aces, num_heads=4,
-                              layer_color_sets=None):
+                              layer_color_sets=None, cost_model=None):
     """Search head assignments per color (free distribution - colors
     are NOT bound to head=T%4) for the one that minimizes the runtime
     swap count.
+
+    `cost_model` is accepted for signature symmetry with the head-mode
+    optimizer and is deliberately unused: in multi mode every swap is an
+    inline swap on its own head, so scaling them all by the same per-swap
+    cost cannot reorder the candidates. It exists so callers can pass the
+    model uniformly without branching on the mode.
 
     Swap count under a given assignment c->head:
       Per head, walk the toolchange sequence; each time the head's

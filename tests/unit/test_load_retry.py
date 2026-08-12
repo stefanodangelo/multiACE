@@ -278,6 +278,13 @@ def loader(ace_module, ace):
     a.EXTRUDER_MAP = {0: ("left", 0), 1: ("left", 1),
                       2: ("right", 0), 3: ("right", 1)}
 
+    # Neighbour clearance off here, so these tests keep measuring exactly
+    # the retry loop. The `neighbors` fixture below turns it on.
+    a.load_retry_neighbor_retract = 0
+    a.load_retry_neighbor_retract_max = 300
+    a.head_load_retry_neighbor_retract = {i: 0 for i in range(4)}
+    a._neighbor_retracted = {}
+    a._neighbor_retract_failed = {}
     a.head_is_manual = lambda h: False
     a.head_uses_ace = lambda h: True
     a._wait_bg_op = lambda h, g: None
@@ -401,6 +408,231 @@ class TestLoadRetryLoop:
             run_load(loader)
         assert len(loader.feed_calls) == 1
         assert paused == []
+
+
+class FakeSensor:
+    def __init__(self, detected):
+        self.detected = detected
+
+    def get_status(self, eventtime):
+        return {"filament_detected": self.detected}
+
+
+@pytest.fixture
+def neighbors(ace_module, loader):
+    """A loader wired for neighbour clearance: ACE 0 has filament in all
+    four slots, nothing is loaded into a head, and every ACE request is
+    recorded instead of sent."""
+    a = loader
+    mod = ace_module
+    a.load_retry_neighbor_retract = 100
+    a.load_retry_neighbor_retract_max = 300
+    a.head_load_retry_neighbor_retract = {i: 100 for i in range(4)}
+    a._neighbor_retracted = {}
+    a._neighbor_retract_failed = {}
+    a._gate_status_per_ace = {0: [mod.GATE_AVAILABLE] * 4}
+    a._auto_feed_enabled = False
+    a._swap_in_progress = False
+    a.head_is_feeder = lambda h: False
+    a.get_retract_speed = lambda idx: 80
+    a.sensors = {}
+    a.requests = []
+
+    a.printer = types.SimpleNamespace(
+        lookup_object=lambda name, default="_raise":
+            (a.ff if name == "filament_feed left"
+             else a.sensors.get(name, default)))
+
+    def send_request_to(idx, req, cb=None):
+        a.requests.append((idx, req))
+
+    def retract(index, length, speed, head=None):
+        a.requests.append((0, {"method": "unwind_filament",
+                               "params": {"index": index, "length": length,
+                                          "speed": speed}}))
+
+    a.send_request_to = send_request_to
+    a._retract = retract
+    return a
+
+
+def unwinds(a):
+    return [r["params"] for _idx, r in a.requests
+            if r["method"] == "unwind_filament"]
+
+
+class TestNeighborEligibility:
+    """One predicate, defaulting to "not eligible" - any exception or
+    unknown reads as not eligible."""
+
+    def test_a_loaded_slot_is_never_retracted(self, neighbors):
+        """Pulling a printing filament against the extruder gear strips it
+        and loads the feeder gearbox. This is the guard that matters."""
+        neighbors._head_source = {1: {"ace_index": 0, "slot": 2}}
+        neighbors.sensors["filament_motion_sensor e1_filament"] = \
+            FakeSensor(True)
+        ok, reason = neighbors._neighbor_eligible(0, 2, 0)
+        assert ok is False and reason == "loaded_in_head"
+
+    def test_a_stale_head_source_is_caught_by_the_live_sensor(self, neighbors):
+        """_head_source is persisted state and survives a crash. The slot
+        says "loaded", the head's own sensor says otherwise - the sensor
+        wins, so the clearance still happens."""
+        neighbors._head_source = {1: {"ace_index": 0, "slot": 2}}
+        neighbors.sensors["filament_motion_sensor e1_filament"] = \
+            FakeSensor(False)
+        ok, reason = neighbors._neighbor_eligible(0, 2, 0)
+        assert ok is True and reason == "stale_head_source"
+
+    def test_no_sensor_means_believe_the_map(self, neighbors):
+        """Cannot cross-check -> not eligible. "Cannot tell" is not "safe"."""
+        neighbors._head_source = {1: {"ace_index": 0, "slot": 2}}
+        assert neighbors._neighbor_eligible(0, 2, 0)[0] is False
+
+    def test_an_empty_slot_has_nothing_to_clear(self, neighbors, ace_module):
+        neighbors._gate_status_per_ace[0][2] = ace_module.GATE_EMPTY
+        assert neighbors._neighbor_eligible(0, 2, 0)[0] is False
+
+    def test_the_target_slot_is_never_its_own_neighbour(self, neighbors):
+        assert neighbors._neighbor_eligible(0, 1, 1)[0] is False
+
+    def test_an_unknown_ace_is_not_eligible(self, neighbors):
+        assert neighbors._neighbor_eligible(9, 1, 0)[0] is False
+
+    def test_a_raising_lookup_reads_as_not_eligible(self, neighbors):
+        def boom(name, default="_raise"):
+            raise RuntimeError("klippy is having a day")
+        neighbors._head_source = {1: {"ace_index": 0, "slot": 2}}
+        neighbors.printer = types.SimpleNamespace(lookup_object=boom)
+        assert neighbors._neighbor_eligible(0, 2, 0) == (False, "check_failed")
+
+
+class TestNeighborRetract:
+    def test_the_first_attempt_clears_nothing(self, neighbors):
+        """Attempt 1 is the normal load. Clearance is a RETRY behaviour."""
+        neighbors.feed_results = ["ok"]
+        run_load(neighbors)
+        assert unwinds(neighbors) == []
+
+    def test_each_retry_clears_every_eligible_neighbour(self, neighbors):
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        got = unwinds(neighbors)
+        # slot 0 is the target; 1, 2 and 3 are the neighbours.
+        assert sorted(p["index"] for p in got) == [1, 2, 3]
+        assert all(p["length"] == 50 for p in got)
+
+    def test_it_escalates_rather_than_starting_at_the_cap(self, neighbors):
+        """50 / 100 / 150 - the cheapest attempt is the most likely one to
+        work, and a small first pull drags less of a deformed tip back into
+        the hub."""
+        neighbors.feed_results = ["fail", "fail", "fail", "ok"]
+        run_load(neighbors)
+        per_slot = [p["length"] for p in unwinds(neighbors) if p["index"] == 1]
+        assert per_slot == [50, 100, 150]
+
+    def test_the_cumulative_cap_holds(self, neighbors):
+        neighbors.head_auto_retries[0] = 6
+        neighbors.feed_results = ["fail"] * 9
+        with pytest.raises(GcodeError):
+            run_load(neighbors)
+        total = sum(p["length"] for p in unwinds(neighbors) if p["index"] == 1)
+        assert total == 300
+
+    def test_zero_disables_it(self, neighbors):
+        neighbors.head_load_retry_neighbor_retract[0] = 0
+        neighbors.feed_results = ["fail", "fail", "ok"]
+        run_load(neighbors)
+        assert unwinds(neighbors) == []
+
+    def test_a_stock_feeder_head_is_skipped_with_a_reason(self, neighbors):
+        """No shared path, so no neighbour to clear - and the absence is
+        logged so it does not look like a bug."""
+        neighbors.head_is_feeder = lambda h: True
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        assert unwinds(neighbors) == []
+        assert any(name == "LOAD_RETRY_NEIGHBOR_SKIP"
+                   and data["reason"] == "stock_feeder"
+                   for name, data in neighbors.audits)
+
+    def test_a_busy_ace_is_skipped(self, neighbors):
+        """Never clear neighbours while another head feeds from this ACE."""
+        neighbors._swap_in_progress = True
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        assert unwinds(neighbors) == []
+        assert any(data.get("reason") == "ace_busy"
+                   for _n, data in neighbors.audits)
+
+    def test_feed_assist_is_stopped_before_each_unwind(self, neighbors):
+        """A running assist holds the rollback lock, so the unwind would be
+        refused."""
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        methods = [r["method"] for _i, r in neighbors.requests]
+        assert methods[0] == "stop_feed_assist"
+        assert methods[1] == "unwind_filament"
+
+    def test_a_refusing_neighbour_never_aborts_the_retry(self, neighbors):
+        calls = []
+
+        def retract(index, length, speed, head=None):
+            calls.append(index)
+            if index == 2:
+                raise RuntimeError("slot 2 says no")
+
+        neighbors._retract = retract
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        assert len(neighbors.feed_calls) == 2       # the retry still ran
+        assert neighbors._last_load_ok is True
+
+    def test_a_refusing_neighbour_is_never_re_driven(self, neighbors):
+        """Re-driving a slot that already refused is how a hub jam becomes a
+        hard jam."""
+        calls = []
+
+        def retract(index, length, speed, head=None):
+            calls.append(index)
+            if index == 2:
+                raise RuntimeError("slot 2 says no")
+
+        neighbors._retract = retract
+        neighbors.feed_results = ["fail", "fail", "fail", "ok"]
+        run_load(neighbors)
+        assert calls.count(2) == 1
+        assert calls.count(1) == 3
+
+    def test_the_budget_resets_after_a_successful_load(self, neighbors):
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        assert neighbors._neighbor_retracted.get(0) in (None, {})
+
+    def test_the_budget_resets_after_a_final_failure(self, neighbors):
+        neighbors.feed_results = ["fail"] * 9
+        with pytest.raises(GcodeError):
+            run_load(neighbors)
+        assert neighbors._neighbor_retracted.get(0) in (None, {})
+
+    def test_the_retry_state_carries_the_per_slot_millimetres(self, neighbors):
+        """So the dashboard banner can say "clearing slots 3, 4 (10 cm)"."""
+        neighbors._neighbor_retracted = {1: {2: 100, 3: 200}}
+        neighbors._retry_state_publish(0, 1, 0, 2, 3, "jam", 500)
+        assert read_state(neighbors)["neighbor_retract"] == {"2": 100,
+                                                             "3": 200}
+
+    def test_slack_over_20_cm_is_surfaced(self, neighbors):
+        neighbors._neighbor_retracted = {0: {1: 250, 2: 100}}
+        assert neighbors._neighbor_slack_warning(0) == {"1": 250}
+
+    def test_an_audit_record_is_written_per_retry(self, neighbors):
+        neighbors.feed_results = ["fail", "ok"]
+        run_load(neighbors)
+        recs = [d for n, d in neighbors.audits
+                if n == "LOAD_RETRY_NEIGHBOR_RETRACT"]
+        assert len(recs) == 1
+        assert recs[0]["cumulative"] == {1: 50, 2: 50, 3: 50}
 
 
 class TestFirmwareCompatMirror:

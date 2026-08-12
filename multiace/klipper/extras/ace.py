@@ -8,6 +8,7 @@ import traceback
 import os
 import time
 import hashlib
+import sys
 import serial
 from serial import SerialException
 
@@ -134,6 +135,7 @@ class MultiAce:
     VARS_ACE_HEAD = 'ace__ace_head'
     VARS_ACE_HEAD_FEEDER = 'ace__head_feeder'
     VARS_ACE_HEAD_ACE = 'ace__head_ace'
+    VARS_ACE_PURGE_USED = 'ace__purge_bin_used_mm'
 
     def __init__(self, config):
         self._connected = False
@@ -168,10 +170,23 @@ class MultiAce:
         self._active_device_index = 0
 
         self._ace_canonical = None
-        self._ace_startup_failed = False  
+        self._ace_startup_failed = False
         self._ace_present = set()
 
         self.ace_device_count = config.getint('ace_device_count', 1, minval=1, maxval=8)
+
+        # --- late ACE detection (§7) -----------------------------------
+        # An ACE powered on after the printer used to require a
+        # FIRMWARE_RESTART; startup now enters a 'waiting' state and this
+        # timer completes it as soon as the expected count shows up.
+        self.ace_rescan_interval = config.getfloat(
+            'ace_rescan_interval', 5.0, minval=0.0, maxval=600.0)
+        self._ace_rescan_timer = None
+        self._ace_rescan_started = None
+        self._startup_completed = False
+        self._ace_startup_state = 'init'   # init | waiting | ready
+        self._ace_startup_found = 0
+        self._ace_startup_expected = 0
 
         cfg_print_mode = config.get('print_mode', None)
         if cfg_print_mode is not None:
@@ -191,6 +206,41 @@ class MultiAce:
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
         self.extra_purge_length = config.getfloat('extra_purge_length', 0, minval=0, maxval=200)
         self.swap_purge_length = config.getint('swap_purge_length', 0, minval=0, maxval=200)
+
+        # --- purge safety + colour-aware purge (§3.4 / §13.2) -----------
+        # swap_purge_max is the hard per-swap ceiling; purge_bin_capacity_mm
+        # is the cumulative one, and it is the guard that actually prevents
+        # an overflow - ten individually safe purges still fill a bin.
+        # Both default to a conservative value; 0 on the capacity means
+        # "unknown, do not account" (a prime-tower print needs no bin).
+        self.swap_purge_max = config.getint('swap_purge_max', 150,
+                                            minval=0, maxval=2000)
+        self.swap_purge_min = config.getint('swap_purge_min', 0,
+                                            minval=0, maxval=2000)
+        self.purge_bin_capacity_mm = config.getint(
+            'purge_bin_capacity_mm', 0, minval=0, maxval=20000)
+        # Off by default: colour-aware purge is estimate-only until a few
+        # real prints have been compared against what the bin actually
+        # caught (§13.2's staged rollout).
+        self.purge_color_aware = config.getboolean('purge_color_aware', False)
+
+        # --- print history (§4) ----------------------------------------
+        # Bounded, append-only JSONL next to the other multiACE runtime
+        # data. 0 on the interval disables the whole feature.
+        self.job_history_dir = config.get(
+            'job_history_dir', '/home/lava/printer_data/multiace')
+        self.job_history_interval = config.getfloat(
+            'job_history_interval', 5.0, minval=0.0, maxval=120.0)
+        self._job_history_mod = 'unset'
+        self._job_id = None
+        self._job_last_state = ''
+        self._job_swaps = []
+        self._job_toolchanges = 0
+        self._job_load_retries = 0
+        #: Set by the web backend before a preflight print so the record can
+        #: carry estimated-vs-actual without recomputing the estimate.
+        self._job_plan_hint = None
+        self._job_estimate_hint = None
 
         self.seat_overshoot_length = config.getint('seat_overshoot_length', 0, minval=0, maxval=100)
         self.swap_default_temp = config.getint('swap_default_temp', 250, minval=180, maxval=300)
@@ -248,6 +298,29 @@ class MultiAce:
             self.head_auto_retries[i] = config.getint(
                 'filament_load_max_auto_retries_%d' % i,
                 self.filament_load_max_auto_retries, minval=0, maxval=10)
+
+        # --- neighbour clearance before each retry (§6) ------------------
+        # Filament in the OTHER slots of the same ACE can crowd the shared
+        # path. Retracting them a little gives the active filament room to
+        # advance, and it is harmless because a later load of those slots
+        # re-feeds from the spool anyway. Escalates half/full/one-and-a-half
+        # of this value over the three default retries (50/100/150 mm), so
+        # the cheapest attempt runs first. 0 = off.
+        # NOT the same setting as load_retry_retract, which retracts the
+        # ACTIVE filament inside the low-level feed retry.
+        self.load_retry_neighbor_retract = config.getint(
+            'load_retry_neighbor_retract', 100, minval=0, maxval=500)
+        self.load_retry_neighbor_retract_max = config.getint(
+            'load_retry_neighbor_retract_max', 300, minval=0, maxval=2000)
+        self.head_load_retry_neighbor_retract = {}
+        for i in range(4):
+            self.head_load_retry_neighbor_retract[i] = config.getint(
+                'load_retry_neighbor_retract_%d' % i,
+                self.load_retry_neighbor_retract, minval=0, maxval=500)
+        #: {ace: {slot: cumulative mm}} for the current attempt-chain.
+        self._neighbor_retracted = {}
+        #: {ace: {slot, ...}} that refused - never re-driven this chain.
+        self._neighbor_retract_failed = {}
         # Where the web backend reads the live attempt counter and writes
         # "retry now" / "cancel". Files, not G-code: while a load retries,
         # this module is INSIDE the load command and cannot process a
@@ -494,6 +567,9 @@ class MultiAce:
 
         self._retract_length_override = None
         self._purge_length_override = None
+        #: Purge for the swap currently being executed (§3.4's PURGE=),
+        #: already clamped and accounted. None = no per-swap override.
+        self._swap_purge_mm = None
 
         self._last_unload_ok = True
         self._last_load_ok = True
@@ -747,6 +823,12 @@ class MultiAce:
             'ACE_PICKUP_CLEAN',
             self.cmd_ACE_PICKUP_CLEAN,
             desc=self.cmd_ACE_PICKUP_CLEAN_help)
+        self.gcode.register_command(
+            'ACE_RESCAN', self.cmd_ACE_RESCAN,
+            desc=self.cmd_ACE_RESCAN_help)
+        self.gcode.register_command(
+            'ACE_PURGE_BIN_RESET', self.cmd_ACE_PURGE_BIN_RESET,
+            desc=self.cmd_ACE_PURGE_BIN_RESET_help)
 
         for _name in (
                 'DISCOVER', 'INFO', 'STATUS', 'TEMP', 'FEEDINFO',
@@ -1325,6 +1407,13 @@ class MultiAce:
             self._watchdog_timer = self.reactor.register_timer(
                 self._reactor_stall_watchdog, self.reactor.NOW)
 
+        # §4: watch print_stats so a job started straight from Fluidd (no
+        # preflight) still gets a history entry.
+        if self.job_history_interval and \
+                getattr(self, '_job_watch_timer', None) is None:
+            self._job_watch_timer = self.reactor.register_timer(
+                self._job_watch_tick, self.reactor.NOW)
+
         if self.airlog_enable and getattr(self, '_airlog_timer', None) is None:
             self._airlog_state = None
             self._airlog_timer = self.reactor.register_timer(
@@ -1468,19 +1557,38 @@ class MultiAce:
                     attempt += 1
                     self._refresh_ace_devices('startup_wait_%d' % attempt)
             if len(self._ace_devices) < expected:
-
+                # Soft-fail: do NOT lock _ace_canonical here. Index identity
+                # comes from the sorted USB path, so locking while 1 of N
+                # units is up makes the late arrivals append at the end and
+                # slots silently mismap - worse than waiting. Instead enter
+                # the 'waiting' state and let the rescan timer complete
+                # startup once the full expected count is present.
                 self._ace_startup_failed = True
-                self.log_error(self._t('msg.usb_unstable',
-                    expected=expected, count=len(self._ace_devices)))
-                logging.info(
-                    '[multiACE] Startup soft-fail (%d/%d ACEs) - skipping connect timer' % (
-                        len(self._ace_devices), expected))
+                self._enter_startup_wait(expected)
                 return
 
-            self._ace_canonical = list(self._ace_devices)
-            self._ace_present = set(self._ace_canonical)
-            self.log_always(self._t('msg.all_expected_found', expected=expected))
+            self._lock_canonical(expected)
 
+        self._complete_startup()
+
+    def _lock_canonical(self, expected=None):
+        """Freeze the device->index mapping. Only ever called when the full
+        expected count is present (or on an explicit ACE_RESCAN LOCK=1)."""
+        self._ace_canonical = list(self._ace_devices)
+        self._ace_present = set(self._ace_canonical)
+        self.log_always(self._t('msg.all_expected_found',
+                                expected=(expected
+                                          if expected is not None
+                                          else len(self._ace_canonical))))
+
+    def _complete_startup(self):
+        """The tail of _handle_connect: pick the active device, open every
+        ACE and set the active index.
+
+        Extracted verbatim so the normal startup path and the deferred
+        (late-power-on) path run exactly the same code - there is no second
+        startup implementation to drift.
+        """
         if self._ace_devices:
             logging.info('[multiACE] Found %d device(s): %s' % (len(self._ace_devices), str(self._ace_devices)))
             self.log_always(self._t('msg.found_devices', count=len(self._ace_devices)))
@@ -1523,6 +1631,141 @@ class MultiAce:
             self.log_error(self._t('msg.not_all_aces_opened'))
 
         self._set_active_idx(self._active_device_index)
+        self._startup_completed = True
+        self._ace_startup_failed = False
+        self._ace_startup_state = 'ready'
+        self._cancel_rescan_timer()
+        return True
+
+    # ------------------------------------------------------------------
+    # Late ACE detection (an ACE powered on after the printer)
+    # ------------------------------------------------------------------
+
+    def _enter_startup_wait(self, expected):
+        """Startup found fewer ACEs than configured.
+
+        Klipper stays up in a degraded state and a slow rescan timer waits
+        for the missing unit(s); no FIRMWARE_RESTART is needed.
+        """
+        found = len(self._ace_devices)
+        self._ace_startup_state = 'waiting'
+        self._ace_startup_expected = int(expected)
+        self._ace_startup_found = found
+        self.log_error(self._t('msg.usb_unstable',
+                               expected=expected, count=found))
+        logging.info(
+            '[multiACE] Startup soft-fail (%d/%d ACEs) - entering waiting '
+            'state, rescan every %ss' % (found, expected,
+                                         self.ace_rescan_interval))
+        self._start_rescan_timer()
+
+    def _start_rescan_timer(self):
+        if self._ace_rescan_timer is not None:
+            return
+        if not self.ace_rescan_interval:
+            logging.info('[multiACE] ace_rescan_interval=0 - no rescan timer; '
+                         'use ACE_RESCAN manually')
+            return
+        try:
+            self._ace_rescan_started = self.reactor.monotonic()
+            self._ace_rescan_timer = self.reactor.register_timer(
+                self._ace_rescan_tick,
+                self.reactor.monotonic() + self.ace_rescan_interval)
+        except Exception as e:
+            logging.info('[multiACE] rescan timer registration failed: %s' % e)
+
+    def _cancel_rescan_timer(self):
+        timer = self._ace_rescan_timer
+        if timer is None:
+            return
+        self._ace_rescan_timer = None
+        try:
+            self.reactor.unregister_timer(timer)
+        except Exception as e:
+            logging.info('[multiACE] rescan timer unregister failed: %s' % e)
+
+    def _rescan_interval_now(self):
+        """Back the interval off after ~24 h with no device, so a printer
+        left running for a week is not scanning /dev every 5 s for ever."""
+        base = self.ace_rescan_interval or 5.0
+        try:
+            age = self.reactor.monotonic() - (self._ace_rescan_started or 0.0)
+        except Exception:
+            age = 0.0
+        return base * 12.0 if age > 86400.0 else base
+
+    def _ace_rescan_tick(self, eventtime):
+        """Slow poll for a late-joining ACE.
+
+        A rescan is a directory listing plus (on success) an _open_ace, and
+        an _open_ace in the middle of a swap is the one way this could break
+        a running print - so skip entirely while the bus is in use.
+        """
+        nxt = eventtime + self._rescan_interval_now()
+        try:
+            if self._auto_feed_enabled or self._swap_in_progress \
+                    or self._homing_active:
+                return nxt
+            if self.try_complete_startup('rescan'):
+                return self.reactor.NEVER
+        except Exception as e:
+            logging.info('[multiACE] rescan tick failed: %s' % e)
+        return nxt
+
+    def try_complete_startup(self, context='rescan', lock_partial=False):
+        """Rescan and, if the expected ACEs are present, finish startup.
+
+        Returns True when startup completed on this call.
+        """
+        if self._startup_completed:
+            self._cancel_rescan_timer()
+            return False
+        self._refresh_ace_devices(context)
+        expected = int(self.ace_device_count or 0)
+        found = len(self._ace_devices)
+        self._ace_startup_found = found
+        self._ace_startup_expected = expected
+        if found < expected and not lock_partial:
+            return False
+        if found <= 0:
+            return False
+        self._lock_canonical(found if lock_partial else expected)
+        self._complete_startup()
+        self.log_always(self._t('msg.late_ace_connected',
+                                count=found, expected=expected))
+        return True
+
+    cmd_ACE_RESCAN_help = (
+        '[multiACE] Rescan for ACE units that were powered on after the '
+        'printer. LOCK=1 locks the mapping with fewer units than configured.')
+
+    def cmd_ACE_RESCAN(self, gcmd):
+        lock = bool(gcmd.get_int('LOCK', 0, minval=0, maxval=1))
+        if self._startup_completed:
+            self._refresh_ace_devices('rescan_cmd')
+            gcmd.respond_info(
+                '[multiACE] ACE startup already complete - found %d/%d'
+                % (len(self._ace_devices), int(self.ace_device_count or 0)))
+            return
+        done = self.try_complete_startup('rescan_cmd', lock_partial=lock)
+        if done:
+            gcmd.respond_info(
+                '[multiACE] ACE(s) connected - found %d/%d, no restart needed'
+                % (self._ace_startup_found, self._ace_startup_expected))
+        else:
+            gcmd.respond_info(
+                '[multiACE] still waiting - found %d/%d (power the ACE on, or '
+                'ACE_RESCAN LOCK=1 to run with fewer units)'
+                % (self._ace_startup_found, self._ace_startup_expected))
+
+    def ace_startup_status(self):
+        """The §7 banner payload: what the dashboard needs to offer Rescan."""
+        return {
+            'state':    self._ace_startup_state,
+            'found':    int(self._ace_startup_found),
+            'expected': int(self._ace_startup_expected
+                            or (self.ace_device_count or 0)),
+        }
 
     def _hotplug_monitor(self, eventtime):
 
@@ -1608,10 +1851,111 @@ class MultiAce:
     def get_purge_length(self):
         """Flush LENGTH for the stock INNER_FLUSH_FILAMENT. A per-swap
         override (multiACE Pro) wins, else the swap_purge_length config
-        value. 0 means 'use the stock default' (caller omits LENGTH=)."""
+        value. 0 means 'use the stock default' (caller omits LENGTH=).
+
+        Clamped here, because this is the ONE place every purge path reads:
+        a per-swap ceiling that some callers bypass is not a ceiling.
+        """
+        if getattr(self, '_swap_purge_mm', None) is not None:
+            # Already clamped and accounted by cmd_ACE_SWAP_HEAD.
+            return self._swap_purge_mm
         if self._purge_length_override is not None:
-            return self._purge_length_override
-        return self.swap_purge_length
+            requested = self._purge_length_override
+        else:
+            requested = self.swap_purge_length
+        applied, reason = self.clamp_purge_mm(requested)
+        if reason:
+            self.log_always('[multiACE] purge %d mm -> %d mm: %s'
+                            % (requested, applied, reason))
+        return applied
+
+    # ------------------------------------------------------------------
+    # Purge safety (§13.2). Purge is the one thing multiACE commands the
+    # hotend to extrude by a computed, config-derived volume. Overflowing
+    # the purge bin is the classic blob that rips the silicone sock and
+    # takes the hotend with it, and the bin's capacity is HARDWARE-VERSION
+    # dependent (the v1 and v2 bins differ), so a volume that is safe on
+    # one machine is not on another.
+    # ------------------------------------------------------------------
+
+    def clamp_purge_mm(self, requested_mm, ace_index=None):
+        """Clamp a purge request to what this machine can physically take.
+
+        Returns (applied_mm, reason); reason is '' when nothing was clamped.
+        The number in the gcode is an upper REQUEST, never an instruction -
+        that file may have been sliced against a different machine with a
+        different bin.
+        """
+        try:
+            value = max(0, int(requested_mm or 0))
+        except (TypeError, ValueError):
+            return 0, 'unparseable purge request'
+        reason = ''
+        if self.swap_purge_max > 0 and value > self.swap_purge_max:
+            value = self.swap_purge_max
+            reason = 'clamped to swap_purge_max=%d' % self.swap_purge_max
+        cap = self.purge_bin_capacity_mm
+        if cap > 0:
+            used = self.purge_bin_used_mm()
+            remaining = max(0, cap - used)
+            if value > remaining:
+                value = remaining
+                reason = ('purge bin full (%d/%d mm) - %s'
+                          % (used, cap,
+                             'clamped to the remaining capacity'
+                             if remaining > 0 else 'refused'))
+        return value, reason
+
+    def purge_bin_used_mm(self):
+        """Cumulative purge since the bin was last emptied.
+
+        A per-swap ceiling alone does not prevent a blob: ten individually
+        safe purges still overflow a bin. This accumulator is the guard that
+        actually does, which is why it is persisted rather than kept in RAM.
+        """
+        try:
+            return int(self.save_variables.allVariables.get(
+                self.VARS_ACE_PURGE_USED, 0) or 0)
+        except Exception:
+            return 0
+
+    def purge_bin_account(self, mm):
+        """Record `mm` of purge against the bin and warn as it fills."""
+        cap = self.purge_bin_capacity_mm
+        try:
+            used = self.purge_bin_used_mm() + max(0, int(mm or 0))
+            self.gcode.run_script_from_command(
+                'SAVE_VARIABLE VARIABLE=%s VALUE=%d'
+                % (self.VARS_ACE_PURGE_USED, used))
+        except Exception as e:
+            logging.info('[multiACE] purge accounting failed: %s' % e)
+            return
+        if cap > 0 and used >= cap * 0.8:
+            self.log_always(self._t('msg.purge_bin_nearly_full',
+                                    used=used, capacity=cap,
+                                    percent=int(100.0 * used / cap)))
+
+    cmd_ACE_PURGE_BIN_RESET_help = (
+        '[multiACE] Tell multiACE the purge bin has been emptied, resetting '
+        'the cumulative purge accounting used to prevent an overflow.')
+
+    def cmd_ACE_PURGE_BIN_RESET(self, gcmd):
+        self.gcode.run_script_from_command(
+            'SAVE_VARIABLE VARIABLE=%s VALUE=0' % self.VARS_ACE_PURGE_USED)
+        gcmd.respond_info('[multiACE] purge bin accounting reset to 0 mm'
+                          + (' of %d mm' % self.purge_bin_capacity_mm
+                             if self.purge_bin_capacity_mm else ''))
+
+    def purge_can_extrude(self, head=None):
+        """True when the hotend is hot enough to melt what we are about to
+        push through it. Purging into a cold nozzle grinds the filament flat
+        and can pop the PTFE coupler."""
+        try:
+            heater = self.toolhead.get_extruder().get_heater()
+            return bool(heater.can_extrude)
+        except Exception as e:
+            logging.info('[multiACE] can_extrude check unavailable: %s' % e)
+            return False
 
     def get_feed_speed(self, ace_idx):
         """Lookup feed_speed with [ace N] override, falling back to [ace]."""
@@ -1748,6 +2092,130 @@ class MultiAce:
         the ACE motor is not needed for the live print)."""
         ps = self.printer.lookup_object('print_stats', None)
         return ps is not None and getattr(ps, 'state', '') == 'printing'
+
+    # ------------------------------------------------------------------
+    # Print history (§4)
+    # ------------------------------------------------------------------
+    #
+    # Moonraker already records duration and result, and this deliberately
+    # does not duplicate that. What it records is the half Moonraker cannot
+    # know: which plan ran, where each colour sat, how many swaps really
+    # happened and how long each one took, and how many load retries and
+    # neighbour retracts it cost. The web backend joins the two on
+    # filename + start time.
+
+    def _job_history(self):
+        """The history module, or None where it is not installed.
+
+        Imported lazily and softly: history is a nice-to-have, and a print
+        must never fail because a reporting module is missing.
+        """
+        mod = getattr(self, '_job_history_mod', 'unset')
+        if mod != 'unset':
+            return mod
+        mod = None
+        for path in ('/home/lava/printer_data/config/tools',
+                     '/home/printer_data/config/tools'):
+            try:
+                if path not in sys.path:
+                    sys.path.append(path)
+            except Exception:
+                pass
+        try:
+            import job_history as mod          # noqa: F811
+        except Exception as e:
+            logging.info('[multiACE] job history unavailable: %s' % e)
+            mod = None
+        self._job_history_mod = mod
+        return mod
+
+    def _print_state_now(self):
+        ps = self.printer.lookup_object('print_stats', None)
+        if ps is None:
+            return '', ''
+        return (str(getattr(ps, 'state', '') or ''),
+                str(getattr(ps, 'filename', '') or ''))
+
+    def _job_watch_tick(self, eventtime):
+        """Open a history record when a print starts, close it when it ends.
+
+        A polled watcher rather than a gcode marker injected by the rewrite:
+        a print started straight from Fluidd, without going through
+        preflight, still deserves a history entry.
+        """
+        try:
+            state, filename = self._print_state_now()
+            if state != self._job_last_state:
+                if state == 'printing' and self._job_last_state in (
+                        '', 'standby', 'complete', 'cancelled', 'error'):
+                    self._job_open(filename)
+                elif state in ('complete', 'cancelled', 'error') \
+                        and self._job_id:
+                    self._job_close(state)
+                self._job_last_state = state
+        except Exception as e:
+            logging.info('[multiACE] job watch failed: %s' % e)
+        return eventtime + self.job_history_interval
+
+    def _job_open(self, filename):
+        hist = self._job_history()
+        if hist is None:
+            return
+        rec = hist.append_record(self.job_history_dir, {
+            'filename':   filename,
+            'start_time': time.time(),
+            'result':     'printing',
+            'plan':       self._job_plan_hint,
+            'assignment': {str(h): dict(src) for h, src in
+                           (self._head_source or {}).items()
+                           if isinstance(src, dict)},
+            'estimate':   self._job_estimate_hint,
+            'swaps':      [],
+            'toolchanges': 0,
+            'load_retries': 0,
+            'neighbor_retracts': {},
+        })
+        self._job_id = (rec or {}).get('id')
+        self._job_swaps = []
+        self._job_toolchanges = 0
+        self._job_load_retries = 0
+
+    def _job_close(self, result):
+        hist = self._job_history()
+        if hist is None or not self._job_id:
+            self._job_id = None
+            return
+        hist.update_record(
+            self.job_history_dir, self._job_id,
+            end_time=time.time(), result=result,
+            swaps=list(self._job_swaps),
+            toolchanges=self._job_toolchanges,
+            load_retries=self._job_load_retries,
+            neighbor_retracts={
+                str(a): {str(s): mm for s, mm in (slots or {}).items()}
+                for a, slots in (self._neighbor_retracted or {}).items()},
+            purge_bin_used_mm=self.purge_bin_used_mm())
+        try:
+            # Recompute the measured medians the cost model prefers over
+            # its unmeasured constants (§4.3).
+            hist.refresh_swap_stats(self.job_history_dir)
+        except Exception as e:
+            logging.info('[multiACE] swap stats refresh failed: %s' % e)
+        self._job_id = None
+
+    def _job_note_swap(self, kind, head, ace_index, slot, seconds):
+        """Record one completed swap's REAL duration.
+
+        This is what turns §1's modelled constants into numbers measured on
+        this machine, so it stores the classification alongside the time -
+        an inline swap and a background one are not the same measurement.
+        """
+        if not self._job_id:
+            return
+        self._job_swaps.append({
+            'kind': kind, 'head': head, 'ace': ace_index, 'slot': slot,
+            'seconds': round(float(seconds), 1), 'ts': time.time()})
+        self._job_toolchanges += 1
 
     def _read_decoder(self, idx, slot):
         """[diag] Synchronous V2 decoder read (get_feed_info -> per-slot
@@ -2419,7 +2887,18 @@ class MultiAce:
 
     def _retry_state_publish(self, head, ace_index, slot, attempt,
                              max_attempts, reason, next_retry_ms):
+        # Cumulative neighbour clearance per slot, so the dashboard banner
+        # can say "clearing slots 3, 4 (10 cm)" - and so a slot quietly
+        # accumulating 25 cm of slack is visible before it tangles.
+        neighbors = {}
+        try:
+            neighbors = {str(s): mm for s, mm in
+                         (getattr(self, '_neighbor_retracted', {})
+                          .get(ace_index) or {}).items()}
+        except Exception:
+            neighbors = {}
         self._retry_state_write({
+            'neighbor_retract': neighbors,
             'active':       True,
             'ts':           time.time(),
             'head':         head,
@@ -2471,6 +2950,171 @@ class MultiAce:
                 return None
             self.reactor.pause(self.reactor.monotonic() + step / 1000.0)
             remaining -= step
+
+    # ------------------------------------------------------------------
+    # Neighbour clearance before a load retry (§6 / §13.3)
+    # ------------------------------------------------------------------
+
+    def _neighbor_retract_for(self, head):
+        try:
+            return int(self.head_load_retry_neighbor_retract.get(
+                head, self.load_retry_neighbor_retract))
+        except Exception:
+            return int(self.load_retry_neighbor_retract)
+
+    def _neighbor_eligible(self, ace_index, slot, target_slot):
+        """Whitelist: may this neighbour slot be retracted for clearance?
+
+        Defaults to NOT eligible, and any exception or unknown reads as not
+        eligible. Every condition below has to hold:
+
+          * it is not the slot we are trying to load;
+          * the ACE reports filament present (nothing to clear otherwise);
+          * the slot is not recorded as loaded into a head; and
+          * the head that _head_source associates with it reports its
+            filament sensor CLEAR.
+
+        That last clause is the important one. `_head_source` is persisted
+        state and can be stale after a crash or a failed load, and an ACE
+        feeder pulling against the extruder gear strips the filament and
+        loads the gearbox. Cross-checking a live sensor is what makes the
+        stale-map case safe. One function, one place to audit.
+        """
+        try:
+            if slot == target_slot:
+                return False, 'target_slot'
+            gates = self._gate_status_per_ace.get(ace_index)
+            if not gates or slot >= len(gates):
+                return False, 'gate_unknown'
+            if gates[slot] != GATE_AVAILABLE:
+                return False, 'slot_empty'
+            for head, src in (self._head_source or {}).items():
+                if not isinstance(src, dict):
+                    continue
+                if (src.get('ace_index') != ace_index
+                        or src.get('slot') != slot):
+                    continue
+                # Recorded as loaded. Believe it only when the head's own
+                # sensor disagrees - a printing filament must never be
+                # pulled.
+                sensor = self.printer.lookup_object(
+                    'filament_motion_sensor e%d_filament' % int(head), None)
+                if sensor is None:
+                    return False, 'loaded_no_sensor'
+                if bool(sensor.get_status(0).get('filament_detected')):
+                    return False, 'loaded_in_head'
+                return True, 'stale_head_source'
+            return True, ''
+        except Exception as e:
+            logging.info('[multiACE] neighbour eligibility check failed '
+                         '(ace %s slot %s): %s' % (ace_index, slot, e))
+            return False, 'check_failed'
+
+    def _retry_clear_neighbors(self, ace_index, slot, head, attempt):
+        """Before a load retry, pull the OTHER slots of this ACE back a
+        little so the active filament has room to advance in the shared path.
+
+        Escalates 50 / 100 / 150 mm over the three default retries rather
+        than starting at the cap: a jam is usually cleared by the first
+        small retract, and if the load failed because of a blob on the tip,
+        dragging 5 cm back into the hub is a great deal better than 10.
+        The cheapest attempt is also the most likely one to run.
+
+        ACE slots only. A head on a stock feeder has exactly one filament
+        and no shared path, so there is no neighbour to clear - and this is
+        a guard as much as a scope decision, because it removes any path by
+        which the feature could command a feeder that has no ACE behind it.
+        """
+        base = self._neighbor_retract_for(head)
+        if base <= 0:
+            return {}
+        if not self.head_uses_ace(head) or self.head_is_feeder(head):
+            self._audit_state('LOAD_RETRY_NEIGHBOR_SKIP', {
+                'head': head, 'ace': ace_index, 'slot': slot,
+                'reason': 'stock_feeder'})
+            return {}
+        if ace_index is None or ace_index < 0:
+            return {}
+        # Never while another head is actively feeding from this same ACE.
+        if self._auto_feed_enabled or self._swap_in_progress:
+            self._audit_state('LOAD_RETRY_NEIGHBOR_SKIP', {
+                'head': head, 'ace': ace_index, 'slot': slot,
+                'reason': 'ace_busy'})
+            return {}
+
+        step = int(round(base / 2.0)) * max(1, int(attempt))
+        cap = int(self.load_retry_neighbor_retract_max)
+        speed = int(self.get_retract_speed(ace_index))
+        done = self._neighbor_retracted.setdefault(ace_index, {})
+        failed = self._neighbor_retract_failed.setdefault(ace_index, set())
+        moved = {}
+
+        gates = self._gate_status_per_ace.get(ace_index) or []
+        for s in range(len(gates)):
+            if s in failed:
+                # Never re-drive a slot that already refused: that is how a
+                # hub jam becomes a hard jam.
+                continue
+            ok, reason = self._neighbor_eligible(ace_index, s, slot)
+            if not ok:
+                continue
+            used = int(done.get(s, 0))
+            want = min(step, max(0, cap - used))
+            if want <= 0:
+                continue
+            try:
+                self._stop_feed_assist_slot(ace_index, s)
+                self._retract(s, want, speed)
+            except Exception as e:
+                failed.add(s)
+                logging.info('[multiACE] neighbour retract failed on ACE %d '
+                             'slot %d: %s' % (ace_index, s, e))
+                continue
+            done[s] = used + want
+            moved[s] = done[s]
+            if reason:
+                logging.info('[multiACE] neighbour retract ACE %d slot %d: %s'
+                             % (ace_index, s, reason))
+
+        if moved:
+            self._audit_state('LOAD_RETRY_NEIGHBOR_RETRACT', {
+                'head': head, 'ace': ace_index, 'slot': slot,
+                'attempt': attempt, 'step_mm': step, 'cumulative': dict(moved)})
+        return moved
+
+    def _stop_feed_assist_slot(self, ace_index, slot):
+        """stop_feed_assist before an unwind - the same order the tip-form
+        path uses, because a running assist holds the rollback lock."""
+        def _cb(self, response):
+            pass
+        self.send_request_to(ace_index, {
+            'method': 'stop_feed_assist', 'params': {'index': slot}}, _cb)
+
+    def _retry_neighbor_reset(self, ace_index=None):
+        """Forget the per-slot budget once the load succeeds or is given up,
+        so the next load starts from a clean 300 mm allowance."""
+        if ace_index is None:
+            self._neighbor_retracted = {}
+            self._neighbor_retract_failed = {}
+            return
+        try:
+            self._neighbor_retracted.pop(ace_index, None)
+            self._neighbor_retract_failed.pop(ace_index, None)
+        except AttributeError:
+            self._neighbor_retracted = {}
+            self._neighbor_retract_failed = {}
+
+    def _neighbor_slack_warning(self, ace_index):
+        """Slots carrying enough unwound filament to be worth a look.
+
+        The mechanical risk here is not one retract, it is the unattended
+        accumulation: slack inside the unit is how an ACE tangles.
+        """
+        out = {}
+        for slot, mm in (self._neighbor_retracted.get(ace_index) or {}).items():
+            if mm > 200:
+                out[str(slot)] = mm
+        return out
 
     def _reset_feed_channel(self, ff, module, channel):
         """Put a filament_feed channel back into the state FEED_AUTO
@@ -7467,6 +8111,7 @@ class MultiAce:
                         'head': head, 'ace': ace_index, 'slot': slot,
                         'attempt': attempt})
                 self._retry_state_clear()
+                self._retry_neighbor_reset(ace_index)
                 break
 
             self._audit_state('LOAD_HEAD_FAILED', {
@@ -7494,6 +8139,10 @@ class MultiAce:
             self._ace_event('load_retry', head=head, ace=ace_index, slot=slot,
                             attempt=attempt, max_attempts=max_auto,
                             reason=fail_reason)
+            try:
+                self._job_load_retries += 1
+            except AttributeError:
+                pass
             if self._retry_wait(delay_ms, head, ace_index, slot, attempt,
                                 max_auto, fail_reason) == 'cancel':
                 self.log_always(
@@ -7501,10 +8150,16 @@ class MultiAce:
                     % self._disp(head))
                 cancelled = True
                 break
+            # Clear the shared path before the channel reset: the retract
+            # is what gives the active filament room to advance, and doing
+            # it first means the reset lands on an ACE that is already
+            # settled.
+            self._retry_clear_neighbors(ace_index, slot, head, attempt)
             self._reset_feed_channel(ff, ff_module, channel)
 
         if fail_reason is not None:
             self._retry_state_clear()
+            self._retry_neighbor_reset(ace_index)
             attempts_used = attempt
             if fail_reason == 'feed_auto_error':
                 detail = ('[multiACE] head %d: load failed: %s'
@@ -8078,6 +8733,30 @@ class MultiAce:
         anti_ooze = gcmd.get_float(
             'ANTI_OOZE', float(self.swap_anti_ooze_retract),
             minval=0., maxval=50.)
+        # Optional per-swap purge from the rewrite (§3.4). Treated as an
+        # upper REQUEST and clamped here, never trusted: this file may have
+        # been sliced against a machine with a bigger purge bin, and the
+        # difference is a blob on the heater block.
+        #
+        # Scoped to THIS swap rather than restored afterwards: the command
+        # has a dozen early returns, and a restore that one of them skips
+        # would leak one swap's purge length into the next.
+        purge_req = gcmd.get_int('PURGE', None, minval=0, maxval=2000)
+        self._swap_purge_mm = None
+        if purge_req is not None:
+            applied, why = self.clamp_purge_mm(purge_req)
+            if why:
+                self.log_always(
+                    '[multiACE] swap purge %d mm -> %d mm: %s'
+                    % (purge_req, applied, why))
+            if applied and not self.purge_can_extrude(head):
+                # An injected PURGE= must not bypass the can_extrude gate:
+                # pushing filament through a cold nozzle grinds it flat.
+                self.log_always(self._t('msg.purge_skipped_cold'))
+                applied = 0
+            self._swap_purge_mm = applied
+            if applied:
+                self.purge_bin_account(applied)
 
         if head < 0 or head > 3:
             raise gcmd.error('[multiACE] HEAD must be 0-3')
@@ -8226,6 +8905,15 @@ class MultiAce:
 
         self._swap_in_progress = True
         self._swap_phase = 'unload'
+        # §4.3: the real duration of this swap, which is what turns the
+        # estimate's unmeasured constants into numbers measured on THIS
+        # machine. Classified the way the planner classifies it, so the two
+        # are comparable.
+        _job_swap_started = time.time()
+        _job_swap_kind = (
+            'first_load' if prev_source is None
+            else ('same_ace' if prev_ace_src == ace_index
+                  else 'cross_ace_inline'))
         self._resume_wipe_deadline = 0.
         self._ace_event(
             'swap_imminent', head=head, ace=ace_index, slot=slot,
@@ -8296,6 +8984,17 @@ class MultiAce:
                               sensor_obj.get_status(0)['filament_detected'])
             bg_empty = head in getattr(self, '_bg_left_empty', ())
             empty_head = ((not sensor_present) and (prev_source is None)) or bg_empty
+
+            # §4.3: reclassify now that we know this was backgrounded.
+            # A bg swap still runs THIS command, it just takes the fast
+            # empty_head path below - so its duration measures the handover,
+            # not a full swap. Recording that under 'cross_ace_inline' would
+            # feed fast samples into the inline median, drag the calibrated
+            # inline cost down, and narrow the very inline-vs-bg gap the
+            # planner uses to prefer backgroundable placements. The label
+            # has to match what was actually measured.
+            if bg_empty:
+                _job_swap_kind = 'cross_ace_bg'
 
             if empty_head:
                 if bg_empty:
@@ -8523,6 +9222,14 @@ class MultiAce:
         finally:
             self._swap_in_progress = False
             self._swap_saved_pos = None
+            self._swap_purge_mm = None
+            if self._swap_phase == 'done':
+                try:
+                    self._job_note_swap(
+                        _job_swap_kind, head, ace_index, slot,
+                        time.time() - _job_swap_started)
+                except Exception as _e:
+                    logging.info('[multiACE] job swap note failed: %s' % _e)
 
             if self._swap_phase != 'done':
                 swap_fail_status = (swap_status
@@ -10067,6 +10774,7 @@ class MultiAce:
             'gate_status': self.gate_status,
             'active_device': self._active_device_index,
             'device_count': len(self._ace_devices),
+            'ace_startup': self.ace_startup_status(),
             'ace_head': (ace_heads_now[0] if len(ace_heads_now) == 1
                          else getattr(self, '_ace_head', 3)),
             'ace_heads': ace_heads_now,

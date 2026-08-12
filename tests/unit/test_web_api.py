@@ -370,3 +370,388 @@ class TestMockMode:
         c, main, cfg, calls = client
         r = c.post("/api/debug/simulate", json={"event": "load_failure"})
         assert r.status_code == 403
+
+
+class TestMockPreflight:
+    """§2: upload a g-code on a laptop with no printer and get the full
+    plan. The 409 "no slots are loaded" describes a printer, and in mock
+    mode there isn't one."""
+
+    def _upload(self, c):
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        with path.open("rb") as f:
+            return c.post("/api/preflight?mock=1",
+                          files={"file": ("sample_4color.gcode", f,
+                                          "text/plain")})
+
+    def test_preflight_works_with_no_printer(self, client):
+        c, main, cfg, calls = client
+        r = self._upload(c)
+        assert r.status_code == 200
+        j = r.json()
+        assert j["mock"] is True
+        assert set(j["plans"]) == {"slicer", "optimize", "layer"}
+
+    def test_every_plan_carries_an_estimate(self, client):
+        """Plans are compared in minutes and grams, not swap counts."""
+        c, main, cfg, calls = client
+        j = self._upload(c).json()
+        for name, plan in j["plans"].items():
+            if not plan.get("feasible"):
+                continue
+            est = plan["estimate"]
+            assert est["confidence"] == "modelled", name
+            assert est["base_s"] == 6772.0, name
+            assert est["total_s"] >= est["base_s"], name
+            assert est["assumptions"], name
+
+    def test_the_estimate_never_double_counts_a_prime_tower(self, client):
+        """The fixture is a tower + flush print, so the purge is already
+        inside the slicer's own numbers."""
+        c, main, cfg, calls = client
+        j = self._upload(c).json()
+        est = j["plans"]["slicer"]["estimate"]
+        assert est["purge"]["destination"] == "mixed"
+        assert est["purge"]["counted_in_total"] is False
+
+    def test_each_plan_carries_a_timeline(self, client):
+        c, main, cfg, calls = client
+        j = self._upload(c).json()
+        tl = j["plans"]["optimize"]["timeline"]
+        assert tl and all("kind" in e and "seconds" in e for e in tl)
+
+    def test_livedata_serves_mock_slots(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/preflight/livedata?mock=1").json()
+        assert j["mock"] is True
+        assert j["live_slots"], "the mock loadout has identified slots"
+        assert "cost_params" in j
+
+    def test_printing_is_refused_in_mock(self, client):
+        """A mocked run must never look like it queued a real print."""
+        c, main, cfg, calls = client
+        r = c.post("/api/preflight/print?mock=1",
+                   json={"token": "0" * 32, "mode": "slicer"})
+        assert r.status_code == 503
+        assert "Download" in r.json()["detail"]
+
+    def test_pysrc_serves_the_third_module(self, client):
+        """The worker writes exactly the files this dict names - if
+        swap_cost stops being served the browser silently loses the
+        estimate."""
+        c, main, cfg, calls = client
+        j = c.get("/api/preflight/pysrc").json()
+        assert "swap_cost" in j and "class SwapCostModel" in j["swap_cost"]
+        assert "cost_params" in j and "calibration" in j
+
+    def test_cost_params_come_from_the_config(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/preflight/pysrc").json()
+        assert j["cost_params"]["main"]["load_length"] == 2000
+
+
+class TestVirtualLoadout:
+    """§2.2's what-if tool, and §13.6's structural rule for it.
+
+    If a virtual loadout ever leaked into the real rewrite path, the printer
+    would swap to slots holding a different material than planned and run it
+    at the wrong temperature - PLA at PETG temps carbonises and clogs. The
+    guard is not a flag (a flag gets inverted by a bug) but a separate field
+    the rewrite path never reads.
+    """
+
+    def _upload(self, c, virtual=None):
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        data = {}
+        if virtual is not None:
+            data["virtual_slots"] = json.dumps(virtual)
+        with path.open("rb") as f:
+            return c.post("/api/preflight?mock=1", data=data,
+                          files={"file": ("sample_4color.gcode", f,
+                                          "text/plain")})
+
+    def test_a_virtual_loadout_plans_against_the_spools_you_asked_for(
+            self, client):
+        c, main, cfg, calls = client
+        virtual = [{"ace": 0, "slot": i, "material": "PLA",
+                    "color": h} for i, h in enumerate(
+                        ["#1b1b1f", "#f2f2f2", "#c21b17", "#2e7d32"])]
+        j = self._upload(c, virtual).json()
+        assert j["virtual_loadout"] is True
+        assert len(j["live_slots"]) == 4
+        assert {s["color"] for s in j["live_slots"]} == {
+            "#1b1b1f", "#f2f2f2", "#c21b17", "#2e7d32"}
+
+    def test_it_is_flagged_loudly(self, client):
+        """A plan computed against spools that are not in the machine must
+        never look like one that was."""
+        c, main, cfg, calls = client
+        plain = self._upload(c).json()
+        assert "virtual_loadout" not in plain
+        assert "virtual_slots" not in plain
+
+    def test_the_rewrite_path_never_receives_it(self, client):
+        """The real path takes live_slots. There is no parameter through
+        which a virtual loadout could arrive."""
+        c, main, cfg, calls = client
+        import inspect
+        sig = inspect.signature(main.preflight_core.rewrite_pipeline)
+        assert "virtual_slots" not in sig.parameters
+        src = inspect.getsource(main.preflight_core.rewrite_pipeline)
+        assert "virtual" not in src
+
+    def test_material_availability_stays_unconditional_on_the_real_path(
+            self, client):
+        """The check that catches "that material is not loaded" must not be
+        skippable - it is what stops a swap to the wrong filament."""
+        c, main, cfg, calls = client
+        import inspect
+        src = inspect.getsource(main.preflight_core.rewrite_pipeline)
+        assert "check_material_availability" in src
+
+    def test_garbage_is_a_bad_request_not_a_silent_fallback(self, client):
+        """Silently ignoring it would plan against the REAL loadout while
+        the user believes they are looking at a what-if."""
+        c, main, cfg, calls = client
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        with path.open("rb") as f:
+            r = c.post("/api/preflight?mock=1",
+                       data={"virtual_slots": "not json"},
+                       files={"file": ("sample_4color.gcode", f,
+                                       "text/plain")})
+        assert r.status_code == 400
+
+
+class TestPlanRegression:
+    """§12: a cost-model change must not silently alter which plan gets
+    chosen. This pins the current answer for the fixture so a future edit
+    to the constants has to be a deliberate one."""
+
+    def _report(self, c):
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        with path.open("rb") as f:
+            return c.post("/api/preflight?mock=1",
+                          files={"file": ("sample_4color.gcode", f,
+                                          "text/plain")}).json()
+
+    def test_the_fixture_plan_is_pinned(self, client):
+        c, main, cfg, calls = client
+        j = self._report(c)
+        # Four colours, four heads: every colour gets its own head and
+        # nothing swaps mid-print.
+        assert j["plans"]["optimize"]["swaps"] == 0
+        assert j["plans"]["layer"]["swaps"] == 0
+        kinds = {e["kind"] for e in j["plans"]["optimize"]["timeline"]}
+        assert kinds == {"first_load"}
+
+    def test_the_slicer_base_time_is_read_not_invented(self, client):
+        c, main, cfg, calls = client
+        j = self._report(c)
+        assert j["plans"]["slicer"]["estimate"]["base_s"] == 6772.0
+
+
+class TestPrintControl:
+    """§8/§13.5: the whitelist is the contract, and it has to hold against
+    a stale page, a fat-fingered curl, or a slider that fires an
+    out-of-range value on touch."""
+
+    def call(self, c, verb, value=None):
+        body = {"verb": verb}
+        if value is not None:
+            body["value"] = value
+        return c.post("/api/print-control?mock=1", json=body)
+
+    def test_speed_emits_m220(self, client):
+        c, main, cfg, calls = client
+        j = self.call(c, "speed", 120).json()
+        assert j["script"] == "M220 S120" and j["applied"] == 120
+
+    def test_flow_emits_m221(self, client):
+        c, main, cfg, calls = client
+        assert self.call(c, "flow", 110).json()["script"] == "M221 S110"
+
+    def test_fan_percent_is_scaled_to_0_255(self, client):
+        """The UI thinks in percent and M106 does not."""
+        c, main, cfg, calls = client
+        assert self.call(c, "fan", 100).json()["script"] == "M106 S255"
+        assert self.call(c, "fan", 0).json()["script"] == "M106 S0"
+
+    def test_out_of_range_is_clamped_not_silently_rejected(self, client):
+        """Returning the applied value lets the UI snap back to the truth;
+        a slider still showing 400 % is a slider that lies."""
+        c, main, cfg, calls = client
+        assert self.call(c, "speed", 4000).json()["applied"] == 300
+        assert self.call(c, "speed", 1).json()["applied"] == 25
+        assert self.call(c, "flow", 900).json()["applied"] == 125
+
+    def test_a_missing_value_is_a_bad_request(self, client):
+        c, main, cfg, calls = client
+        assert self.call(c, "speed").status_code == 400
+
+    def test_an_unknown_verb_is_refused(self, client):
+        """The whitelist exists so a UI bug cannot emit arbitrary gcode."""
+        c, main, cfg, calls = client
+        assert self.call(c, "run_this_gcode", 1).status_code == 400
+
+    def test_pause_resume_cancel_map_to_macros(self, client):
+        c, main, cfg, calls = client
+        assert self.call(c, "pause").json()["script"] == "PAUSE"
+        assert self.call(c, "resume").json()["script"] == "RESUME"
+        assert self.call(c, "cancel").json()["script"] == "CANCEL_PRINT"
+
+    def test_a_babystep_is_capped_per_press(self, client):
+        c, main, cfg, calls = client
+        main._babystep_state.update({"job": None, "total": 0.0})
+        j = self.call(c, "babystep", -5.0).json()
+        assert j["applied"] == -0.05
+
+    def test_the_cumulative_babystep_floor_holds_across_calls(self, client):
+        """The situation where a user keeps pressing "down" is precisely
+        the one where the next press gouges the plate."""
+        c, main, cfg, calls = client
+        main._babystep_state.update({"job": "j", "total": 0.0})
+        for _ in range(10):
+            self.call(c, "babystep", -0.05)
+        assert main._babystep_state["total"] == pytest.approx(-0.5)
+        j = self.call(c, "babystep", -0.05).json()
+        assert j["ok"] is False and j["applied"] == 0.0
+        assert "re-level" in j["detail"]
+
+    def test_the_babystep_accumulator_resets_on_a_new_job(self, client):
+        c, main, cfg, calls = client
+        main._babystep_state.update({"job": "old-job", "total": -0.5})
+        self.call(c, "babystep", -0.05)
+        assert main._babystep_state["total"] == pytest.approx(-0.05)
+
+    def test_mock_mode_never_contacts_moonraker(self, client):
+        c, main, cfg, calls = client
+        before = len(calls)
+        self.call(c, "speed", 120)
+        assert len(calls) == before
+
+    def test_limits_are_advertised_to_the_ui(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/print-control/limits").json()
+        assert j["ranges"]["speed"] == {"min": 25.0, "max": 300.0}
+        assert j["babystep"]["total"] == 0.5
+
+
+class TestUploadAndPrint:
+    """§9's g-code preview no longer uploads anywhere - it parses the file
+    client-side and never touches Moonraker. This is what's left of the
+    upload path: the ordinary "upload and print" action."""
+
+    def test_it_prints(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        seen = {}
+
+        async def fake_upload(name, data, ctype, start_print):
+            seen.update(start_print=start_print)
+            return {"ok": True, "filename": name}
+
+        monkeypatch.setattr(main, "_upload_to_moonraker", fake_upload)
+        c.post("/api/upload-and-print",
+               files={"file": ("a.gcode", b"G1 X1\n", "text/plain")})
+        assert seen["start_print"] is True
+
+    def test_a_non_gcode_upload_is_refused(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/upload-and-print",
+                   files={"file": ("a.txt", b"hi", "text/plain")})
+        assert r.status_code == 400
+
+    def test_a_traversal_filename_is_stripped_to_a_basename(self, client,
+                                                            monkeypatch):
+        """os.path.basename() strips the directory components; what matters
+        is the upload never writes outside the returned filename."""
+        c, main, cfg, calls = client
+
+        async def fake_upload(name, data, ctype, start_print):
+            return {"ok": True, "filename": name}
+
+        monkeypatch.setattr(main, "_upload_to_moonraker", fake_upload)
+        r = c.post("/api/upload-and-print",
+                   files={"file": ("../../etc/passwd.gcode", b"hi",
+                                   "text/plain")})
+        assert r.status_code == 200
+        assert r.json()["filename"] == "passwd.gcode"
+
+
+class TestHistoryEndpoints:
+    def test_mock_history_is_served(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/history?mock=1").json()
+        assert j["mock"] is True and len(j["jobs"]) == 3
+        assert j["jobs"][0]["multiace"]["plan"] == "optimize"
+
+    def test_a_mock_job_detail_is_served(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/history/mock-job-1?mock=1").json()
+        assert j["multiace"]["plan"] == "loadout"
+
+    def test_an_unknown_job_is_a_404(self, client):
+        c, main, cfg, calls = client
+        assert c.get("/api/history/nope?mock=1").status_code == 404
+
+    def test_editing_the_history_needs_debug_mode(self, client):
+        """Destructive and irreversible - gated the same way persistent
+        updates are."""
+        c, main, cfg, calls = client
+        assert c.request("DELETE", "/api/history/x").status_code == 403
+        assert c.post("/api/history/clear").status_code == 403
+
+
+class TestPrinterIdleGuard:
+    """§13.4: applying an update mid-print aborts the job, cuts the heaters
+    and leaves the nozzle set into cold plastic."""
+
+    def _no_mock(self, main, monkeypatch):
+        monkeypatch.setattr(main, "_mock_enabled", lambda req=None: False)
+
+    def test_printing_blocks_an_update(self, client, monkeypatch):
+        c, main, cfg, calls = client
+
+        async def state():
+            return "printing"
+
+        self._no_mock(main, monkeypatch)
+        monkeypatch.setattr(main, "printer_print_state", state)
+        r = c.post("/api/update/apply")
+        assert r.status_code == 409 and "printing" in r.json()["detail"]
+
+    def test_paused_blocks_too(self, client, monkeypatch):
+        c, main, cfg, calls = client
+
+        async def state():
+            return "paused"
+
+        self._no_mock(main, monkeypatch)
+        monkeypatch.setattr(main, "printer_print_state", state)
+        assert c.post("/api/update/apply").status_code == 409
+
+    def test_an_unrecognised_state_fails_closed(self, client, monkeypatch):
+        """"Cannot tell" and "idle" are not the same answer."""
+        c, main, cfg, calls = client
+
+        async def weird():
+            return "reticulating"
+
+        self._no_mock(main, monkeypatch)
+        monkeypatch.setattr(main, "printer_print_state", weird)
+        r = c.post("/api/update/apply")
+        assert r.status_code == 409
+        assert "cannot determine" in r.json()["detail"]
+
+    def test_idle_passes_the_guard_and_hits_the_debug_gate(self, client,
+                                                           monkeypatch):
+        c, main, cfg, calls = client
+
+        async def state():
+            return "standby"
+
+        self._no_mock(main, monkeypatch)
+        monkeypatch.setattr(main, "printer_print_state", state)
+        r = c.post("/api/update/apply")
+        # Past the print check, stopped by the persistent-updates gate.
+        assert r.status_code == 409
+        assert "Persistent updates" in r.json()["detail"]

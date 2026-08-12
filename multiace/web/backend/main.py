@@ -37,12 +37,34 @@ if not _trace.handlers:
     _trace.propagate = False
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import preflight_core
+
+def _load_job_history():
+    """The print-history store (multiace/tools/job_history.py).
+
+    Imported by path rather than package, because installed on the printer
+    the tools live flat in printer_data/config/tools. A missing module
+    degrades to an empty history instead of taking the backend down.
+    """
+    import importlib.util
+    for cand in (Path("/home/lava/printer_data/config/tools/job_history.py"),
+                 Path(__file__).resolve().parents[2] / "tools"
+                 / "job_history.py"):
+        if not cand.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "multiace_job_history", cand)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    return None
+
+job_history = _load_job_history()
 
 def _import_sibling(mod_name: str):
     """Import a top-level multiACE module (multiace/<name>.py).
@@ -92,6 +114,17 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
+# multiACE's own runtime data (print history, swap calibration). Written by
+# ace.py, read here - see plan §4.
+MULTIACE_DATA_DIR = os.environ.get(
+    "MULTIACE_DATA_DIR",
+    "/home/lava/printer_data/multiace",
+)
+# The printer's own web UI keys its views on ?printer=<id>. It is per
+# installation, so it is configurable rather than hardcoded to whatever hash
+# happens to be in one machine's URL - the History tab's "open in the
+# printer UI" link uses it.
+PRINTER_UI_ID = os.environ.get("MULTIACE_PRINTER_UI_ID", "")
 FILAMENT_PARAMS_PATHS = tuple(
     os.environ.get(
         "MULTIACE_FILAMENT_PARAMS",
@@ -190,6 +223,17 @@ ACE_OBJECTS = [
     "idle_timeout",
     "ace_bg_swap",
     "ace_tipform",
+    # §8: the live factors the print controls read BACK. Reading them from
+    # the same subscription rather than tracking a local copy is what makes
+    # the browser and the printer's own display agree - a change made on
+    # the physical screen shows up here, and vice versa. One truth, two
+    # front-ends.
+    "gcode_move",
+    "fan",
+    "extruder",
+    "heater_bed",
+    "virtual_sdcard",
+    "display_status",
 ]
 
 def _slot_state_name(v: Any) -> str:
@@ -224,6 +268,47 @@ def _color_to_hex(c: Any) -> str | None:
     if r == 0 and g == 0 and b == 0:
         return None
     return f"#{r:02x}{g:02x}{b:02x}"
+
+def _print_control_state(status: dict) -> dict:
+    """Live speed/flow/fan/temps/progress for the §8 Print pane.
+
+    Everything here is READ BACK from Moonraker rather than remembered
+    locally, so a change made on the printer's own display shows up in the
+    browser and the two never drift.
+    """
+    gm = status.get("gcode_move") or {}
+    fan = status.get("fan") or {}
+    ext = status.get("extruder") or {}
+    bed = status.get("heater_bed") or {}
+    sd = status.get("virtual_sdcard") or {}
+    disp = status.get("display_status") or {}
+    ps = status.get("print_stats") or {}
+
+    def _pct(v, default=100.0):
+        try:
+            return round(float(v) * 100.0, 1)
+        except (TypeError, ValueError):
+            return default
+
+    homing = gm.get("homing_origin") or [0, 0, 0, 0]
+    try:
+        z_offset = round(float(homing[2]), 3)
+    except (TypeError, ValueError, IndexError):
+        z_offset = 0.0
+    return {
+        "speed_factor":   _pct(gm.get("speed_factor")),
+        "extrude_factor": _pct(gm.get("extrude_factor")),
+        "fan":            _pct(fan.get("speed"), 0.0),
+        "z_offset":       z_offset,
+        "nozzle":  {"temp":   ext.get("temperature"),
+                    "target": ext.get("target")},
+        "bed":     {"temp":   bed.get("temperature"),
+                    "target": bed.get("target")},
+        "progress": round(float(sd.get("progress") or 0.0) * 100.0, 1),
+        "message":  disp.get("message") or "",
+        "state":    ps.get("state") or "",
+        "filename": ps.get("filename") or "",
+    }
 
 def _parse_state(status: dict) -> dict:
     """
@@ -566,6 +651,14 @@ def _parse_state(status: dict) -> dict:
         "display_index_base": idx_base,
         "dryer":              ace.get("dryer_status"),
         "swap_in_progress":   bool(ace.get("swap_in_progress", False)),
+        # §7: 'waiting' means fewer ACEs than configured were found at
+        # startup and multiACE is still looking - the dashboard renders a
+        # banner with a Rescan button instead of the old "restart" dead end.
+        "ace_startup":        ace.get("ace_startup") or {},
+        # §8: the live factors, read back from the same subscription the
+        # printer's own display drives. Never a local copy - a local copy is
+        # how the two front-ends start disagreeing about the machine.
+        "print_control":      _print_control_state(status),
         "aces":               aces_out,
         "toolheads":          toolheads,
         "wiring":             wiring,
@@ -815,10 +908,11 @@ async def _any_head_manual() -> bool:
     except Exception:
         return False
 
-async def _live_slots_async() -> list[dict]:
-    status = await _query_state_gated()
+def _live_slots_from_state(parsed: dict) -> list[dict]:
+    """The identified slots a plan may target, out of an already-parsed
+    /api/state payload. Split out of _live_slots_async so mock mode can feed
+    it a fixture instead of a printer (§2) without duplicating the filter."""
     out = []
-    parsed = _parse_state(status)
     for ace in parsed.get("aces", []) or []:
         for slot in ace.get("slots", []) or []:
             if slot.get("state") == "empty":
@@ -832,6 +926,9 @@ async def _live_slots_async() -> list[dict]:
                 "color":    (slot.get("color") or "").strip().lower(),
             })
     return out
+
+async def _live_slots_async() -> list[dict]:
+    return _live_slots_from_state(_parse_state(await _query_state_gated()))
 
 def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> list[dict]:
     """Apply a T-index → T-index remap on top of an existing slicer-T →
@@ -856,12 +953,10 @@ def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> li
         out.append(new_m)
     return out
 
-async def _head_mode_context() -> dict:
+def _head_ctx_from_state(parsed: dict) -> dict:
     """Head-mode preflight context: mode, the ACE head list + each head's ACE,
     and the loaded feeders (pin candidates). ace_head/ace_heads/head_ace let the
     matcher build one swap bin per ACE head from its own ACE's slots."""
-    status = await _query_state_gated()
-    parsed = _parse_state(status)
     mode = parsed.get("mode") or "normal"
     ace_head = int(parsed.get("ace_head", 3) or 3)
     ace_heads = [int(h) for h in (parsed.get("ace_heads") or [])]
@@ -890,20 +985,72 @@ async def _head_mode_context() -> dict:
             "bg_available": bool(bgs.get("available")),
             "bg_heads": [int(h) for h in (bgs.get("enabled_heads") or [])]}
 
-@app.post("/api/preflight")
-async def preflight(file: UploadFile = File(...)) -> dict:
-    raw_name = file.filename or ""
-    safe_name = os.path.basename(raw_name)
-    if not safe_name or safe_name in (".", "..") or "/" in safe_name or "\\" in safe_name:
-        raise HTTPException(status_code=400, detail="invalid filename")
-    if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
-        raise HTTPException(status_code=400, detail="not a g-code file")
+async def _head_mode_context() -> dict:
+    return _head_ctx_from_state(_parse_state(await _query_state_gated()))
+
+async def _preflight_loadout(request: Request | None):
+    """(live_slots, head_ctx, mocked) for a preflight.
+
+    In mock mode both come from tests/fixtures/mock_state.json instead of the
+    printer, so the whole planner works on a laptop with no printer attached
+    (§2). The 409 "no slots are loaded" is dropped there - it describes a
+    printer, and in mock mode there isn't one.
+    """
+    if _mock_enabled(request):
+        mock = _mock_load("mock_state.json") or {}
+        return _live_slots_from_state(mock), _head_ctx_from_state(mock), True
     if await _any_head_manual():
         raise HTTPException(
             status_code=409,
             detail=("Preflight is disabled while a head is set to manual. "
                     "Switch the head back to auto, or upload the file directly "
                     "via Fluidd."))
+    return await _live_slots_async(), await _head_mode_context(), False
+
+def _parse_virtual_slots(raw: str | None) -> list[dict]:
+    """A what-if loadout for the planner (§2.2), kept in its OWN field.
+
+    §13.6's structural rule: `virtual_slots` and `live_slots` are separate
+    all the way through, and the real rewrite path reads only `live_slots`.
+    Not "a flag that says which one to use" - a flag gets inverted by a bug;
+    a field the real path never reads cannot leak. If a virtual loadout ever
+    reached the rewrite, the printer would swap to slots holding a different
+    material than planned and run it at the wrong temperature.
+    """
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400,
+                            detail="virtual_slots is not valid JSON")
+    if not isinstance(data, list):
+        raise HTTPException(status_code=400,
+                            detail="virtual_slots must be a list")
+    out = []
+    for entry in data[:64]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            out.append({
+                "ace":      int(entry.get("ace", 0)),
+                "slot":     int(entry.get("slot", 0)),
+                "material": str(entry.get("material") or "").strip(),
+                "color":    str(entry.get("color") or "").strip().lower(),
+            })
+        except (TypeError, ValueError):
+            continue
+    return out
+
+@app.post("/api/preflight")
+async def preflight(request: Request, file: UploadFile = File(...),
+                    virtual_slots: str | None = Form(default=None)) -> dict:
+    raw_name = file.filename or ""
+    safe_name = os.path.basename(raw_name)
+    if not safe_name or safe_name in (".", "..") or "/" in safe_name or "\\" in safe_name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
+        raise HTTPException(status_code=400, detail="not a g-code file")
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
@@ -933,23 +1080,37 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     pp = _load_post_processor()
 
     with open(src_path, "r", encoding="utf-8", errors="replace") as f:
-        slicer_colors, slicer_types, num_aces, _used, plan_proxy = \
-            preflight_core.parse_meta(pp, f)
+        slicer_colors, slicer_types, num_aces, _used, plan_proxy, header_text = \
+            preflight_core.parse_meta(pp, f, with_header=True)
 
-    live_slots = await _live_slots_async()
-    if not live_slots:
+    live_slots, head_ctx, mocked = await _preflight_loadout(request)
+    virtual = _parse_virtual_slots(virtual_slots)
+    if not live_slots and not virtual:
         raise HTTPException(status_code=409,
                             detail="no slots are loaded on the printer")
-    head_ctx = await _head_mode_context()
 
+    # The what-if overlay answers "would 2 ACEs beat 1?" without touching
+    # the printer. It NEVER reaches rewrite_pipeline, which reads
+    # live_slots and only live_slots.
+    report_slots = virtual if virtual else live_slots
     try:
-        return preflight_core.build_report(
+        report = preflight_core.build_report(
             pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
-            num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
+            num_aces=num_aces, plan_proxy=plan_proxy, live_slots=report_slots,
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
-            fuzzy=_PREFLIGHT_FUZZY)
+            fuzzy=_PREFLIGHT_FUZZY, header_text=header_text,
+            cost_params=_swap_cost_params(),
+            calibration=_swap_calibration())
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    if mocked:
+        report["mock"] = True
+    if virtual:
+        # Flagged loudly: a plan computed against spools that are not in
+        # the machine must never look like one that was.
+        report["virtual_loadout"] = True
+        report["virtual_slots"] = virtual
+    return report
 
 _PREFLIGHT_JOBS: dict[str, dict] = {}
 _PREFLIGHT_JOBS_LOCK = asyncio.Lock()
@@ -1056,7 +1217,7 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
             num_aces=num_aces, live_slots=live_slots, head_ctx=head_ctx,
             mode=mode, remap_override=remap_override,
             head_assignment=head_assignment, head_plan=head_plan,
-            fuzzy=_PREFLIGHT_FUZZY,
+            fuzzy=_PREFLIGHT_FUZZY, cost_params=_swap_cost_params(),
             set_stage=lambda s, p: _set_stage(state, s, p),
             stage_cb=lambda base, span: _stage_progress(state, base, span))
         cur = Path(final)
@@ -1109,7 +1270,15 @@ class _PreflightPrint(BaseModel):
     head_plan: str = "loadout"
 
 @app.post("/api/preflight/print")
-async def preflight_print(req: _PreflightPrint) -> dict:
+async def preflight_print(request: Request, req: _PreflightPrint) -> dict:
+    # A mocked run must never look like it queued a real print: there is no
+    # printer to queue it on, and a "printing…" UI with nothing behind it is
+    # worse than an honest refusal. Use "Download rewritten g-code" instead.
+    if _mock_enabled(request):
+        raise HTTPException(
+            status_code=503,
+            detail=("mock mode: no printer to print on. Use "
+                    "\"Download rewritten g-code\" to get the file."))
     if req.mode not in ("slicer", "optimize", "layer", "head"):
         raise HTTPException(status_code=400, detail="invalid mode")
     if not re.fullmatch(r"[0-9a-f]{32}", req.token or ""):
@@ -1159,9 +1328,12 @@ async def preflight_print_status(job_id: str) -> dict:
 
 @app.get("/api/preflight/pysrc")
 async def preflight_pysrc() -> dict:
-    """The two Python sources the in-browser Pyodide worker runs: the
-    unmodified post-processor + preflight_core. Served so the browser executes
-    the SAME code as the backend (one source of truth, no JS re-port/drift)."""
+    """The Python sources the in-browser Pyodide worker runs: the unmodified
+    post-processor + preflight_core + swap_cost. Served so the browser executes
+    the SAME code as the backend (one source of truth, no JS re-port/drift).
+
+    Adding a module here means adding it to the worker's init too - the worker
+    writes exactly the files this dict names into its MEMFS."""
     candidates = [
         Path("/home/lava/printer_data/config/tools/post_process_virtual_toolheads.py"),
         Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
@@ -1174,30 +1346,43 @@ async def preflight_pysrc() -> dict:
     if not core_src.is_file():
         raise HTTPException(status_code=503,
                             detail="preflight_core not installed")
+    cost_candidates = [
+        Path("/home/lava/printer_data/config/tools/swap_cost.py"),
+        Path(__file__).resolve().parent.parent.parent / "tools" / "swap_cost.py",
+    ]
+    cost_src = next((p for p in cost_candidates if p.is_file()), None)
     try:
-        return {
+        out = {
             "postprocess": pp_src.read_text(encoding="utf-8"),
             "core":        core_src.read_text(encoding="utf-8"),
         }
+        # swap_cost is optional on purpose: an install that predates it still
+        # gets a working preflight, just without the §1 estimate.
+        if cost_src is not None:
+            out["swap_cost"] = cost_src.read_text(encoding="utf-8")
+        out["cost_params"] = _swap_cost_params()
+        out["calibration"] = _swap_calibration()
+        return out
     except Exception as exc:
         raise HTTPException(status_code=503,
                             detail=f"cannot read sources: {exc}")
 
 @app.get("/api/preflight/livedata")
-async def preflight_livedata() -> dict:
+async def preflight_livedata(request: Request) -> dict:
     """Live ACE/slot identities + head-mode context for the in-browser
     preflight, in the exact shape preflight_core.build_report expects. Keeps the
     slot filtering (rfid/override only) and head-mode resolution single-source on
-    the backend - the browser never re-derives it."""
-    if await _any_head_manual():
-        raise HTTPException(
-            status_code=409,
-            detail="preflight is disabled while a head is set to manual")
-    live_slots = await _live_slots_async()
-    head_ctx = await _head_mode_context()
+    the backend - the browser never re-derives it.
+
+    Mock-aware: with no printer attached the same shape comes out of
+    mock_state.json, so the whole planner works on a laptop (§2)."""
+    live_slots, head_ctx, mocked = await _preflight_loadout(request)
     return {
-        "live_slots": live_slots,
-        "head_ctx":   head_ctx,
+        "live_slots":  live_slots,
+        "head_ctx":    head_ctx,
+        "cost_params": _swap_cost_params(),
+        "calibration": _swap_calibration(),
+        "mock":        mocked,
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
@@ -1217,6 +1402,69 @@ def _read_cfg_scalars() -> dict:
     _cfg_scalar_cache["mtime"] = st.st_mtime
     _cfg_scalar_cache["values"] = main
     return main
+
+#: ace.cfg scalars the §1 cost model reads. Everything here is either a
+#: length, a speed or a purge policy value - the terms the model can
+#: actually compute, as opposed to the unmeasured constants in swap_cost.
+_SWAP_COST_KEYS = (
+    "feed_speed", "retract_speed", "load_length", "retract_length",
+    "swap_retract_length", "seat_overshoot_length", "swap_anti_ooze_retract",
+    "swap_purge_length", "swap_purge_min", "swap_purge_max",
+    "purge_bin_capacity_mm", "filament_diameter", "max_flow_mm3_s",
+)
+_SWAP_COST_BOOL_KEYS = ("purge_color_aware",)
+
+def _as_float(value):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+def _swap_cost_params() -> dict:
+    """The cost model's inputs, straight out of [ace] / [ace N].
+
+    A user who lengthens their bowden gets a longer estimate without
+    touching any code - that is the whole point of deriving the mechanical
+    terms from the config instead of hardcoding them.
+    """
+    try:
+        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        main, per_ace = _extract_params(text)
+    except Exception:
+        return {"main": {}, "per_ace": {}}
+    out: dict = {}
+    for key in _SWAP_COST_KEYS:
+        v = _as_float(main.get(key))
+        if v is not None:
+            out[key] = v
+    for key in _SWAP_COST_BOOL_KEYS:
+        raw = str(main.get(key, "")).strip().lower()
+        if raw:
+            out[key] = raw in ("1", "true", "yes", "on")
+    per: dict = {}
+    for ace_idx, section in (per_ace or {}).items():
+        vals = {}
+        for key, raw in section.items():
+            v = _as_float(raw)
+            if v is not None and (key in _SWAP_COST_KEYS
+                                  or key.rsplit("_", 1)[0] in _SWAP_COST_KEYS):
+                vals[key] = v
+        if vals:
+            per[int(ace_idx)] = vals
+    return {"main": out, "per_ace": per}
+
+def _swap_calibration() -> dict:
+    """§4.3's measured swap medians, when history has produced any.
+
+    Absent or unreadable means "not calibrated yet", which is the normal
+    state on a fresh install - never an error.
+    """
+    try:
+        path = Path(MULTIACE_DATA_DIR) / "swap_stats.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 def _read_display_index_base() -> int:
     """ace.cfg is the source of truth, with the env-var (passed by the
@@ -1314,6 +1562,14 @@ async def update_check() -> dict:
 
 @app.post("/api/update/apply")
 async def update_apply(force: bool = False) -> dict:
+    # §13.4: applying mid-print replaces the extruder kinematics under a
+    # live job and restarts Klipper - the print aborts, the heaters go off,
+    # and the nozzle is left parked in plastic that then solidifies around
+    # it. There is deliberately NO force flag for this check: `force` below
+    # is the updater's own version-downgrade flag, and a mid-print override
+    # from a browser has no legitimate use. The push script keeps
+    # --force-mid-print, because that needs a human typing it into a shell.
+    await require_printer_idle()
 
     if not _DEBUG_FLAG_PATH.exists():
         raise HTTPException(
@@ -1344,6 +1600,331 @@ async def _sudo_run(argv: list[str], timeout: float = 5.0) -> tuple[int, str]:
         return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
     except FileNotFoundError:
         return 127, "sudo not on PATH"
+
+# ---------------------------------------------------------------------------
+# Print state guard (§13.4)
+# ---------------------------------------------------------------------------
+
+#: States in which replacing the Klipper extras under a live job would abort
+#: the print, cut the heaters and leave the nozzle parked in plastic that
+#: then solidifies around it. Freeing a welded-in nozzle is how people damage
+#: a toolhead.
+_BUSY_PRINT_STATES = ("printing", "paused")
+_IDLE_PRINT_STATES = ("standby", "complete", "cancelled", "error", "")
+
+async def printer_print_state() -> str:
+    """`print_stats.state`, or "" when it cannot be read."""
+    try:
+        status = await _query_state_gated()
+    except Exception:
+        return ""
+    return str((status.get("print_stats") or {}).get("state") or "")
+
+async def require_printer_idle() -> str:
+    """Refuse anything that restarts Klipper while a print is running.
+
+    Fails CLOSED: a Moonraker error or a state nobody recognises blocks
+    too. "Cannot tell" and "idle" are not the same answer, and the cost of
+    being wrong here is a ruined print and a damaged toolhead.
+
+    One implementation, used by every entry point that installs code -
+    three separate checks would drift.
+    """
+    if _mock_enabled(None):
+        return "mock"
+    state = await printer_print_state()
+    if state in _BUSY_PRINT_STATES:
+        raise HTTPException(status_code=409,
+                            detail=f"printer is {state}")
+    if state not in _IDLE_PRINT_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=("cannot determine the printer state - refusing to "
+                    "install while a print may be running"))
+    return state
+
+# ---------------------------------------------------------------------------
+# Live print control (§8) - verbs, not gcode
+# ---------------------------------------------------------------------------
+#
+# The raw-gcode passthrough stays for power users. These do NOT reuse it,
+# because a one-tap control that can emit any gcode is a control that can
+# emit M104 S300 off a slider bug. Every value is clamped SERVER-side, so
+# the printer is protected regardless of what the browser sends - a stale
+# page, a fat-fingered curl or a slider that fires an out-of-range value on
+# touch all land on the same ceiling.
+
+#: Verb -> (min, max). Speed, fan, pause/resume/cancel are not hardware
+#: risks (worst case: a ruined print). Flow and the heaters are - M221 at a
+#: high value is sustained over-extrusion, and a temperature above the
+#: material's range carbonises filament in the melt zone.
+PRINT_CONTROL_RANGES = {
+    "speed": (25.0, 300.0),
+    "flow":  (75.0, 125.0),
+    "fan":   (0.0, 100.0),
+}
+
+#: Z babystep is the DAMAGING control: it moves the nozzle relative to the
+#: bed while printing, and repeated negative steps drive it into the plate -
+#: gouged PEI, damaged nozzle, and on a probe-equipped toolhead a bent
+#: probe. Discrete steps only (the UI has buttons, never a slider), and a
+#: cumulative floor, because the situation where a user keeps pressing
+#: "down" is precisely the situation where the next press does damage.
+BABYSTEP_MAX_STEP_MM = 0.05
+BABYSTEP_MAX_TOTAL_MM = 0.5
+
+#: Fallback heater ceilings, used only when Moonraker's config cannot be
+#: read. Klipper's own max_temp catches the extreme; the MATERIAL limit is
+#: tighter and Klipper knows nothing about it.
+DEFAULT_HEATER_LIMITS = {"nozzle": (0.0, 300.0), "bed": (0.0, 120.0)}
+
+MATERIAL_TEMP_LIMITS = {
+    "PLA":  (170.0, 230.0), "PLA+": (180.0, 240.0), "SILK": (190.0, 240.0),
+    "PETG": (210.0, 260.0), "ABS":  (220.0, 270.0), "ASA": (230.0, 270.0),
+    "TPU":  (200.0, 245.0), "PC":   (240.0, 300.0), "PVA": (170.0, 225.0),
+    "PA":   (240.0, 300.0), "HIPS": (220.0, 250.0),
+}
+
+class PrintControl(BaseModel):
+    verb: str
+    value: float | None = None
+
+#: Cumulative babystep for the current job, reset on a job change rather
+#: than on page reload - a reload must not hand back the other half of the
+#: allowance.
+_babystep_state: dict = {"job": None, "total": 0.0}
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(value)))
+
+async def _heater_limits(which: str) -> tuple[float, float]:
+    """(min, max) for a heater: Klipper's configured limits min()-ed with
+    the loaded material's range. Read from Moonraker's config, never
+    hardcoded - a different hotend has different limits."""
+    lo, hi = DEFAULT_HEATER_LIMITS.get(which, (0.0, 250.0))
+    section = "extruder" if which == "nozzle" else "heater_bed"
+    try:
+        cfg = await _mr_get("/printer/objects/query?configfile")
+        settings = ((cfg.get("result") or {}).get("status") or {}) \
+            .get("configfile", {}).get("settings", {}) or {}
+        block = settings.get(section) or {}
+        if block.get("min_temp") is not None:
+            lo = max(lo, float(block["min_temp"]))
+        if block.get("max_temp") is not None:
+            hi = min(hi, float(block["max_temp"]))
+    except Exception:
+        pass
+    if which == "nozzle":
+        try:
+            parsed = _parse_state(await _query_state_gated())
+            for th in parsed.get("toolheads") or []:
+                if not th.get("filament_detected"):
+                    continue
+                mat = MATERIAL_TEMP_LIMITS.get(
+                    str(th.get("material") or "").strip().upper())
+                if mat:
+                    lo, hi = max(lo, mat[0]), min(hi, mat[1])
+        except Exception:
+            pass
+    return lo, hi
+
+async def _babystep_allowance(delta: float) -> tuple[float, str]:
+    """Clamp one babystep against the per-press and per-job limits."""
+    step = _clamp(delta, -BABYSTEP_MAX_STEP_MM, BABYSTEP_MAX_STEP_MM)
+    try:
+        parsed = _parse_state(await _query_state_gated())
+        job = parsed.get("print_filename") or parsed.get("printer_state")
+    except Exception:
+        job = None
+    if _babystep_state["job"] != job:
+        _babystep_state["job"] = job
+        _babystep_state["total"] = 0.0
+    total = _babystep_state["total"] + step
+    if total < -BABYSTEP_MAX_TOTAL_MM:
+        return 0.0, (f"-{BABYSTEP_MAX_TOTAL_MM:.2f} mm reached - "
+                     "re-level instead of stepping further down")
+    if total > BABYSTEP_MAX_TOTAL_MM:
+        return 0.0, f"+{BABYSTEP_MAX_TOTAL_MM:.2f} mm reached"
+    _babystep_state["total"] = total
+    return step, ""
+
+@app.post("/api/print-control")
+async def print_control(request: Request, req: PrintControl) -> dict:
+    """A whitelisted verb + value, never a raw string from the UI.
+
+    Returns the APPLIED value so the UI can snap back to the truth: an
+    out-of-range request is clamped, not silently rejected, because a
+    slider that keeps showing 400 % after the printer refused it is a
+    slider that lies about the machine.
+    """
+    verb = (req.verb or "").strip().lower()
+    value = req.value
+    mocked = _mock_enabled(request)
+
+    if verb in PRINT_CONTROL_RANGES:
+        if value is None:
+            raise HTTPException(status_code=400, detail=f"{verb} needs a value")
+        lo, hi = PRINT_CONTROL_RANGES[verb]
+        applied = _clamp(value, lo, hi)
+        if verb == "speed":
+            script = f"M220 S{applied:.0f}"
+        elif verb == "flow":
+            script = f"M221 S{applied:.0f}"
+        else:
+            # Percent in, 0-255 out: the UI thinks in percent and M106
+            # does not.
+            script = f"M106 S{round(applied * 255 / 100):d}"
+    elif verb in ("nozzle", "bed"):
+        if value is None:
+            raise HTTPException(status_code=400, detail=f"{verb} needs a value")
+        lo, hi = await _heater_limits(verb)
+        applied = _clamp(value, lo, hi)
+        heater = "extruder" if verb == "nozzle" else "heater_bed"
+        script = f"SET_HEATER_TEMPERATURE HEATER={heater} TARGET={applied:.0f}"
+    elif verb == "babystep":
+        if value is None:
+            raise HTTPException(status_code=400,
+                                detail="babystep needs a value")
+        applied, refused = await _babystep_allowance(value)
+        if refused:
+            return {"ok": False, "verb": verb, "applied": 0.0,
+                    "total_mm": _babystep_state["total"], "detail": refused}
+        script = f"SET_GCODE_OFFSET Z_ADJUST={applied:.3f} MOVE=1"
+    elif verb in ("pause", "resume", "cancel"):
+        applied = None
+        script = {"pause": "PAUSE", "resume": "RESUME",
+                  "cancel": "CANCEL_PRINT"}[verb]
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown verb: {verb}")
+
+    if mocked:
+        # Mock mode never contacts Moonraker - the whole point is that it
+        # works with no printer attached.
+        return {"ok": True, "verb": verb, "applied": applied,
+                "script": script, "mock": True}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(f"{MOONRAKER_URL}/printer/gcode/script",
+                                  json={"script": script})
+            r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    out = {"ok": True, "verb": verb, "applied": applied, "script": script}
+    if verb == "babystep":
+        out["total_mm"] = round(_babystep_state["total"], 3)
+    return out
+
+@app.get("/api/print-control/limits")
+async def print_control_limits() -> dict:
+    """The clamps the UI should render, so a slider cannot even offer a
+    value the server will refuse. The server check stays regardless - this
+    is convenience, not the guard."""
+    nozzle = await _heater_limits("nozzle")
+    bed = await _heater_limits("bed")
+    return {
+        "ranges": {k: {"min": v[0], "max": v[1]}
+                   for k, v in PRINT_CONTROL_RANGES.items()},
+        "nozzle": {"min": nozzle[0], "max": nozzle[1]},
+        "bed":    {"min": bed[0], "max": bed[1]},
+        "babystep": {"step": BABYSTEP_MAX_STEP_MM,
+                     "total": BABYSTEP_MAX_TOTAL_MM,
+                     "used": round(_babystep_state["total"], 3)},
+    }
+
+# ---------------------------------------------------------------------------
+# Print history (§4)
+# ---------------------------------------------------------------------------
+
+def _require_history():
+    if job_history is None:
+        raise HTTPException(
+            status_code=503,
+            detail="job_history.py is not installed - re-run "
+                   "install_multiace.sh")
+    return job_history
+
+def _printer_ui_url(fragment: str = "") -> str:
+    """A deep link into the printer's OWN web UI.
+
+    multiACE reads the same Moonraker endpoints that UI reads, so this is
+    an "open in the printer UI" convenience, not a data source. The
+    ?printer=<id> query is that UI's multi-printer key - configurable
+    rather than hardcoded, because it is per installation.
+    """
+    base = _webcam_base()
+    pid = PRINTER_UI_ID
+    q = f"/?printer={pid}" if pid else "/"
+    return f"{base}{q}{fragment}"
+
+async def _moonraker_history(limit: int) -> list[dict]:
+    try:
+        data = await _mr_get(f"/server/history/list?limit={int(limit)}"
+                             f"&order=desc")
+    except Exception:
+        return []
+    jobs = (data.get("result") or {}).get("jobs") or []
+    return jobs if isinstance(jobs, list) else []
+
+@app.get("/api/history")
+async def history_list(request: Request, limit: int = 50) -> dict:
+    """Moonraker's job history joined with multiACE's own records.
+
+    Not a copy of Moonraker's data - a join to it. Moonraker stays
+    authoritative for duration and result; multiACE's record is
+    authoritative for the plan, the assignment and the swaps, which
+    Moonraker has no way of knowing.
+    """
+    limit = max(1, min(int(limit or 50), 200))
+    if _mock_enabled(request):
+        mock = _mock_load("mock_history.json") or {}
+        return {"jobs": (mock.get("jobs") or [])[:limit], "mock": True}
+    records = _require_history().load_records(MULTIACE_DATA_DIR, limit=limit)
+    jobs = _require_history().join_history(await _moonraker_history(limit), records)
+    return {"jobs": jobs[:limit],
+            "printer_ui": _printer_ui_url("#/history")}
+
+@app.get("/api/history/{job_id}")
+async def history_detail(job_id: str, request: Request) -> dict:
+    if _mock_enabled(request):
+        mock = _mock_load("mock_history.json") or {}
+        for row in mock.get("jobs") or []:
+            if row.get("id") == job_id:
+                return row
+        raise HTTPException(status_code=404, detail="job not found")
+    for rec in _require_history().load_records(MULTIACE_DATA_DIR):
+        if rec.get("id") == job_id:
+            return {"multiace": rec,
+                    "accuracy": _require_history().estimate_accuracy(rec)}
+    raise HTTPException(status_code=404, detail="job not found")
+
+@app.delete("/api/history/{job_id}")
+async def history_delete(job_id: str) -> dict:
+    if not _DEBUG_FLAG_PATH.exists():
+        raise HTTPException(status_code=403,
+                            detail="enable persistent updates (debug mode) "
+                                   "to edit the history")
+    if not _require_history().delete_record(MULTIACE_DATA_DIR, job_id):
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True, "deleted": job_id}
+
+@app.post("/api/history/clear")
+async def history_clear() -> dict:
+    if not _DEBUG_FLAG_PATH.exists():
+        raise HTTPException(status_code=403,
+                            detail="enable persistent updates (debug mode) "
+                                   "to clear the history")
+    return {"ok": _require_history().clear_records(MULTIACE_DATA_DIR)}
+
+@app.get("/api/history/stats/swaps")
+async def history_swap_stats() -> dict:
+    """The measured swap medians the cost model prefers over its constants."""
+    stats = _require_history().aggregate_swap_stats(
+        _require_history().load_records(MULTIACE_DATA_DIR))
+    return {"stats": stats,
+            "min_samples": _require_history().MIN_CALIBRATION_SAMPLES}
 
 @app.get("/api/debug-mode")
 async def debug_mode_get() -> dict:
@@ -1424,20 +2005,26 @@ async def fluidd_camera() -> dict:
         raise HTTPException(status_code=502,
                             detail=f"moonraker: {e}")
 
-@app.post("/api/upload-and-print")
-async def upload_and_print(file: UploadFile = File(...)) -> dict:
-
-    raw_name = file.filename or ""
-    safe_name = os.path.basename(raw_name)
-    if not safe_name or safe_name in (".", "..") or "/" in safe_name or "\\" in safe_name:
+def _safe_gcode_name(raw_name: str) -> str:
+    safe_name = os.path.basename(raw_name or "")
+    if not safe_name or safe_name in (".", "..") \
+            or "/" in safe_name or "\\" in safe_name:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-    files = {"file": (safe_name, data, file.content_type or "application/octet-stream")}
-    payload = {"root": "gcodes", "print": "true"}
+    return safe_name
+
+async def _upload_to_moonraker(safe_name: str, data: bytes,
+                               content_type: str | None,
+                               start_print: bool) -> dict:
+    """Upload a g-code to Moonraker.
+
+    `start_print` is a parameter rather than a hardcoded "true" so a caller
+    can stage a file without starting a print.
+    """
+    files = {"file": (safe_name, data,
+                      content_type or "application/octet-stream")}
+    payload = {"root": "gcodes", "print": "true" if start_print else "false"}
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
             r = await client.post(f"{MOONRAKER_URL}/server/files/upload",
@@ -1449,6 +2036,15 @@ async def upload_and_print(file: UploadFile = File(...)) -> dict:
                             detail=f"moonraker: {e.response.text}")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+
+@app.post("/api/upload-and-print")
+async def upload_and_print(file: UploadFile = File(...)) -> dict:
+    safe_name = _safe_gcode_name(file.filename or "")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    return await _upload_to_moonraker(safe_name, data, file.content_type,
+                                      start_print=True)
 
 @app.get("/api/state")
 async def get_state(request: Request) -> dict:

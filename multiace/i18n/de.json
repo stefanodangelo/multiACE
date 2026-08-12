@@ -15,7 +15,8 @@
       "dashboard": "Übersicht",
       "dry": "Trocknen",
       "config": "Konfiguration",
-      "display": "Display"
+      "display": "Display",
+      "history": "Verlauf"
     },
     "common": {
       "active": "aktiv",
@@ -323,7 +324,22 @@
       "head_go_optimize": "Vorgeschlagenes Loadout drucken",
       "head_go_layer": "Belady-Loadout drucken",
       "pref_bed_mesh": "Bett-Mesh",
-      "pref_camera": "Zeitraffer-Kamera"
+      "pref_camera": "Zeitraffer-Kamera",
+      "est_conf_modelled": "geschätzt",
+      "est_conf_calibrated": "kalibriert",
+      "est_conf_degraded": "Schätzung unsicher",
+      "est_confidence_hint": "Aus deiner ace.cfg modelliert, nicht an dieser Maschine gemessen. Die Druckhistorie kalibriert sie nach 5 abgeschlossenen Jobs.",
+      "est_filament": "{m} m / {g} g Filament",
+      "est_waste": "{g} g Purge ({pct} %)",
+      "est_purge_in_slicer": "bereits im Slicer-Gesamtwert",
+      "est_swaps": "{inline} inline / {bg} Hintergrund-Wechsel",
+      "est_per_color": "Pro Farbe",
+      "est_purge": "Purge",
+      "download": "Umgeschriebenen G-Code herunterladen",
+      "download_hint": "Die Datei speichern, die multiACE drucken würde, statt sie zu drucken.",
+      "download_done": "{name} heruntergeladen",
+      "download_local_only": "Download gibt es nur für den Browser-Preflight.",
+      "timeline": "Wechsel-Zeitleiste"
     },
     "queue": {
       "send_all_tooltip": "Alle Queue-Befehle an den Drucker senden (UI darf danach geschlossen werden)",
@@ -341,12 +357,17 @@
       "webcam_hint": "Kamera in Moonraker/crowsnest einrichten und neu laden.",
       "console_empty": "Noch keine Konsolenausgabe.",
       "console_follow": "Folgen",
-      "console_placeholder": "G-Code, z. B. ACE_STATUS"
+      "console_placeholder": "G-Code, z. B. ACE_STATUS",
+      "print": "Druck"
     },
     "retry": {
       "retrying": "Laden an Kopf {head} fehlgeschlagen (ACE {ace} / Slot {slot}) – Versuch {attempt}/{max}…",
       "now": "Jetzt erneut",
       "stop": "Abbrechen & pausieren"
+    },
+    "ace_startup": {
+      "waiting": "Warte auf {expected} ACE(s) – {found} gefunden. ACE einschalten, sie wird innerhalb weniger Sekunden automatisch erkannt. Kein Neustart nötig.",
+      "rescan": "Jetzt suchen"
     },
     "debug": {
       "mock": "Testdaten",
@@ -361,6 +382,64 @@
       "sim_console": "Konsolenzeile",
       "sim_error": "G-Code-Fehler",
       "sim_clear": "Zurücksetzen"
+    },
+    "print_control": {
+      "speed": "Geschwindigkeit",
+      "flow": "Fluss",
+      "fan": "Lüfter",
+      "nozzle": "Düse",
+      "bed": "Bett",
+      "babystep": "Z-Offset",
+      "babystep_used": "{used} mm von ±{max} mm pro Job verbraucht. Tasten statt Schieberegler - ein Druck ist ein kleiner Schritt.",
+      "reset_hint": "Zurück auf 100 %",
+      "pause": "Pause",
+      "resume": "Fortsetzen",
+      "cancel": "Druck abbrechen",
+      "cancel_title": "Diesen Druck abbrechen?",
+      "cancel_msg": "Der Druck stoppt sofort und kann nicht fortgesetzt werden.",
+      "cancel_ok": "Druck abbrechen"
+    },
+    "history": {
+      "title": "Druckverlauf",
+      "empty": "Noch keine Drucke aufgezeichnet.",
+      "date": "Datum",
+      "file": "Datei",
+      "duration": "Dauer",
+      "colors": "Farben",
+      "swaps": "Wechsel",
+      "filament": "Filament",
+      "result": "Ergebnis",
+      "plan": "Plan",
+      "retries": "Load-Retries",
+      "accuracy": "Genauigkeit der Schätzung",
+      "accuracy_line": "geschätzt {predicted}, tatsächlich {actual} ({pct} % daneben)",
+      "neighbor_retracts": "Nachbar-Freiräumung (mm pro Slot)",
+      "no_multiace_record": "Kein multiACE-Datensatz für diesen Job - er wurde ohne Preflight gedruckt, oder bevor der Verlauf aufgezeichnet wurde.",
+      "ambiguous": "mehrdeutige Zuordnung",
+      "ambiguous_hint": "Zwei Drucke dieser Datei starteten innerhalb von 90 s, multiACE kann den Datensatz nicht sicher zuordnen. Wird ungejoint gezeigt statt geraten.",
+      "open_printer_ui": "In der Drucker-Oberfläche öffnen"
+    },
+    "virtual": {
+      "title": "Was-wäre-wenn-Bestückung (rührt den Drucker nicht an)",
+      "enable": "Damit planen statt mit der echten Bestückung",
+      "seed_1": "1 ACE vorbelegen",
+      "seed_2": "2 ACEs vorbelegen",
+      "seed_3": "3 ACEs vorbelegen",
+      "export": "Exportieren",
+      "slot": "Slot",
+      "material": "Material",
+      "hint": "Eine reine Lese-Überlagerung für Fragen wie „wären 2 ACEs besser als 1?“. Sie schreibt nie Slot-Zustände und erreicht nie das Rewrite - gedruckt wird immer mit den Spulen, die tatsächlich im Gerät sind.",
+      "active_warning": "Planung gegen eine virtuelle Bestückung mit {aces} ACE(s). Diese Pläne sind hypothetisch; gedruckt wird mit der echten Bestückung.",
+      "report_banner": "Dieser Plan wurde gegen eine WAS-WÄRE-WENN-Bestückung gerechnet, nicht gegen die Spulen im Gerät."
+    },
+    "gpreview": {
+      "show": "Vorschau anzeigen",
+      "hide": "Vorschau ausblenden",
+      "play": "Abspielen",
+      "pause": "Pause",
+      "layer": "Ebene {n} / {total}",
+      "cumulative": "Bisherige Ebenen anzeigen",
+      "show_travel": "Leerfahrten anzeigen"
     }
   },
   "msg": {
@@ -395,7 +474,8 @@
     "feed_assist_disarmed": "Feed-Assist deaktiviert auf ACE {ace} Slot {slot}",
     "feed_assist_armed": "Feed-Assist aktiviert auf ACE {ace} Slot {slot}",
     "waiting_for_devices": "[multiACE] Warte auf {expected} ACE-Gerät(e), aktuell {count} gefunden...",
-    "usb_unstable": "[multiACE] USB instabil, erwartet {expected} ACEs, gefunden {count} - ACE inaktiv, Klipper läuft weiter. FIRMWARE_RESTART nach erneutem Anschließen erforderlich.",
+    "usb_unstable": "[multiACE] Warte auf {expected} ACE(s), gefunden {count} - ACE einschalten, sie wird innerhalb weniger Sekunden erkannt, oder ACE_RESCAN ausführen. Kein FIRMWARE_RESTART nötig.",
+    "late_ace_connected": "[multiACE] ACE {count}/{expected} gefunden und verbunden - kein Neustart nötig",
     "all_expected_found": "[multiACE] Alle {expected} erwarteten ACE-Geräte gefunden, kanonische Zuordnung gesichert",
     "no_ace_serial_configured": "[multiACE] Keine ACE-Geräte gefunden und keine Seriennummer konfiguriert - ACE inaktiv, Klipper läuft weiter",
     "open_ace_failed_attempts": "[multiACE] ACE {ace} konnte beim Start nach {attempts} Versuchen nicht geöffnet werden",
@@ -540,6 +620,8 @@
     "fa_test_more": "[ACE_FA_TEST]     ... {count} weitere",
     "fa_test_no_ack_header": "[ACE_FA_TEST]   NO_ACK (Firmware hat nie geantwortet):",
     "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}",
-    "unload_gate_empty": "[multiACE] Kopf {head}: ACE {ace} / Slot {slot} meldet LEER, obwohl der Toolhead noch Filament hält - vermutlich oberhalb des ACE-Gates leergelaufen oder gerissen. Die Maschine kann es nicht zurückziehen (das Ende ist aus den ACE-Zahnrädern): Kopf heizen, Bowden-Kupplung am Toolhead öffnen und das Filament von Hand herausziehen, dann den Slot neu bestücken."
+    "unload_gate_empty": "[multiACE] Kopf {head}: ACE {ace} / Slot {slot} meldet LEER, obwohl der Toolhead noch Filament hält - vermutlich oberhalb des ACE-Gates leergelaufen oder gerissen. Die Maschine kann es nicht zurückziehen (das Ende ist aus den ACE-Zahnrädern): Kopf heizen, Bowden-Kupplung am Toolhead öffnen und das Filament von Hand herausziehen, dann den Slot neu bestücken.",
+    "purge_bin_nearly_full": "[multiACE] Purge-Behälter bei {percent}% ({used}/{capacity} mm) - vor dem nächsten Mehrfarbdruck leeren. Ist er voll, werden Purges verweigert.",
+    "purge_skipped_cold": "[multiACE] Purge übersprungen: die Düse ist nicht heiß genug zum Extrudieren. Filament durch ein kaltes Hotend zu drücken schleift es flach."
   }
 }

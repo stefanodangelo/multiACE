@@ -646,6 +646,11 @@ body { padding-bottom: 64px; }
                   padding: .4rem .5rem; background: var(--card); }
 .preflight-swatch { width: 32px; flex: 0 0 32px; border-radius: 3px;
                     border: 1px solid var(--border); }
+/* Small inline colour chip - swim lanes, history rows, the g-code preview
+   legend. Distinct from .preflight-swatch (a bigger card-style block). */
+.swatch { display: inline-block; width: 12px; height: 12px;
+         border-radius: 2px; border: 1px solid rgba(0, 0, 0, .35);
+         vertical-align: middle; }
 .preflight-meta { display: flex; flex-direction: column; gap: .1rem;
                   font-size: .8rem; min-width: 0; word-break: break-word; }
 .preflight-dot { display: inline-block; width: 14px; height: 14px;
@@ -681,6 +686,26 @@ body { padding-bottom: 64px; }
                        flex-wrap: wrap; }
 .preflight-plan-head h4 { margin: 0; }
 .preflight-infeasible { color: var(--warn, #c4651e); font-weight: 500; }
+/* Time & filament estimate (plan 1.4). The confidence pill is deliberately
+   loud: these numbers are modelled until print history calibrates them. */
+.estimate-card { border: 1px solid var(--border); border-radius: 4px;
+                 padding: .5rem .6rem; margin: .4rem 0;
+                 background: rgba(127, 127, 127, .06); }
+.estimate-row { display: flex; align-items: baseline; gap: .5rem;
+                flex-wrap: wrap; }
+.estimate-big { font-size: 1.3rem; font-weight: 600; }
+.estimate-delta { color: var(--warn, #c4651e); font-weight: 600; }
+.estimate-conf { font-size: .75rem; text-transform: uppercase;
+                 letter-spacing: .03em; }
+.estimate-conf.conf-modelled { background: rgba(127, 127, 127, .2); }
+.estimate-conf.conf-calibrated { background: rgba(60, 192, 122, .2); }
+.estimate-conf.conf-degraded { background: rgba(196, 101, 30, .25); }
+.estimate-per-color { width: 100%; border-collapse: collapse;
+                      margin: .3rem 0; font-size: .85rem; }
+.estimate-per-color td { padding: .15rem .4rem; }
+.estimate-assumptions { margin: .3rem 0 0; padding-left: 1.1rem; }
+.estimate-assumptions li { margin: .1rem 0; }
+
 .preflight-mapping { width: 100%; border-collapse: collapse; margin: .4rem 0;
                      font-size: .82rem; }
 .preflight-mapping th { text-align: left; padding: .2rem .4rem;
@@ -1204,3 +1229,85 @@ main.with-sidebar .main-col { min-width: 0; }
 .debug-kv { display: flex; justify-content: space-between; gap: .5rem; }
 .debug-actions { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .5rem; }
 .debug-actions button { font-size: .72rem; padding: .18rem .45rem; }
+
+/* --- Live print control pane (plan section 8) ------------------------- */
+/* Babystep is buttons, never a slider: a slider makes it trivially easy to
+   send a large negative delta in one gesture, and that drives the nozzle
+   into the plate. */
+.side-print { padding: .6rem; overflow-y: auto; }
+.pc-status { display: flex; gap: .4rem; align-items: center;
+             flex-wrap: wrap; margin-bottom: .6rem; }
+.pc-row { display: flex; align-items: center; gap: .5rem; margin: .45rem 0; }
+.pc-row > span:first-child { min-width: 6.5rem; }
+.pc-row input[type=range] { flex: 1; min-width: 4rem; }
+.pc-row b { min-width: 4rem; text-align: right; font-variant-numeric: tabular-nums; }
+.pc-reset { font-size: .75rem; padding: .1rem .4rem; }
+.pc-temp-in { width: 4.5rem; }
+.pc-baby button { min-width: 3.2rem; }
+.pc-actions { gap: .4rem; flex-wrap: wrap; }
+.pc-actions button { flex: 1; }
+
+/* --- Print history (plan section 4) ----------------------------------- */
+.history-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.history-table th { text-align: left; padding: .3rem .4rem;
+                    border-bottom: 1px solid var(--border); }
+.history-table td { padding: .3rem .4rem; vertical-align: middle; }
+.history-row { cursor: pointer; }
+.history-row:hover { background: rgba(127, 127, 127, .08); }
+.history-detail td { background: rgba(127, 127, 127, .06);
+                     padding: .5rem .8rem; }
+.history-swaps { border-collapse: collapse; font-size: .85rem;
+                 margin: .3rem 0; }
+.history-swaps td { padding: .1rem .6rem .1rem 0; }
+.history-table .swatch { margin-right: 2px; }
+
+/* --- Plan timeline (plan section 3.2 / 3.3) --------------------------- */
+/* Inline swaps are a solid stall block: the print is WAITING. Background
+   swaps are hatched and half-height: the print is not. That visual
+   difference is the whole argument for one placement over another. */
+.swimlanes { margin: .3rem 0; }
+.swimlane { display: flex; align-items: center; gap: .5rem; margin: .2rem 0; }
+.swimlane-head { min-width: 2rem; font-size: .8rem; opacity: .8; }
+.swimlane-track { display: flex; gap: 2px; flex: 1; flex-wrap: wrap; }
+.swim-block { display: inline-block; width: 10px; height: 18px;
+              border-radius: 2px; border: 1px solid rgba(0, 0, 0, .3); }
+.swim-block.swim-cross_ace_bg {
+  height: 9px; align-self: center;
+  background-image: repeating-linear-gradient(
+      45deg, rgba(255,255,255,.55) 0 2px, transparent 2px 4px);
+}
+.swim-block.swim-cross_ace_inline,
+.swim-block.swim-same_ace { box-shadow: 0 0 0 2px rgba(200, 40, 40, .55); }
+.swim-block.swim-feeder_pin { height: 6px; align-self: center; opacity: .7; }
+.swim-block.swim-first_load { border-style: dashed; }
+
+/* --- G-code preview (plan section 9) ---------------------------------- */
+/* Parsed and rendered entirely client-side (gcode_preview.js +
+   gcode_preview_worker.js) - no upload, no printer required. */
+.gpreview-pane { margin: .5rem 0; }
+.gpreview-canvas { width: 100%; height: 50vh; display: block;
+                   border: 1px solid var(--border); border-radius: 4px;
+                   background: #0c0c0e; }
+.gpreview-controls { display: flex; align-items: center; gap: .6rem;
+                     flex-wrap: wrap; margin: .4rem 0; }
+.gpreview-slider { flex: 1; min-width: 8rem; }
+.gpreview-layer-label { font-variant-numeric: tabular-nums;
+                        min-width: 5.5rem; }
+.gpreview-toggle { display: flex; align-items: center; gap: .3rem;
+                   font-size: .85rem; white-space: nowrap; }
+.gpreview-legend { display: flex; gap: .8rem; flex-wrap: wrap;
+                   font-size: .8rem; }
+.gpreview-legend-item { display: flex; align-items: center; gap: .3rem; }
+
+/* --- What-if loadout (plan section 2.2) ------------------------------- */
+/* Deliberately loud when active: a plan computed against spools that are
+   not in the machine must never be mistaken for one that was. */
+.virtual-loadout { margin: .4rem 0; }
+.virtual-table { border-collapse: collapse; font-size: .85rem;
+                 margin: .3rem 0; }
+.virtual-table td { padding: .15rem .4rem; }
+.virtual-mat { width: 6rem; }
+.virtual-banner { background: rgba(196, 101, 30, .18);
+                  border: 1px solid rgba(196, 101, 30, .5);
+                  border-radius: 4px; padding: .4rem .6rem; margin: .4rem 0;
+                  font-weight: 600; }

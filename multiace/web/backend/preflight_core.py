@@ -6,6 +6,18 @@ from collections import deque
 
 DEFAULT_FUZZY = 30
 
+# §1's estimate. Imported softly on purpose: preflight_core runs in the
+# backend (package import), on the printer (flat files in tools/) and in the
+# browser's Pyodide worker (flat files in MEMFS). A missing swap_cost must
+# degrade to "no estimate", never fail a preflight.
+try:                                    # backend / dev checkout
+    from multiace.tools import swap_cost as _swap_cost
+except ImportError:                     # pragma: no cover - install layouts
+    try:
+        import swap_cost as _swap_cost
+    except ImportError:
+        _swap_cost = None
+
 _TOOLCHANGE_RE = re.compile(
     r"^;\s*Change Tool\s*(\d+)\s*->\s*Tool\s*(\d+)", re.MULTILINE)
 
@@ -13,13 +25,16 @@ _PLAN_KEEP_RE = re.compile(
     r'^(;\s*Change Tool|;\s*LAYER_CHANGE|;\s*filament\b|T\d{1,2}\s*$|M73\b)',
     re.IGNORECASE)
 
-def parse_meta(pp, line_iter):
+def parse_meta(pp, line_iter, with_header=False):
     """One streaming pass over the gcode lines → everything the report/rewrite
     need from the file metadata. Works on any iterable of lines, so the backend
     can pass an open file handle (memory-friendly for huge files) and the
     browser worker can pass text.splitlines(keepends=True).
 
-    Returns (slicer_colors, slicer_types, num_aces, used, plan_proxy).
+    Returns (slicer_colors, slicer_types, num_aces, used, plan_proxy), or the
+    same tuple plus the raw head+tail metadata buffer when `with_header` is
+    set (§1's estimate needs the filament/time header lines, and re-reading a
+    multi-MB file just to find them would be wasteful).
     """
     head_lines: list = []
     tail_lines: deque = deque(maxlen=2000)
@@ -45,6 +60,8 @@ def parse_meta(pp, line_iter):
     if used:
         slicer_colors = {t: c for t, c in slicer_colors.items() if t in used}
         slicer_types  = {t: m for t, m in slicer_types.items() if t in used}
+    if with_header:
+        return slicer_colors, slicer_types, num_aces, used, plan_proxy, meta_buf
     return slicer_colors, slicer_types, num_aces, used, plan_proxy
 
 def used_tool_indices(pp, gcode: str) -> set:
@@ -61,6 +78,126 @@ def used_tool_indices(pp, gcode: str) -> set:
         except Exception:
             used = set()
     return used
+
+def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
+                      slicer_colors=None, slicer_types=None,
+                      event_times=None, bg_heads=None):
+    """Everything the per-plan estimate needs, built once per preflight.
+
+    Returns None when the estimate cannot be produced (no swap_cost module,
+    or a post-processor too old to build a timeline). Every caller treats
+    None as "no estimate", so a preflight never fails over a number that is
+    informational by definition.
+    """
+    if _swap_cost is None or not hasattr(pp, "build_swap_timeline"):
+        return None
+    try:
+        params = cost_params or {}
+        # Accept both the flat {key: value} shape and the backend's
+        # {"main": ..., "per_ace": ...} split, so a caller can hand over
+        # whatever _swap_cost_params() gave it without unpacking.
+        if "main" in params or "per_ace" in params:
+            main, per_ace = params.get("main") or {}, params.get("per_ace") or {}
+        else:
+            main, per_ace = params, {}
+        model = _swap_cost.SwapCostModel.from_params(main, per_ace)
+        if calibration:
+            model = model.with_calibration(calibration)
+        header = _swap_cost.parse_header(header_text or "")
+    except Exception:
+        return None
+    return {
+        "_pp":         pp,
+        "model":       model,
+        "header":      header,
+        "colors":      dict(slicer_colors or {}),
+        "materials":   dict(slicer_types or {}),
+        "event_times": event_times,
+        "bg_heads":    list(bg_heads or []),
+    }
+
+
+def attach_estimate(ctx, plan, events, assignment):
+    """Add `timeline` (§3.2) and `estimate` (§1.3) to one plan, in place.
+
+    Plans are compared in minutes and grams rather than swap counts, which
+    is the whole point: a plan with more swaps but all of them backgrounded
+    can be the faster one.
+    """
+    if not ctx or assignment is None or not plan.get("feasible", True):
+        return plan
+    try:
+        timeline = ctx_timeline(ctx, events, assignment)
+        plan["timeline"] = timeline
+        plan["estimate"] = _swap_cost.build_estimate(
+            ctx["model"], ctx["header"], timeline,
+            materials=ctx["materials"], colors=ctx["colors"],
+            used_tools=sorted(ctx["colors"].keys()) or None)
+    except Exception:
+        # An estimate is informational; a plan without one is still a plan.
+        plan.pop("timeline", None)
+        plan.pop("estimate", None)
+    return plan
+
+
+def ctx_timeline(ctx, events, assignment):
+    return ctx["_pp"].build_swap_timeline(
+        events, assignment, event_times=ctx["event_times"],
+        bg_heads=ctx["bg_heads"], cost_model=ctx["model"],
+        colors=ctx["colors"], materials=ctx["materials"])
+
+
+def make_purge_callback(cost_params, slicer_colors, slicer_types,
+                        purge_dest=None):
+    """A (head, ace, slot, from_t, to_t) -> mm callback for the rewrite.
+
+    Returns None unless colour-aware purge is explicitly enabled. That
+    default is deliberate: purge is the one thing multiACE commands the
+    hotend to extrude by a computed volume, and an over-purge that
+    overflows the bin ends a hotend. Until a few real prints have been
+    compared against what the bin actually caught, the feature only
+    REPORTS (via the estimate) and emits nothing.
+    """
+    if _swap_cost is None:
+        return None
+    params = cost_params or {}
+    main = params.get("main", params) or {}
+    if not main.get("purge_color_aware"):
+        return None
+    if purge_dest in ("tower", "flush", "mixed"):
+        # The slicer already handles purge here, in a place with unbounded
+        # capacity and at a flow rate it computed itself. multiACE commands
+        # no extrusion at all in this mode - it only reports (§1.6's waste
+        # line), which is why the common case carries no hardware risk.
+        return None
+    try:
+        model = _swap_cost.SwapCostModel.from_params(
+            main, params.get("per_ace") or {})
+    except Exception:
+        return None
+
+    def purge_mm_for(head, ace, slot, from_t, to_t):
+        return model.purge_mm((slicer_colors or {}).get(from_t),
+                              (slicer_colors or {}).get(to_t),
+                              (slicer_types or {}).get(to_t))
+    return purge_mm_for
+
+
+def assignment_from_mapping(mapping):
+    """Multi-mode `mapping` rows → the {t: entry} shape the timeline wants.
+
+    In multi mode a colour's head IS its slot index (that is what the remap
+    encodes), so head and slot are the same number here by construction.
+    """
+    out = {}
+    for row in mapping or []:
+        slot = row.get("slot")
+        if not slot or slot.get("ace") is None or slot.get("slot") is None:
+            continue
+        out[row["t"]] = {"kind": "ace", "head": slot["slot"],
+                         "ace": slot["ace"], "slot": slot["slot"]}
+    return out
+
 
 def _slot_to_dict(s):
     if s is None:
@@ -122,7 +259,8 @@ def _layout_from_head_assignment(c2h, slicer_colors, slicer_types):
     return [r[3] for r in rows]
 
 def build_one_plan(pp, plan_name, result, mapping,
-                   slicer_colors=None, slicer_types=None, num_aces=4):
+                   slicer_colors=None, slicer_types=None, num_aces=4,
+                   estimate_ctx=None):
     """One of the three multi-mode plans (slicer / optimize / layer)."""
     slicer_colors = slicer_colors or {}
     slicer_types  = slicer_types  or {}
@@ -130,12 +268,15 @@ def build_one_plan(pp, plan_name, result, mapping,
     tool_changes = int(result.get("total_changes") or 0)
 
     if plan_name == "slicer":
-        return {
-            "feasible":     True,
-            "swaps":        _real_swap_count(events, mapping),
-            "tool_changes": tool_changes,
-            "mapping":      mapping,
-        }
+        return attach_estimate(
+            estimate_ctx,
+            {
+                "feasible":     True,
+                "swaps":        _real_swap_count(events, mapping),
+                "tool_changes": tool_changes,
+                "mapping":      mapping,
+            },
+            events, assignment_from_mapping(mapping))
 
     if plan_name == "optimize":
         try:
@@ -150,13 +291,17 @@ def build_one_plan(pp, plan_name, result, mapping,
                 "mapping":      [],
                 "reason":       "no feasible head assignment",
             }
-        return {
-            "feasible":     True,
-            "swaps":        swaps,
-            "tool_changes": tool_changes,
-            "mapping":      _layout_from_head_assignment(
-                c2h, slicer_colors, slicer_types),
-        }
+        opt_mapping = _layout_from_head_assignment(
+            c2h, slicer_colors, slicer_types)
+        return attach_estimate(
+            estimate_ctx,
+            {
+                "feasible":     True,
+                "swaps":        swaps,
+                "tool_changes": tool_changes,
+                "mapping":      opt_mapping,
+            },
+            events, assignment_from_mapping(opt_mapping))
 
     layer_info = result.get("layer_info") or {}
     layer_color_sets_raw = layer_info.get("layer_color_sets") or []
@@ -179,14 +324,18 @@ def build_one_plan(pp, plan_name, result, mapping,
             "mapping":      [],
             "reason":       reason,
         }
-    return {
-        "feasible":     True,
-        "swaps":        swaps,
-        "tool_changes": tool_changes,
-        "mapping":      _layout_from_head_assignment(
-            c2h, slicer_colors, slicer_types),
-        "reason":       "",
-    }
+    layer_mapping = _layout_from_head_assignment(
+        c2h, slicer_colors, slicer_types)
+    return attach_estimate(
+        estimate_ctx,
+        {
+            "feasible":     True,
+            "swaps":        swaps,
+            "tool_changes": tool_changes,
+            "mapping":      layer_mapping,
+            "reason":       "",
+        },
+        events, assignment_from_mapping(layer_mapping))
 
 _HEAD_MODE_PP_FUNCS = (
     "compute_head_mode_layout", "compute_head_mode_optimize",
@@ -300,15 +449,22 @@ def _bg_context(pp, head_ctx, plan_proxy, events):
             event_times = None
     return event_times, bg_heads, bg_available
 
-def _bg_stats_for(pp, events, assignment, event_times, bg_heads):
+def _bg_stats_for(pp, events, assignment, event_times, bg_heads,
+                  cost_model=None):
     """head_mode_bg_stats, soft-degrading (older pp -> None). Details are
     dropped from the wire format (the counts drive the UI line)."""
     fn = getattr(pp, "head_mode_bg_stats", None)
     if fn is None or assignment is None:
         return None
     try:
-        st = fn(events, assignment, event_times=event_times,
-                bg_heads=bg_heads)
+        try:
+            st = fn(events, assignment, event_times=event_times,
+                    bg_heads=bg_heads, cost_model=cost_model)
+        except TypeError:
+            # An older installed post-processor has no cost_model kwarg -
+            # soft-degrade to its constants rather than lose the bg stats.
+            st = fn(events, assignment, event_times=event_times,
+                    bg_heads=bg_heads)
         st.pop("details", None)
         return st
     except Exception:
@@ -316,7 +472,8 @@ def _bg_stats_for(pp, events, assignment, event_times, bg_heads):
 
 def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_heads,
                         ace_num_of_head, num_slots, layer_sets,
-                        event_times=None, bg_heads=None) -> dict:
+                        event_times=None, bg_heads=None,
+                        estimate_ctx=None) -> dict:
     """A head-mode PROPOSED-loadout plan (optimize / layer-Belady): the
     swap-minimal FREE assignment that ignores the current physical load. The
     user arranges spools to match before printing → read-only table. With
@@ -327,7 +484,8 @@ def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_heads,
             assignment, swaps = pp.compute_head_mode_optimize(
                 events, feeder_heads, ace_heads, ace_num_of_head, num_slots,
                 layer_color_sets=layer_sets,
-                event_times=event_times, bg_heads=bg_heads)
+                event_times=event_times, bg_heads=bg_heads,
+                cost_model=(estimate_ctx or {}).get("model"))
         except TypeError:
             assignment, swaps = pp.compute_head_mode_optimize(
                 events, feeder_heads, ace_heads, ace_num_of_head, num_slots,
@@ -357,14 +515,16 @@ def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_heads,
         m.get("head") if m.get("head") is not None else 99,
         m.get("t", 0)))
     out = {"feasible": feasible, "swaps": swaps, "mapping": mapping}
-    bg = _bg_stats_for(pp, events, assignment, event_times, bg_heads)
+    bg = _bg_stats_for(pp, events, assignment, event_times, bg_heads,
+                       cost_model=(estimate_ctx or {}).get("model"))
     if bg is not None:
         out["bg"] = bg
-    return out
+    return attach_estimate(estimate_ctx, out, events, assignment)
 
 def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
                       slicer_types, head_ctx, ace_slots, plan_proxy,
-                      fuzzy=DEFAULT_FUZZY) -> dict:
+                      fuzzy=DEFAULT_FUZZY, header_text=None,
+                      cost_params=None, calibration=None) -> dict:
     """The head-mode preflight preview: THREE plans, mirroring multi:
       loadout  - match against the currently-loaded feeders + ACE slots (editable)
       optimize - swap-minimal proposed loadout (free, Belady per ACE head)
@@ -391,6 +551,11 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     event_times, bg_heads, bg_available = _bg_context(
         pp, head_ctx, plan_proxy, events)
 
+    estimate_ctx = make_estimate_ctx(
+        pp, header_text, cost_params=cost_params, calibration=calibration,
+        slicer_colors=slicer_colors, slicer_types=slicer_types,
+        event_times=event_times, bg_heads=bg_heads)
+
     layout = pp.compute_head_mode_layout(
         slicer_colors, slicer_types, feeders, ace_slots, ace_head_of_ace,
         fuzzy_max_distance=fuzzy)
@@ -406,17 +571,21 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
             "swaps": pp.head_mode_swap_count(events, assignment),
             "mapping": loadout_mapping},
     }
-    bg_loadout = _bg_stats_for(pp, events, assignment, event_times, bg_heads)
+    bg_loadout = _bg_stats_for(pp, events, assignment, event_times, bg_heads,
+                               cost_model=(estimate_ctx or {}).get("model"))
     if bg_loadout is not None:
         plans["loadout"]["bg"] = bg_loadout
+    attach_estimate(estimate_ctx, plans["loadout"], events, assignment)
 
     num_slots = 4
     plans["optimize"] = _head_proposal_plan(
         pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
-        num_slots, None, event_times=event_times, bg_heads=bg_heads)
+        num_slots, None, event_times=event_times, bg_heads=bg_heads,
+        estimate_ctx=estimate_ctx)
     plans["layer"] = _head_proposal_plan(
         pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
-        num_slots, layer_sets, event_times=event_times, bg_heads=bg_heads)
+        num_slots, layer_sets, event_times=event_times, bg_heads=bg_heads,
+        estimate_ctx=estimate_ctx)
 
     return {
         "token": token, "filename": safe_name, "size": upload_size,
@@ -424,8 +593,10 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         "ace_heads": ace_heads,
         "bg_swap": {"available": bg_available, "enabled_heads": bg_heads,
                     "have_times": event_times is not None,
-                    "min_window_min": getattr(
-                        pp, "BG_UNLOAD_MIN_WINDOW_MIN", 3)},
+                    "min_window_min": (
+                        estimate_ctx["model"].bg_window_minutes()
+                        if estimate_ctx else
+                        getattr(pp, "BG_UNLOAD_MIN_WINDOW_MIN", 3))},
         "slicer_colors": [
             {"t": t, "hex": (slicer_colors[t] or "").lower(),
              "name": pp.approx_color_name(slicer_colors[t]) or "",
@@ -438,7 +609,8 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 
 def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
                  live_slots, head_ctx, token, filename, size,
-                 fuzzy=DEFAULT_FUZZY) -> dict:
+                 fuzzy=DEFAULT_FUZZY, header_text=None, cost_params=None,
+                 calibration=None) -> dict:
     """Build the full preflight report dict (the /api/preflight payload).
 
     head_ctx = {"mode": "normal"|"multi"|"head", "ace_head": int,
@@ -454,7 +626,9 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         ensure_head_mode_support(pp)
         return head_mode_preview(
             pp, token, filename, size, slicer_colors, slicer_types,
-            head_ctx, live_slots, plan_proxy, fuzzy=fuzzy)
+            head_ctx, live_slots, plan_proxy, fuzzy=fuzzy,
+            header_text=header_text, cost_params=cost_params,
+            calibration=calibration)
 
     missing_mats = pp.check_material_availability(slicer_types, live_slots)
 
@@ -489,11 +663,17 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         proxy_remapped = pp.apply_remap(plan_proxy, remap) if remap else plan_proxy
         result = pp.plan_loadout(proxy_remapped, num_aces=num_aces) or {}
         out["events"] = list(result.get("events") or [])
+        ev_times, bg_heads, _bg_av = _bg_context(
+            pp, head_ctx, proxy_remapped, out["events"])
+        estimate_ctx = make_estimate_ctx(
+            pp, header_text, cost_params=cost_params, calibration=calibration,
+            slicer_colors=slicer_colors, slicer_types=slicer_types,
+            event_times=ev_times, bg_heads=bg_heads)
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
                 pp, mode, result, mapping,
                 slicer_colors=slicer_colors, slicer_types=slicer_types,
-                num_aces=num_aces)
+                num_aces=num_aces, estimate_ctx=estimate_ctx)
     return out
 
 def _noop_stage(stage, percent):
@@ -508,7 +688,7 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                      num_aces, live_slots, head_ctx, mode,
                      remap_override=None, head_assignment=None,
                      head_plan="loadout", fuzzy=DEFAULT_FUZZY,
-                     set_stage=None, stage_cb=None) -> str:
+                     set_stage=None, stage_cb=None, cost_params=None) -> str:
     """Run the rewrite pipeline on src_path, ping-ponging between tmp_a/tmp_b,
     and return the path holding the final print-ready gcode.
 
@@ -583,14 +763,34 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
 
         set_stage("rewrite", 10.0)
         _pc = bool((head_ctx or {}).get("pickup_cleaning"))
+        _purge_dest = None
+        if _swap_cost is not None:
+            try:
+                with open(str(src_path), "r", encoding="utf-8",
+                          errors="replace") as _hf:
+                    _head = "".join(
+                        line for _i, line in zip(range(400), _hf))
+                _purge_dest = _swap_cost.purge_destination(_head)
+            except Exception:
+                _purge_dest = None
+        _purge_for = make_purge_callback(
+            cost_params, slicer_colors, slicer_types, _purge_dest)
         try:
             pp.rewrite_head_mode_to_file(
                 str(src_path), str(tmp_a), assignment, None,
-                stage_cb(10.0, 60.0), pickup_cleaning=_pc)
+                stage_cb(10.0, 60.0), pickup_cleaning=_pc,
+                purge_mm_for=_purge_for)
         except TypeError:
-            pp.rewrite_head_mode_to_file(
-                str(src_path), str(tmp_a), assignment, None,
-                stage_cb(10.0, 60.0))
+            # An older installed post-processor takes neither kwarg. Losing
+            # the per-swap purge is a degraded plan, not a broken one.
+            try:
+                pp.rewrite_head_mode_to_file(
+                    str(src_path), str(tmp_a), assignment, None,
+                    stage_cb(10.0, 60.0), pickup_cleaning=_pc)
+            except TypeError:
+                pp.rewrite_head_mode_to_file(
+                    str(src_path), str(tmp_a), assignment, None,
+                    stage_cb(10.0, 60.0))
         cur, nxt = tmp_a, tmp_b
 
         set_stage("inject_auto_load", 70.0)

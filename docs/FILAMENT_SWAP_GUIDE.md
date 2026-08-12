@@ -182,6 +182,43 @@ Grepping those two lines over a few weeks of logs is the cheapest way to
 find out *which slot* is really the problem — the answer is often not the
 one that feels worst.
 
+### Neighbour clearance
+
+Before each retry, multiACE retracts the *other* slots of the same ACE, on
+the theory that filament crowding the shared path is why the load failed.
+That is audited too:
+
+```
+[multiACE] LOAD_RETRY_NEIGHBOR_RETRACT … attempt=2 step_mm=100 cumulative={'1': 150, '3': 150}
+[multiACE] LOAD_RETRY_NEIGHBOR_SKIP … reason=stock_feeder
+```
+
+Two things to read out of `cumulative`:
+
+* **Which slots keep getting cleared.** If the same neighbour appears every
+  time head 0 struggles, that slot's filament is the one crowding the hub —
+  look at its spool tension and its PTFE run, not at the head that failed.
+* **How much slack has accumulated.** More than ~200 mm on one slot is
+  around 20 cm of filament unwound inside the unit with no spool take-up,
+  and slack is a known cause of ACE tangles. The dashboard hints at it and
+  the print history keeps the number per job.
+
+`load_retry_neighbor_retract: 0` disables the whole behaviour if you would
+rather diagnose without it.
+
+### The print history
+
+Beyond the log, `printer_data/multiace/jobs.jsonl` keeps one record per job
+with the plan used, the resolved assignment, every swap's real duration and
+kind, the load-retry count and the neighbour clearance. It is bounded (200
+jobs / 2 MB) and append-only, and the **History** tab renders it joined
+against Moonraker's own job list.
+
+For jam-hunting it answers a question the log does not: *did this get
+worse?* A slot whose `same_ace` swaps have crept from 210 s to 280 s over a
+month is telling you something mechanical is degrading, well before it
+starts failing outright.
+
 ---
 
 ## 7. Reporting a jam usefully
