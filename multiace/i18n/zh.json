@@ -38,7 +38,9 @@
       "unknown_source": "来源未知",
       "source_rfid": "RFID",
       "source_override": "设定",
-      "source_derived": "任务"
+      "source_derived": "任务",
+      "collapse": "收起",
+      "expand": "展开"
     },
     "dashboard": {
       "no_aces": "未检测到 ACE。",
@@ -65,7 +67,7 @@
       "duration": "时长",
       "aces": "ACE 设备",
       "toolheads": "工具头",
-      "snapshots": "耗材快照",
+      "snapshots": "耗材配置",
       "save_current": "保存当前状态…",
       "snapshot_name_prompt": "快照名称（A-Z、0-9、_-）：",
       "snapshot_select_or_new": "选择 / 新建"
@@ -269,8 +271,6 @@
     },
     "sidebar": {
       "title": "面板",
-      "toggle_hint": "在仪表盘旁显示摄像头与控制台",
-      "collapse": "收起",
       "webcam": "摄像头",
       "console": "控制台",
       "webcam_loading": "正在查找摄像头…",
@@ -302,7 +302,8 @@
       "sim_exhausted": "重试耗尽",
       "sim_console": "控制台行",
       "sim_error": "G-code 错误",
-      "sim_clear": "清除"
+      "sim_clear": "清除",
+      "sample_print": "加载示例打印"
     },
     "print_control": {
       "speed": "速度",
@@ -358,9 +359,37 @@
       "hide": "隐藏预览",
       "play": "播放",
       "pause": "暂停",
-      "layer": "层 {n} / {total}",
-      "cumulative": "显示至今所有层",
-      "show_travel": "显示空驶路径"
+      "show_travel": "显示空驶路径",
+      "slot": "槽位",
+      "layer_top": "顶层",
+      "layer_bottom": "底层",
+      "move": "移动",
+      "view_iso": "等轴视图",
+      "view_top": "俯视图",
+      "view_front": "前视图",
+      "maximize": "最大化",
+      "restore": "还原",
+      "view_filament": "耗材",
+      "view_feature": "特征类型",
+      "view_speed": "速度",
+      "view_width": "宽度",
+      "view_height": "高度",
+      "lod_auto": "自动",
+      "lod_ribbon": "带状",
+      "lod_solid": "实体",
+      "lod_hint": "实体模式显示真实层高；带状模式开销更小，层范围较大时会自动选用。",
+      "show_toolchanges": "换色标记",
+      "show_plate": "热床网格",
+      "ramp_hint": "低 → 高",
+      "segments_shown": "个线段显示中",
+      "no_webgl": "浏览器无法运行 3D 预览，已改为俯视图。",
+      "decimated": "仅显示部分路径：为保证预览流畅，已略去 {dropped} 个线段。",
+      "infeasible_hint": "当前已装耗材都无法提供该颜色，视图中相关换色点标为红色。",
+      "no_extrusion": "此文件没有可显示的挤出路径。"
+    },
+    "sections": {
+      "lanes": "ACE 与打印头",
+      "loadouts": "耗材配置"
     }
   },
   "msg": {

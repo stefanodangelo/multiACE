@@ -8,6 +8,11 @@
 # Mock mode also unlocks POST /api/debug/simulate, used by the UI debug
 # panel (?debug=1) to inject load failures and console lines - that is
 # how the retry UI is tested without a printer.
+#
+# It also unlocks GET /api/debug/sample-gcode, behind the debug panel's
+# "Load sample print" button: one click loads tests\fixtures\
+# sample_4color.gcode (Snapmaker Orca, 205 layers, 601 toolchanges, 4
+# filaments) into the real preflight + 3D preview path.
 
 $ErrorActionPreference = "Stop"
 
@@ -60,6 +65,11 @@ Start-Job -ScriptBlock {
     Start-Sleep -Seconds 2
     Start-Process $u
 } -ArgumentList $Url | Out-Null
+
+if ($env:MULTIACE_MOCK_MODE -eq "1") {
+    Write-Host "    mock: debug panel (bottom right) -> 'Load sample print'"
+    Write-Host "          loads tests\fixtures\sample_4color.gcode into preflight + 3D preview"
+}
 
 Write-Host "Dev server on $Url  (Ctrl+C to stop)"
 Push-Location $BackendDir

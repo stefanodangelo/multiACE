@@ -42,7 +42,9 @@
       "source_derived": "Job",
       "remove": "Entfernen",
       "panel_expand": "zum Vergrößern klicken",
-      "panel_full": "Volle Oberfläche in neuem Tab öffnen"
+      "panel_full": "Volle Oberfläche in neuem Tab öffnen",
+      "collapse": "Einklappen",
+      "expand": "Ausklappen"
     },
     "dashboard": {
       "no_aces": "Keine ACEs erkannt.",
@@ -73,7 +75,7 @@
       "duration": "Dauer",
       "aces": "ACEs",
       "toolheads": "Druckköpfe",
-      "snapshots": "Filament-Snapshots",
+      "snapshots": "Bestückungen",
       "save_current": "Aktuellen speichern…",
       "snapshot_name_prompt": "Snapshot-Name (A-Z, 0-9, _-):",
       "snapshot_select_or_new": "Auswählen / Neu",
@@ -348,8 +350,6 @@
     },
     "sidebar": {
       "title": "Bereiche",
-      "toggle_hint": "Webcam und Konsole neben dem Dashboard anzeigen",
-      "collapse": "Einklappen",
       "webcam": "Webcam",
       "console": "Konsole",
       "webcam_loading": "Suche nach einer Kamera…",
@@ -381,7 +381,8 @@
       "sim_exhausted": "Versuche erschöpft",
       "sim_console": "Konsolenzeile",
       "sim_error": "G-Code-Fehler",
-      "sim_clear": "Zurücksetzen"
+      "sim_clear": "Zurücksetzen",
+      "sample_print": "Beispieldruck laden"
     },
     "print_control": {
       "speed": "Geschwindigkeit",
@@ -437,9 +438,37 @@
       "hide": "Vorschau ausblenden",
       "play": "Abspielen",
       "pause": "Pause",
-      "layer": "Ebene {n} / {total}",
-      "cumulative": "Bisherige Ebenen anzeigen",
-      "show_travel": "Leerfahrten anzeigen"
+      "show_travel": "Leerfahrten anzeigen",
+      "slot": "Slot",
+      "layer_top": "Oberste Ebene",
+      "layer_bottom": "Unterste Ebene",
+      "move": "Bewegung",
+      "view_iso": "Isometrische Ansicht",
+      "view_top": "Draufsicht",
+      "view_front": "Vorderansicht",
+      "maximize": "Maximieren",
+      "restore": "Wiederherstellen",
+      "view_filament": "Filament",
+      "view_feature": "Elementtyp",
+      "view_speed": "Geschwindigkeit",
+      "view_width": "Breite",
+      "view_height": "Höhe",
+      "lod_auto": "Automatisch",
+      "lod_ribbon": "Band",
+      "lod_solid": "Volumen",
+      "lod_hint": "Volumen zeigt die echte Schichthöhe. Band ist günstiger und wird bei großen Ebenenbereichen automatisch gewählt.",
+      "show_toolchanges": "Werkzeugwechsel-Marker",
+      "show_plate": "Druckbett",
+      "ramp_hint": "niedrig → hoch",
+      "segments_shown": "Segmente sichtbar",
+      "no_webgl": "Dieser Browser kann die 3D-Vorschau nicht darstellen — es wird die Draufsicht gezeigt.",
+      "decimated": "Es wird eine Auswahl der Werkzeugwege gezeigt: {dropped} Segmente wurden ausgelassen, damit die Vorschau flüssig bleibt.",
+      "infeasible_hint": "Keine geladene Spule kann dieses Filament liefern. Wechsel darauf sind in der Ansicht rot markiert.",
+      "no_extrusion": "Diese Datei enthält keine Extrusionsbewegungen."
+    },
+    "sections": {
+      "lanes": "ACEs & Werkzeugköpfe",
+      "loadouts": "Bestückungen"
     }
   },
   "msg": {

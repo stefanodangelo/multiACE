@@ -1,19 +1,64 @@
+/* --- Design tokens ----------------------------------------------------
+   The greys are an ELEVATION LADDER, not one flat colour: the old
+   --bg #1a1a1a / --card #232323 pair was so close that a card barely
+   separated from the page - which is exactly the weakness a panel-grid
+   layout exposes. Four steps, cooled slightly so the teal reads warm
+   against them.
+
+   --accent is DELIBERATELY UNCHANGED. It is the app's own colour (theme
+   colour, icon, wordmark); replacing it would be change for its own sake.
+   It stays the only saturated colour in the chrome, which is what lets
+   FILAMENT colour be the only vivid thing on screen.
+
+   --bg / --card / --border remain as aliases onto the new ramp so no
+   existing rule had to be rewritten in the same pass. */
 :root {
-  --bg: #1a1a1a;
+  --ink-900: #121416;   /* page ground */
+  --ink-850: #171a1c;   /* nav rail */
+  --ink-800: #1e2225;   /* panel surface */
+  --ink-700: #272c30;   /* panel header, raised controls */
+  --line:    #343a3e;   /* hairlines, borders */
+
+  --bg: var(--ink-900);
   --fg: #e8e8e8;
-  --muted: #888;
+  --muted: #8b9297;
   --accent: #15bdc6;
   --accent-fg: #001619;
-  --card: #232323;
-  --border: #353535;
+  --card: var(--ink-800);
+  --border: var(--line);
   --error: #ff7070;
   --error-bg: #3a1a1a;
   --warn: #fb6;
   --warn-bg: #3a2a10;
   --ok: #6f6;
   --danger: #b04040;
+
+  /* The shell's two fixed columns: the navigation rail on the left and
+     the webcam/console/print pane on the right. Every position:fixed
+     element offsets itself by these, and the responsive queries zero
+     them - see .rail / .side-pane / .cmd-queue-bar / .notif-strip. */
+  --rail-w: 168px;
+  --pane-w: 380px;
+
+  /* Every MEASURED value on the page uses this stack with tabular
+     numerals, so a temperature or a percentage does not jitter sideways
+     as it ticks. Structural labels share one treatment (uppercase, tight,
+     600) so a panel header reads as chrome rather than content. */
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+/* Focus ring: genuinely absent app-wide before this. :focus-visible so a
+   mouse click does not paint one, but every keyboard path gets one. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Numerals that tick. Applied by class so it is opt-in per value rather
+   than a blanket font change. */
+.num, .data {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 html, body { margin: 0; padding: 0; height: 100%; }
 /* Fields: every block that needed one (.config-row, .per-ace-row,
    .snapshot-row, .dryer-form, .tipform-step) repeated the identical
@@ -505,7 +550,7 @@ pre { background: #0d0d0d; color: #cfc; padding: .8rem; border-radius: 4px;
 canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
          touch-action: none; cursor: crosshair; image-rendering: pixelated; display: block; }
 .screen-popout {
-  position: fixed; right: 1rem; bottom: 80px;
+  position: fixed; right: calc(var(--pane-w) + 1rem); bottom: 80px;
   width: 380px; max-width: calc(100vw - 2rem);
   background: var(--card); border: 1px solid var(--accent); border-radius: 6px;
   box-shadow: 0 8px 32px rgba(0,0,0,.5);
@@ -534,10 +579,11 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
 .pill.pill-btn:hover { filter: brightness(1.15); }
 .pill.pill-btn.active { background: var(--accent); color: var(--accent-fg); }
 @media (max-width: 600px) {
-  .screen-popout { width: 240px; right: .5rem; bottom: 72px; }
+  .screen-popout { width: 240px; right: calc(var(--pane-w) + .5rem); bottom: 72px; }
 }
 .notif-strip {
-  position: fixed; left: 1rem; right: 1rem; bottom: 8px;
+  position: fixed; left: calc(var(--rail-w) + 1rem);
+  right: calc(var(--pane-w) + 1rem); bottom: 8px;
   z-index: 55;
   background: var(--card); border: 1px solid var(--error);
   border-radius: 4px; padding: .35rem .55rem;
@@ -569,7 +615,7 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
 .notif-enter-from, .notif-leave-to { opacity: 0; transform: translateY(-4px); }
 .notif-enter-active, .notif-leave-active { transition: opacity .2s ease, transform .2s ease; }
 .cmd-queue-bar {
-  position: fixed; bottom: 0; left: 0; right: 0;
+  position: fixed; bottom: 0; left: var(--rail-w); right: var(--pane-w);
   display: flex; align-items: center; gap: .5rem;
   padding: .5rem .8rem;
   background: var(--card);
@@ -1113,28 +1159,32 @@ body:has(.panel) .overlay .dialog {
 }
 
 /* ============================================================
-   UNIFIED DASHBOARD: webcam + console side pane
-   The dashboard column keeps its old max-width; opening the pane
-   widens the shell rather than squeezing the slot cards, which are
-   the thing you came to look at.
+   UNIFIED DASHBOARD: webcam + console + print side pane
+   The pane is the shell's RIGHT-HAND COLUMN, permanently on screen and
+   mirroring the rail on the left: fixed, full height, its own scroll,
+   and the body offset by --pane-w so nothing ever slides under it. The
+   point of the pane is to watch the print while driving a swap, and a
+   pane you have to open first is one you look at after the fact.
+
+   The dashboard column keeps its own max-width, so widening the chrome
+   never squeezes the slot cards - which are the thing you came to look
+   at.
    ============================================================ */
-.side-toggle { font-size: .8rem; padding: .3rem .6rem; }
-.side-toggle.active { background: var(--accent); color: var(--accent-fg);
-                      border-color: var(--accent); }
-main.with-sidebar { display: grid; gap: 1rem; max-width: 1640px;
-                    grid-template-columns: minmax(0, 1fr) 380px;
-                    align-items: start; }
-main.with-sidebar .main-col { min-width: 0; }
-.side-pane { position: sticky; top: 1rem; display: flex; flex-direction: column;
-             background: var(--card); border: 1px solid var(--border);
-             border-radius: 6px; overflow: hidden;
-             max-height: calc(100vh - 5rem); }
+.side-pane { position: fixed; right: 0; top: 0; bottom: 0; z-index: 20;
+             width: var(--pane-w);
+             display: flex; flex-direction: column;
+             background: var(--ink-800);
+             border-left: 1px solid var(--line);
+             /* The panes scroll inside themselves (.console-log,
+                .side-print); the pane itself never does. */
+             overflow: hidden; }
+.main-col { min-width: 0; }
 .side-tabs { display: flex; gap: .25rem; padding: .4rem;
-             border-bottom: 1px solid var(--border); }
-.side-tabs button { font-size: .8rem; padding: .25rem .6rem; }
+             background: var(--ink-700);
+             border-bottom: 1px solid var(--line); }
+.side-tabs button { flex: 1; font-size: .8rem; padding: .3rem .5rem; }
 .side-tabs button.active { background: var(--accent); color: var(--accent-fg);
                            border-color: var(--accent); }
-.side-tabs .side-close { margin-left: auto; }
 .side-body { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .side-foot { display: flex; align-items: center; justify-content: space-between;
              gap: .5rem; padding: .35rem .5rem; border-top: 1px solid var(--border); }
@@ -1160,10 +1210,13 @@ main.with-sidebar .main-col { min-width: 0; }
 .console-entry input { flex: 1; min-width: 0;
                        font-family: ui-monospace, Menlo, Consolas, monospace; }
 /* Below the two-column threshold the pane stacks under the dashboard
-   instead of shrinking both into unusable strips. */
+   instead of shrinking both into unusable strips. It is still always
+   visible - it is just below the content rather than beside it, which is
+   the only honest thing to do with 380px you do not have. */
 @media (max-width: 1100px) {
-  main.with-sidebar { grid-template-columns: minmax(0, 1fr); }
-  .side-pane { position: static; max-height: none; }
+  :root { --pane-w: 0px; }
+  .side-pane { position: static; width: auto; border-left: 0;
+               border-top: 1px solid var(--line); margin-top: 1rem; }
   .console-log { max-height: 40vh; }
 }
 
@@ -1219,7 +1272,8 @@ main.with-sidebar .main-col { min-width: 0; }
 /* ============================================================
    DEBUG PANEL (?debug=1)
    ============================================================ */
-.debug-panel { position: fixed; right: .75rem; bottom: .75rem; z-index: 90;
+.debug-panel { position: fixed; right: calc(var(--pane-w) + .75rem);
+               bottom: .75rem; z-index: 90;
                display: flex; flex-direction: column; align-items: flex-end;
                gap: .35rem; }
 .debug-panel-toggle { font-size: .75rem; opacity: .8; }
@@ -1281,23 +1335,76 @@ main.with-sidebar .main-col { min-width: 0; }
 .swim-block.swim-feeder_pin { height: 6px; align-self: center; opacity: .7; }
 .swim-block.swim-first_load { border-style: dashed; }
 
-/* --- G-code preview (plan section 9) ---------------------------------- */
+/* --- G-code preview (plan section 7) ---------------------------------- */
 /* Parsed and rendered entirely client-side (gcode_preview.js +
-   gcode_preview_worker.js) - no upload, no printer required. */
+   gcode_preview_worker.js) - no upload, no printer required. WebGL2 with
+   a Canvas2D top-down fallback; the note under the legend says which. */
 .gpreview-pane { margin: .5rem 0; }
+/* A 3D view in a strip is not worth having, and the preflight dialog is
+   already 96vw - so the pane can take the screen when you ask it to. */
+.gpreview-pane.maximized {
+  position: fixed; inset: 0; z-index: 120; margin: 0;
+  background: var(--ink-900); padding: .6rem;
+  display: flex; flex-direction: column;
+}
+.gpreview-pane.maximized .gpreview-stage { flex: 1; min-height: 0; }
+.gpreview-pane.maximized .gpreview-canvas { height: 100%; }
+.gpreview-stage { position: relative; }
 .gpreview-canvas { width: 100%; height: 50vh; display: block;
                    border: 1px solid var(--border); border-radius: 4px;
-                   background: #0c0c0e; }
+                   background: #0c0c0e;
+                   /* Orbit / pan / pinch are ours; the browser must not
+                      steal the gesture to scroll the dialog. */
+                   touch-action: none; cursor: grab; }
+.gpreview-canvas:active { cursor: grabbing; }
+/* Vertical layer RANGE, on the right edge - Orca's arrangement, and a
+   range beats a single layer for spotting where a colour starts and
+   stops. Two handles rather than one, because that is the question. */
+.gpreview-layers {
+  position: absolute; top: .5rem; right: .5rem; bottom: .5rem;
+  display: flex; flex-direction: column; align-items: center; gap: .4rem;
+  padding: .4rem .35rem; border-radius: 6px;
+  background: rgba(18, 20, 22, .72); border: 1px solid var(--line);
+}
+.gpreview-layer-sliders { flex: 1; display: flex; gap: .1rem; min-height: 0; }
+.gpreview-vrange {
+  writing-mode: vertical-lr; direction: rtl;
+  -webkit-appearance: slider-vertical; appearance: slider-vertical;
+  width: 1.1rem; height: 100%; accent-color: var(--accent);
+}
+.gpreview-presets {
+  position: absolute; top: .5rem; left: .5rem;
+  display: flex; gap: .25rem;
+}
+.gpreview-presets button {
+  padding: .2rem .5rem; font-size: .9rem; line-height: 1;
+  background: rgba(18, 20, 22, .72);
+}
 .gpreview-controls { display: flex; align-items: center; gap: .6rem;
                      flex-wrap: wrap; margin: .4rem 0; }
-.gpreview-slider { flex: 1; min-width: 8rem; }
-.gpreview-layer-label { font-variant-numeric: tabular-nums;
-                        min-width: 5.5rem; }
+.gpreview-slider { flex: 1; min-width: 8rem; accent-color: var(--accent); }
+.gpreview-view { font-size: .85rem; }
+.gpreview-layer-label { min-width: 5.5rem; font-size: .8rem; }
 .gpreview-toggle { display: flex; align-items: center; gap: .3rem;
                    font-size: .85rem; white-space: nowrap; }
 .gpreview-legend { display: flex; gap: .8rem; flex-wrap: wrap;
                    font-size: .8rem; }
-.gpreview-legend-item { display: flex; align-items: center; gap: .3rem; }
+.gpreview-legend-item { display: flex; align-items: center; gap: .3rem;
+                        cursor: default; transition: opacity .12s ease; }
+.gpreview-legend-item.dim { opacity: .35; }
+/* A swap the loaded spools cannot serve. The markers in the 3D view are
+   coloured to match, so the preview shows WHERE the print will fail
+   before it starts. */
+.gpreview-legend-item.infeasible { color: var(--error); }
+.gpreview-warn { color: var(--error); font-weight: 700; }
+.gpreview-ramp {
+  display: inline-block; width: 90px; height: 10px; border-radius: 2px;
+  background: linear-gradient(to right, #00f, #0ff, #0f0, #ff0, #f00);
+}
+.gpreview-note { margin: .3rem 0 0; }
+@media (prefers-reduced-motion: reduce) {
+  .gpreview-legend-item { transition: none; }
+}
 
 /* --- What-if loadout (plan section 2.2) ------------------------------- */
 /* Deliberately loud when active: a plan computed against spools that are
@@ -1311,3 +1418,229 @@ main.with-sidebar .main-col { min-width: 0; }
                   border: 1px solid rgba(196, 101, 30, .5);
                   border-radius: 4px; padding: .4rem .6rem; margin: .4rem 0;
                   font-weight: 600; }
+
+/* ============================================================
+   SHELL + NAVIGATION RAIL
+   The rail is 168px, fixed, full height, with icon AND label always
+   rendered - the primary device is a touchscreen at the printer, where
+   a hover tooltip does not exist. A collapse control shrinks it to 56px
+   for the printer's own 1024x600 panel; the state is persisted.
+
+   Page-level scrolling is deliberate: the rail is position:fixed and the
+   body is offset by margin-left, rather than .shell-body being its own
+   scroll container. Making it one re-anchors the sticky header to the
+   inner container and the header stops pinning.
+   ============================================================ */
+html.rail-tight { --rail-w: 56px; }
+.shell-body {
+  margin-left: var(--rail-w); margin-right: var(--pane-w);
+  transition: margin-left .15s ease;
+}
+.rail {
+  position: fixed; left: 0; top: 0; bottom: 0; z-index: 20;
+  width: var(--rail-w);
+  background: var(--ink-850);
+  display: flex; flex-direction: column; gap: .5rem;
+  padding: .6rem 0 .6rem .4rem;
+  overflow-x: hidden; overflow-y: auto;
+  transition: width .15s ease;
+}
+/* The tube: a 2px hairline down the rail's inner edge. The active
+   section is a SEGMENT of this line, not a filled Material pill - the
+   pill is the answer every dashboard already ships; the segment comes
+   from this product's own vocabulary and does work no pill does. */
+.rail::after {
+  content: ""; position: absolute; right: 0; top: 0; bottom: 0;
+  width: 2px; background: var(--line); pointer-events: none;
+}
+.rail-nav {
+  --rail-item-h: 40px; --rail-gap: 2px;
+  position: relative; display: flex; flex-direction: column;
+  gap: var(--rail-gap);
+}
+.rail-seg {
+  position: absolute; right: 0; top: 0; z-index: 1;
+  width: 2px; height: var(--rail-item-h); border-radius: 1px;
+  /* While a load or unload runs this becomes the colour of the filament
+     actually moving (--seg-color, set by railSegStyle). Navigation
+     doubles as a status indicator. */
+  background: var(--seg-color, var(--accent));
+  opacity: var(--seg-op, 1);
+  transform: translateY(calc(var(--seg-i, 0) * (var(--rail-item-h) + var(--rail-gap))));
+  transition: transform .15s ease, background-color .25s linear;
+}
+.rail-item, .rail-collapse {
+  display: flex; align-items: center; gap: .6rem; width: 100%;
+  height: var(--rail-item-h, 40px); padding: 0 .55rem;
+  background: transparent; border: 0; border-radius: 4px 0 0 4px;
+  color: var(--muted); cursor: pointer; text-align: left;
+  font-family: inherit; font-size: .72rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+  white-space: nowrap; overflow: hidden;
+}
+.rail-item:hover:not(:disabled), .rail-collapse:hover:not(:disabled) {
+  color: var(--fg); background: rgba(255, 255, 255, .04); border-color: transparent;
+}
+.rail-item.active { color: var(--fg); background: rgba(255, 255, 255, .055); }
+.rail-ico {
+  flex: 0 0 1.5rem; width: 1.5rem; text-align: center;
+  font-size: 1.05rem; line-height: 1; letter-spacing: 0;
+}
+.rail-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail-foot {
+  margin-top: auto; display: flex; flex-direction: column; gap: .3rem;
+}
+.rail-conn {
+  display: flex; align-items: center; gap: .55rem;
+  padding: .2rem .55rem; margin-left: 0; font-size: .7rem;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.rail-dot {
+  flex: 0 0 9px; width: 9px; height: 9px; border-radius: 50%;
+  background: currentColor;
+}
+.rail-conn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail-collapse { height: 32px; font-size: .68rem; }
+/* Collapsed: labels are visually hidden, never removed - colour and an
+   icon alone must not be the only carrier of meaning, and a title
+   attribute is not read on a touchscreen either. */
+html.rail-tight .rail-label,
+html.rail-tight .rail-conn-text {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+html.rail-tight .rail-item,
+html.rail-tight .rail-collapse { justify-content: center; padding: 0; gap: 0; }
+html.rail-tight .rail-conn { justify-content: center; padding: .2rem 0; }
+@media (prefers-reduced-motion: reduce) {
+  .rail, .rail-seg, .shell-body { transition: none; }
+}
+
+/* Below the two-column threshold the rail becomes a horizontally
+   scrolling strip of icon+label chips UNDER the header - not a
+   hamburger and not icon-only, because the always-visible label is the
+   entire point. Flex order puts it after the header without moving it in
+   the document, so the desktop layout keeps the rail's natural place. */
+@media (max-width: 900px) {
+  :root, html.rail-tight { --rail-w: 0px; }
+  .shell-body { display: flex; flex-direction: column; }
+  .shell-body > * { order: 3; }
+  .shell-body > header { order: 1; }
+  .shell-body > .rail { order: 2; }
+  .rail {
+    position: static; width: auto; flex-direction: row; align-items: center;
+    gap: .4rem; padding: .4rem .6rem;
+    overflow-x: auto; overflow-y: hidden;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail::after { display: none; }
+  .rail-seg { display: none; }
+  .rail-nav { flex-direction: row; }
+  .rail-foot { margin-top: 0; margin-left: auto; flex-direction: row; align-items: center; }
+  .rail-item, .rail-collapse {
+    width: auto; flex: 0 0 auto; border-radius: 999px;
+    border: 1px solid var(--line); padding: 0 .7rem; height: 34px;
+  }
+  /* The active marker survives the reflow as an underline in the same
+     colour the segment would have carried, live filament included. */
+  .rail-item.active {
+    box-shadow: inset 0 -2px 0 var(--seg-color, var(--accent));
+    border-color: var(--seg-color, var(--accent));
+  }
+  /* Collapsed is a desktop / printer-panel affordance; in the strip the
+     label comes back regardless. */
+  html.rail-tight .rail-label {
+    position: static; width: auto; height: auto; clip-path: none;
+  }
+  html.rail-tight .rail-item, html.rail-tight .rail-collapse {
+    justify-content: flex-start; padding: 0 .7rem; gap: .5rem;
+  }
+}
+
+/* ============================================================
+   COLLAPSIBLE PANELS
+   Fluidd collapses a card to a bare title bar. On a machine-status page
+   that is a loss: you collapsed to reclaim space, not to stop knowing.
+   So a collapsed header still carries its summary - a chip per filament
+   lane, the applied loadout's name, the firmware version.
+   ============================================================ */
+.pnl {
+  background: var(--ink-800); border: 1px solid var(--line);
+  border-radius: 6px; margin: .8rem 0; overflow: hidden;
+}
+.pnl-head {
+  display: flex; align-items: center; gap: .6rem;
+  margin: 0; padding: 0 .8rem 0 0;
+  background: var(--ink-700); border-bottom: 1px solid var(--line);
+  text-transform: none; letter-spacing: 0; font-size: 1rem;
+}
+.pnl-toggle {
+  display: flex; align-items: center; gap: .5rem;
+  flex: 1 1 auto; min-width: 0;
+  background: transparent; border: 0; border-radius: 0;
+  padding: .55rem .8rem; cursor: pointer;
+  color: var(--muted); font-family: inherit; text-align: left;
+  font-size: .72rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+}
+.pnl-toggle:hover:not(:disabled) { color: var(--fg); border-color: transparent; }
+.pnl-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pnl-caret {
+  flex: 0 0 auto; font-size: .7rem; opacity: .7; line-height: 1;
+  transition: transform .15s ease;
+}
+.pnl-toggle[aria-expanded="false"] .pnl-caret { transform: rotate(-90deg); }
+.pnl-body { padding: .8rem; }
+/* The h3s already inside a panel body (ACEs / Toolheads) should not pick
+   up the top margin meant to separate top-level headings. */
+.pnl-body > h3:first-child,
+.pnl-body > .ace-th-wrap > h3:first-of-type { margin-top: 0; }
+.pnl-summary {
+  display: flex; align-items: center; gap: .25rem;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; flex-wrap: nowrap;
+}
+/* Filament chips. These are SPOOL colours and are never tinted, dimmed
+   or harmonised toward the palette - the chrome is desaturated so that
+   filament colour can be the only vivid thing on screen. */
+.pnl-chip {
+  flex: 0 0 auto; display: inline-block;
+  width: 10px; height: 14px; border-radius: 2px;
+  background: #444; border: 1px solid rgba(0, 0, 0, .45);
+}
+.pnl-chip.empty {
+  background: repeating-linear-gradient(45deg,
+    #2a2f33 0 3px, var(--ink-800) 3px 6px);
+}
+.pnl-chip.failed { box-shadow: 0 0 0 1px var(--error); }
+.pnl-sum-text {
+  font-size: .75rem; color: var(--muted);
+  text-transform: none; letter-spacing: 0; font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pnl-sub {
+  margin: 1.1rem 0 .4rem; color: var(--muted);
+  font-size: .72rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pnl-caret { transition: none; }
+}
+
+/* --- Data numerals ----------------------------------------------------
+   Every MEASURED value on the page: temps, %rH, mm, durations,
+   percentages, attempt counters, preview readouts. Tabular numerals stop
+   numbers jittering sideways as they tick, which on a live status board
+   is a legibility win rather than a flourish. Filament NAMES and other
+   prose stay in the UI face. */
+.ace-card h2 .ace-status,
+.panel-temp,
+.pill strong,
+.estimate-big,
+.history-table td,
+.retry-text small,
+.dry-panel .dry-status,
+.update-row strong,
+.debug-kv strong {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}

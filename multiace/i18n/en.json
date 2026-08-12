@@ -42,7 +42,9 @@
       "source_derived": "Job",
       "remove": "Remove",
       "panel_expand": "click to enlarge",
-      "panel_full": "Open the full interface in a new tab"
+      "panel_full": "Open the full interface in a new tab",
+      "collapse": "Collapse",
+      "expand": "Expand"
     },
     "dashboard": {
       "no_aces": "No ACEs detected.",
@@ -73,7 +75,7 @@
       "duration": "Duration",
       "aces": "ACEs",
       "toolheads": "Toolheads",
-      "snapshots": "Filament Snapshots",
+      "snapshots": "Loadouts",
       "save_current": "Save current…",
       "snapshot_name_prompt": "Snapshot name (A-Z, 0-9, _-):",
       "snapshot_select_or_new": "Select / New",
@@ -348,8 +350,6 @@
     },
     "sidebar": {
       "title": "Panes",
-      "toggle_hint": "Show webcam and console next to the dashboard",
-      "collapse": "Collapse",
       "webcam": "Webcam",
       "console": "Console",
       "webcam_loading": "Looking for a camera…",
@@ -381,7 +381,8 @@
       "sim_exhausted": "Retries exhausted",
       "sim_console": "Console line",
       "sim_error": "G-code error",
-      "sim_clear": "Clear"
+      "sim_clear": "Clear",
+      "sample_print": "Load sample print"
     },
     "print_control": {
       "speed": "Speed",
@@ -437,9 +438,37 @@
       "hide": "Hide preview",
       "play": "Play",
       "pause": "Pause",
-      "layer": "Layer {n} / {total}",
-      "cumulative": "Show all layers so far",
-      "show_travel": "Show travel moves"
+      "show_travel": "Show travel moves",
+      "slot": "slot",
+      "layer_top": "Top layer",
+      "layer_bottom": "Bottom layer",
+      "move": "Move",
+      "view_iso": "Isometric view",
+      "view_top": "Top view",
+      "view_front": "Front view",
+      "maximize": "Maximize",
+      "restore": "Restore",
+      "view_filament": "Filament",
+      "view_feature": "Feature type",
+      "view_speed": "Speed",
+      "view_width": "Width",
+      "view_height": "Height",
+      "lod_auto": "Auto",
+      "lod_ribbon": "Ribbon",
+      "lod_solid": "Solid",
+      "lod_hint": "Solid shows real layer height. Ribbon is cheaper and is chosen automatically for wide layer ranges.",
+      "show_toolchanges": "Toolchange markers",
+      "show_plate": "Build plate",
+      "ramp_hint": "low → high",
+      "segments_shown": "segments shown",
+      "no_webgl": "Your browser can't run the 3D preview — showing the top view instead.",
+      "decimated": "Showing a sample of the toolpaths: {dropped} segments were dropped to keep the preview responsive.",
+      "infeasible_hint": "No loaded spool can serve this filament. Swaps to it are marked red in the view.",
+      "no_extrusion": "This file has no extrusion moves to show."
+    },
+    "sections": {
+      "lanes": "ACEs & toolheads",
+      "loadouts": "Loadouts"
     }
   },
   "msg": {

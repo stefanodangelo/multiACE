@@ -38,7 +38,7 @@ if not _trace.handlers:
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -3389,6 +3389,27 @@ async def debug_simulate(payload: dict) -> dict:
     else:
         raise HTTPException(400, f"unknown event: {event}")
     return {"ok": True, "event": event, "retry_state": _read_retry_state()}
+
+@app.get("/api/debug/sample-gcode")
+async def debug_sample_gcode() -> FileResponse:
+    """Stream tests/fixtures/sample_4color.gcode.
+
+    The g-code preview parses a File the user picked - client-side, no
+    printer needed - but reaching it from a cold start otherwise means
+    finding a g-code file and walking the upload -> preflight flow every
+    single time. For work that needs hundreds of preview reloads that is
+    the bottleneck, so mock mode hands the specimen over in one click.
+
+    Gated on MOCK_MODE exactly as /api/debug/simulate is: a debug endpoint
+    that leaks into production is the failure mode worth a test.
+    """
+    if not MOCK_MODE:
+        raise HTTPException(403, "the sample file is only available in mock mode")
+    p = Path(MOCK_DATA_DIR) / "sample_4color.gcode"
+    if not p.is_file():
+        raise HTTPException(404, f"sample fixture not found: {p}")
+    return FileResponse(p, media_type="text/plain",
+                        filename="sample_4color.gcode")
 
 @app.get("/api/notifications")
 async def list_notifications() -> dict:

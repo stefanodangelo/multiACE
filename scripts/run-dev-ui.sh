@@ -9,6 +9,11 @@
 # Mock mode also unlocks POST /api/debug/simulate, which the UI's debug
 # panel (?debug=1) uses to inject load failures, console lines and
 # errors - that is how the retry UI is tested without a printer.
+#
+# It also unlocks GET /api/debug/sample-gcode, behind the debug panel's
+# "Load sample print" button: one click loads tests/fixtures/
+# sample_4color.gcode (Snapmaker Orca, 205 layers, 601 toolchanges, 4
+# filaments) into the real preflight + 3D preview path.
 set -e
 
 PORT="${PORT:-7126}"
@@ -72,6 +77,11 @@ URL="http://127.0.0.1:$PORT/?debug=1"
     elif command -v open >/dev/null 2>&1; then open "$URL"
     fi
 ) &
+
+if [ "$MULTIACE_MOCK_MODE" = "1" ]; then
+    echo "  mock: debug panel (bottom right) → 'Load sample print'"
+    echo "        loads tests/fixtures/sample_4color.gcode into preflight + 3D preview"
+fi
 
 echo "Dev server on $URL  (Ctrl+C to stop)"
 cd "$BACKEND_DIR"

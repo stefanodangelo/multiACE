@@ -76,3 +76,5 @@ $RECYCLE.BIN/
 # Dev UI scratch state (scripts/run-dev-ui.*) - a local copy of ace.cfg the
 # UI can save to without touching a printer.
 .devdata/
+
+.github/

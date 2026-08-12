@@ -371,6 +371,24 @@ class TestMockMode:
         r = c.post("/api/debug/simulate", json={"event": "load_failure"})
         assert r.status_code == 403
 
+    def test_sample_gcode_is_refused_outside_mock_mode(self, client):
+        """A debug endpoint that leaks into production is the failure mode
+        worth a test: on a real printer this must not hand out a 2.8 MB
+        fixture from the install tree."""
+        c, main, cfg, calls = client
+        r = c.get("/api/debug/sample-gcode")
+        assert r.status_code == 403
+
+    def test_sample_gcode_streams_the_fixture_in_mock_mode(self, client,
+                                                           monkeypatch):
+        """The one-click dev affordance: the preview's specimen, without
+        walking the upload flow by hand every time."""
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "MOCK_MODE", True)
+        r = c.get("/api/debug/sample-gcode")
+        assert r.status_code == 200
+        assert b"; Change Tool" in r.content or b"G1 " in r.content
+
 
 class TestMockPreflight:
     """§2: upload a g-code on a laptop with no printer and get the full

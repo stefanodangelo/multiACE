@@ -150,28 +150,52 @@
           notifications[notifications.length-1].msg }}</span>
     </div>
   </div>
-  <header v-if="!panelMode">
+  <!-- SHELL (everything except panel mode). A fixed left rail carries
+       navigation - icon AND label, always rendered, because the primary
+       device is a touchscreen and a hover tooltip does not exist there.
+       Panel mode (?panel=1) renders above and is deliberately untouched by
+       any of this: it has its own layout tuned for a 300px camera card. -->
+  <div v-if="!panelMode" class="shell" :class="{'rail-tight': railCollapsed}">
+   <div class="shell-body">
+    <!-- The rail is a filament path. A hairline runs down its inner edge
+         (the tube) and the active section is marked by a SEGMENT of that
+         line - and while a load or unload is running, that segment takes
+         the colour of the filament actually moving, so navigation doubles
+         as a state signal. See .rail-seg / railSegColor. -->
+    <aside class="rail" :aria-label="t('ui.sidebar.title')">
+      <nav class="rail-nav" :style="railSegStyle">
+        <span class="rail-seg" aria-hidden="true"></span>
+        <button v-for="it in railItems" :key="it.key" class="rail-item"
+                :class="{active: tab === it.key}"
+                :aria-current="tab === it.key ? 'page' : null"
+                :title="it.label"
+                @click="tab = it.key">
+          <span class="rail-ico" aria-hidden="true">{{ it.icon }}</span>
+          <span class="rail-label">{{ it.label }}</span>
+        </button>
+      </nav>
+      <div class="rail-foot">
+        <!-- Colour alone must not carry connection state, so the dot is
+             always accompanied by its text - visually hidden, never
+             removed, when the rail is collapsed. -->
+        <span class="rail-conn conn" :class="connClass">
+          <i class="rail-dot" aria-hidden="true"></i>
+          <span class="rail-conn-text">{{ connText }}</span>
+        </span>
+        <button class="rail-collapse" @click="toggleRail"
+                :aria-expanded="!railCollapsed"
+                :title="railCollapsed ? t('ui.common.expand') : t('ui.common.collapse')">
+          <span class="rail-ico" aria-hidden="true">{{ railCollapsed ? '»' : '«' }}</span>
+          <span class="rail-label">{{ railCollapsed ? t('ui.common.expand') : t('ui.common.collapse') }}</span>
+        </button>
+      </div>
+    </aside>
+  <header>
     <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE
       <small>{{ version }}</small>
       <small v-if="printerName" class="printer-tag"
              :title="'Firmware ' + printerFw">· {{ printerName }}</small>
     </h1>
-    <nav>
-      <button v-if="state.mode !== 'normal'"
-              :class="{active: tab==='dashboard'}" @click="tab='dashboard'">{{ t('ui.tabs.dashboard') }}</button>
-      <button :class="{active: tab==='history'}" @click="tab='history'">{{ t('ui.tabs.history') }}</button>
-      <button :class="{active: tab==='config'}" @click="tab='config'">{{ t('ui.tabs.config') }}</button>
-      <button v-for="p in plugins.items" :key="p.name"
-              :class="{active: tab===('plugin:'+p.name)}"
-              @click="tab='plugin:'+p.name">{{ p.label }}</button>
-    </nav>
-    <!-- Webcam + console live NEXT TO the dashboard, not on another page:
-         the whole point is to watch the print while driving a swap. -->
-    <button class="side-toggle" :class="{active: sidebar.open}"
-            @click="toggleSidebar"
-            :title="t('ui.sidebar.toggle_hint')">
-      {{ sidebar.open ? '⟩' : '⟨' }} {{ t('ui.sidebar.title') }}
-    </button>
     <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
            class="upload-input" @change="onUploadGcode($event.target.files)">
     <button class="upload-btn" @click="triggerUpload()"
@@ -183,13 +207,12 @@
     <select class="lang-select" :value="language" @change="setLanguage($event.target.value)">
       <option v-for="l in languages" :key="l.code" :value="l.code">{{ l.name }}</option>
     </select>
-    <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
-  <div v-if="rebootNeeded && !panelMode" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
+  <div v-if="rebootNeeded" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
   <!-- §7: an ACE that was powered on after the printer. Klipper is up and
        multiACE is still scanning, so this is a "switch it on" prompt with
        a Rescan button - not the old FIRMWARE_RESTART dead end. -->
-  <div v-if="aceStartup && !panelMode" class="retry-banner">
+  <div v-if="aceStartup" class="retry-banner">
     <span class="retry-spin">↻</span>
     <span class="retry-text">
       {{ t('ui.ace_startup.waiting', {
@@ -202,7 +225,7 @@
   <!-- Auto-retry banner. Full width under the header on purpose: a load
        can be started from the dashboard, a macro or the print itself, so
        "slot 2 is on attempt 2 of 3" must be visible wherever you are. -->
-  <div v-if="retryState && !panelMode" class="retry-banner">
+  <div v-if="retryState" class="retry-banner">
     <span class="retry-spin">↻</span>
     <span class="retry-text">
       {{ t('ui.retry.retrying', {
@@ -217,7 +240,7 @@
     <button class="retry-stop warn" @click="retryControl('cancel')"
             :disabled="retryBusy === 'cancel'">{{ t('ui.retry.stop') }}</button>
   </div>
-  <main v-if="!panelMode" :class="{'with-sidebar': sidebar.open}">
+  <main>
    <div class="main-col">
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
@@ -234,6 +257,26 @@
           {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
         </button>
       </div>
+      <!-- COLLAPSIBLE PANEL. Collapsing changes density, never awareness:
+           the collapsed header still carries a chip per filament lane, so
+           you gave up the space and not the knowledge. Body is v-if, not
+           v-show, on purpose - see the wiring-overlay note in app.js. -->
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('lanes')"
+                  @click="toggleSec('lanes')"
+                  :title="secOpen('lanes') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.sections.lanes') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('lanes')">
+            <i v-for="(c, i) in laneChips" :key="'lc-'+i"
+               class="pnl-chip" :class="{empty: !c.color, failed: c.failed}"
+               :style="c.color ? {background: c.color} : {}"
+               :title="c.title"></i>
+          </span>
+        </h3>
+      <div class="pnl-body" v-if="secOpen('lanes')">
       <div ref="wiringContainerEl" class="ace-th-wrap">
         <svg v-if="wiringPaths.length"
              class="wiring-overlay"
@@ -433,7 +476,23 @@
           </article>
         </div>
       </div>
-      <h3>{{ t('ui.dashboard.snapshots') }}</h3>
+      </div>
+      </div>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('loadouts')"
+                  @click="toggleSec('loadouts')"
+                  :title="secOpen('loadouts') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.sections.loadouts') }}</span>
+          </button>
+          <!-- Collapsed, the header still names the loadout that was last
+               applied from here - the one fact you collapsed past. -->
+          <span class="pnl-summary" v-if="!secOpen('loadouts')">
+            <span class="pnl-sum-text">{{ appliedSnapshot || '–' }}</span>
+          </span>
+        </h3>
+      <div class="pnl-body" v-if="secOpen('loadouts')">
       <div class="snapshot-row">
         <select v-model="selectedSnapshot">
           <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
@@ -459,6 +518,8 @@
             <em v-if="t_.material">{{ t_.material }}</em>
           </span>
         </div>
+      </div>
+      </div>
       </div>
       <transition name="macrolog-fade">
         <pre v-if="macroLog" class="macro-log">{{ macroLog }}</pre>
@@ -549,30 +610,71 @@
 
     <section v-show="tab==='config'">
       <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
-      <h3>{{ t('ui.config.mode') }}</h3>
-      <div class="mode-row">
-        <button v-for="m in ['normal','multi','head']"
-                :key="m"
-                :class="{active: state.mode === m}"
-                @click="setMode(m)">{{ m }}</button>
+      <!-- Config is where the panel pattern pays off most: this was one
+           long scroll of eight <h3>s with no way to skip past any of it.
+           The three you rarely touch (firmware, per-ACE, tip-forming,
+           update) default CLOSED - see secDefaults in app.js. -->
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.mode')"
+                  @click="toggleSec('cfg.mode')"
+                  :title="secOpen('cfg.mode') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.mode') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('cfg.mode')">
+            <span class="pnl-sum-text">{{ state.mode || '–' }}</span>
+          </span>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.mode')">
+          <div class="mode-row">
+            <button v-for="m in ['normal','multi','head']"
+                    :key="m"
+                    :class="{active: state.mode === m}"
+                    @click="setMode(m)">{{ m }}</button>
+          </div>
+          <p v-if="state.mode === 'head'" class="muted small">{{ t('ui.config.head_mode_hint') }}</p>
+          <h4 class="pnl-sub">{{ t('ui.config.pickup_cleaning') }}</h4>
+          <label class="pickup-clean-toggle">
+            <input type="checkbox" :checked="state.pickup_cleaning"
+                   @change="setPickupCleaning($event.target.checked)">
+            {{ t('ui.config.pickup_cleaning_label') }}
+          </label>
+          <p class="muted small">{{ t('ui.config.pickup_cleaning_hint') }}</p>
+        </div>
       </div>
-      <p v-if="state.mode === 'head'" class="muted small">{{ t('ui.config.head_mode_hint') }}</p>
-      <h3>{{ t('ui.config.pickup_cleaning') }}</h3>
-      <label class="pickup-clean-toggle">
-        <input type="checkbox" :checked="state.pickup_cleaning"
-               @change="setPickupCleaning($event.target.checked)">
-        {{ t('ui.config.pickup_cleaning_label') }}
-      </label>
-      <p class="muted small">{{ t('ui.config.pickup_cleaning_hint') }}</p>
-      <h3>{{ t('ui.config.fluidd_panel') }}</h3>
-      <div class="row">
-        <button @click="addFluiddCamera" :disabled="fluiddCamBusy">
-          {{ fluiddCamBusy ? t('ui.common.saving') : t('ui.config.fluidd_panel_add') }}
-        </button>
-        <span v-if="fluiddCamMsg" class="muted small">{{ fluiddCamMsg }}</span>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.integration')"
+                  @click="toggleSec('cfg.integration')"
+                  :title="secOpen('cfg.integration') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.fluidd_panel') }}</span>
+          </button>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.integration')">
+          <div class="row">
+            <button @click="addFluiddCamera" :disabled="fluiddCamBusy">
+              {{ fluiddCamBusy ? t('ui.common.saving') : t('ui.config.fluidd_panel_add') }}
+            </button>
+            <span v-if="fluiddCamMsg" class="muted small">{{ fluiddCamMsg }}</span>
+          </div>
+          <p class="muted small">{{ t('ui.config.fluidd_panel_hint') }}</p>
+        </div>
       </div>
-      <p class="muted small">{{ t('ui.config.fluidd_panel_hint') }}</p>
-      <h3>{{ t('ui.config.firmware_title') }}</h3>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.firmware')"
+                  @click="toggleSec('cfg.firmware')"
+                  :title="secOpen('cfg.firmware') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.firmware_title') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('cfg.firmware')">
+            <span class="pnl-sum-text num">{{ firmware.version || t('ui.config.fw_unknown') }}</span>
+          </span>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.firmware')">
       <div class="fw-card" :class="'fw-' + firmware.status">
         <div class="fw-row">
           <strong>{{ firmware.version || t('ui.config.fw_unknown') }}</strong>
@@ -585,7 +687,18 @@
         </ul>
         <p class="muted small">{{ t('ui.config.fw_hint') }}</p>
       </div>
-      <h3>{{ t('ui.config.parameters') }}</h3>
+        </div>
+      </div>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.params')"
+                  @click="toggleSec('cfg.params')"
+                  :title="secOpen('cfg.params') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.parameters') }}</span>
+          </button>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.params')">
       <div class="config-form">
         <div class="config-row">
           <label>{{ t('ui.config.ace_count') }}</label>
@@ -684,7 +797,34 @@
           <label><input type="checkbox" v-model="configForm.fa_debug"> fa_debug</label>
         </fieldset>
       </div>
-      <h3>{{ t('ui.config.per_ace') }}</h3>
+      <div class="row">
+        <button @click="loadConfig">{{ t('ui.common.reload') }}</button>
+        <button @click="saveConfigForm" class="primary">{{ t('ui.config.save_restart') }}</button>
+        <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
+      </div>
+      <details v-if="showRawConfig">
+        <summary>{{ t('ui.config.raw_editor') }}</summary>
+        <textarea v-model="config.content" rows="30" spellcheck="false"></textarea>
+        <div class="row">
+          <label><input type="checkbox" v-model="config.restartKlipper"> {{ t('ui.config.restart_klipper_after_save') }}</label>
+          <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
+        </div>
+      </details>
+        </div>
+      </div>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.perace')"
+                  @click="toggleSec('cfg.perace')"
+                  :title="secOpen('cfg.perace') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.per_ace') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('cfg.perace')">
+            <span class="pnl-sum-text num">{{ configForm.ace_device_count }}×</span>
+          </span>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.perace')">
       <div class="per-ace-grid">
         <div class="per-ace-card" v-for="i in configForm.ace_device_count" :key="i-1">
           <h4>ACE {{ dispIdx(i-1) }}</h4>
@@ -756,20 +896,21 @@
           </details>
         </div>
       </div>
-      <div class="row">
-        <button @click="loadConfig">{{ t('ui.common.reload') }}</button>
-        <button @click="saveConfigForm" class="primary">{{ t('ui.config.save_restart') }}</button>
-        <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
-      </div>
-      <details v-if="showRawConfig">
-        <summary>{{ t('ui.config.raw_editor') }}</summary>
-        <textarea v-model="config.content" rows="30" spellcheck="false"></textarea>
-        <div class="row">
-          <label><input type="checkbox" v-model="config.restartKlipper"> {{ t('ui.config.restart_klipper_after_save') }}</label>
-          <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
         </div>
-      </details>
-      <h3>{{ t('ui.config.tipform_title') }}</h3>
+      </div>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.tipform')"
+                  @click="toggleSec('cfg.tipform')"
+                  :title="secOpen('cfg.tipform') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.tipform_title') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('cfg.tipform')">
+            <span class="pnl-sum-text">{{ tipform.supported ? tipform.mode : t('ui.config.tipform_unsupported') }}</span>
+          </span>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.tipform')">
       <div v-if="tipform.supported" class="tipform-card">
         <p class="muted small">{{ t('ui.config.tipform_intro') }}</p>
         <div class="config-row">
@@ -826,7 +967,21 @@
         <p class="muted small">{{ t('ui.config.tipform_syntax') }}</p>
       </div>
       <p v-else class="muted small">{{ t('ui.config.tipform_unsupported') }}</p>
-      <h3>{{ t('ui.config.update_title') }}</h3>
+        </div>
+      </div>
+      <div class="pnl">
+        <h3 class="pnl-head">
+          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.update')"
+                  @click="toggleSec('cfg.update')"
+                  :title="secOpen('cfg.update') ? t('ui.common.collapse') : t('ui.common.expand')">
+            <span class="pnl-caret" aria-hidden="true">▾</span>
+            <span class="pnl-title">{{ t('ui.config.update_title') }}</span>
+          </button>
+          <span class="pnl-summary" v-if="!secOpen('cfg.update')">
+            <span class="pnl-sum-text num">{{ updateState.current || '?' }}</span>
+          </span>
+        </h3>
+        <div class="pnl-body" v-if="secOpen('cfg.update')">
       <p class="muted small">{{ t('ui.config.update_intro') }}</p>
       <div class="update-card">
         <div class="update-row debug-row"
@@ -876,6 +1031,8 @@ reboot</pre>
         <pre v-if="updateState.log" class="update-log">{{ updateState.log }}</pre>
       </div>
       <pre v-if="configLog">{{ configLog }}</pre>
+        </div>
+      </div>
     </section>
     <section v-for="p in plugins.items" :key="'sec-'+p.name"
              v-show="tab===('plugin:'+p.name)"
@@ -885,11 +1042,15 @@ reboot</pre>
               class="plugin-iframe"></iframe>
     </section>
    </div>
-   <!-- Side pane: webcam and console. Only one is mounted at a time -
-        an MJPEG stream nobody looks at still costs the printer a
-        connection, and a console feed nobody reads still costs a
-        websocket subscription. -->
-   <aside v-if="sidebar.open" class="side-pane">
+   <!-- Side pane: webcam, console and print control. Permanently the
+        right-hand column of the shell, mirroring the rail on the left -
+        the whole point is to watch the print while driving a swap, and a
+        pane you have to open first is one you look at after the fact.
+        Still only ONE of the three is mounted at a time: an MJPEG stream
+        nobody is looking at still costs the printer a connection, and a
+        console feed nobody is reading still costs a websocket
+        subscription. -->
+   <aside class="side-pane">
      <div class="side-tabs">
        <button :class="{active: sidebar.pane==='webcam'}"
                @click="setSidebarPane('webcam')">{{ t('ui.sidebar.webcam') }}</button>
@@ -897,8 +1058,6 @@ reboot</pre>
                @click="setSidebarPane('console')">{{ t('ui.sidebar.console') }}</button>
        <button :class="{active: sidebar.pane==='print'}"
                @click="setSidebarPane('print')">{{ t('ui.sidebar.print') }}</button>
-       <button class="side-close" @click="toggleSidebar"
-               :title="t('ui.sidebar.collapse')">×</button>
      </div>
      <div v-show="sidebar.pane==='webcam'" class="side-body side-webcam">
        <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
@@ -1037,6 +1196,10 @@ reboot</pre>
      </div>
    </aside>
   </main>
+   </div>
+  </div>
+  <!-- Everything below is position:fixed against the viewport and therefore
+       lives OUTSIDE the shell - it offsets itself by --rail-w instead. -->
   <div v-if="screenPopout && screenAvailable && !panelMode" class="screen-popout" :style="popoutStyle">
     <div class="screen-popout-head"
          @pointerdown="popoutDragStart"
@@ -1696,33 +1859,117 @@ reboot</pre>
         <span v-if="gpreview.busy" class="muted small">{{ gpreview.progress }}%</span>
         <span v-if="gpreview.error" class="error small">{{ gpreview.error }}</span>
       </div>
-      <div v-if="gpreview.open" class="gpreview-pane">
-        <canvas ref="gpreviewCanvasEl" class="gpreview-canvas"></canvas>
+      <div v-if="gpreview.open" class="gpreview-pane"
+           :class="{maximized: gpreview.maximized}">
+        <!-- The viewer proper. Orbit / pan / zoom live on the canvas
+             itself (pointer events, mouse and touch alike); the vertical
+             dual slider on the right is the layer RANGE. -->
+        <div class="gpreview-stage">
+          <canvas ref="gpreviewCanvasEl" class="gpreview-canvas"></canvas>
+          <div class="gpreview-layers">
+            <span class="gpreview-layer-label num">
+              {{ gpreview.layerLo + 1 }}–{{ gpreview.layerHi + 1 }}
+              / {{ gpreview.totalLayers }}
+            </span>
+            <div class="gpreview-layer-sliders">
+              <input type="range" class="gpreview-vrange" orient="vertical"
+                     :aria-label="t('ui.gpreview.layer_top')"
+                     min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
+                     :value="gpreview.layerHi"
+                     @input="gpreviewSetLayerHi($event.target.value)">
+              <input type="range" class="gpreview-vrange" orient="vertical"
+                     :aria-label="t('ui.gpreview.layer_bottom')"
+                     min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
+                     :value="gpreview.layerLo"
+                     @input="gpreviewSetLayerLo($event.target.value)">
+            </div>
+          </div>
+          <div class="gpreview-presets">
+            <button @click="gpreviewPreset('iso')" :title="t('ui.gpreview.view_iso')">◨</button>
+            <button @click="gpreviewPreset('top')" :title="t('ui.gpreview.view_top')">▣</button>
+            <button @click="gpreviewPreset('front')" :title="t('ui.gpreview.view_front')">▤</button>
+            <button @click="gpreviewToggleMax"
+                    :title="gpreview.maximized ? t('ui.gpreview.restore') : t('ui.gpreview.maximize')">
+              {{ gpreview.maximized ? '⤡' : '⤢' }}
+            </button>
+          </div>
+        </div>
+        <!-- Sequential-move scrub within the top visible layer. -->
         <div class="gpreview-controls">
           <button @click="gpreviewTogglePlay">
             {{ gpreview.playing ? t('ui.gpreview.pause') : t('ui.gpreview.play') }}
           </button>
-          <input type="range" min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
-                 v-model.number="gpreview.layer" class="gpreview-slider">
-          <span class="gpreview-layer-label">
-            {{ t('ui.gpreview.layer', {n: gpreview.layer + 1, total: gpreview.totalLayers}) }}
+          <input type="range" min="0" :max="gpreview.moveMax"
+                 v-model.number="gpreview.move" class="gpreview-slider"
+                 :aria-label="t('ui.gpreview.move')">
+          <span class="gpreview-layer-label num">
+            {{ t('ui.gpreview.move') }} {{ gpreview.move }} / {{ gpreview.moveMax }}
           </span>
-          <label class="gpreview-toggle">
-            <input type="checkbox" v-model="gpreview.cumulative">
-            {{ t('ui.gpreview.cumulative') }}
-          </label>
+          <select v-model="gpreview.viewType" class="gpreview-view">
+            <option value="filament">{{ t('ui.gpreview.view_filament') }}</option>
+            <option value="feature">{{ t('ui.gpreview.view_feature') }}</option>
+            <option value="speed">{{ t('ui.gpreview.view_speed') }}</option>
+            <option value="width">{{ t('ui.gpreview.view_width') }}</option>
+            <option value="height">{{ t('ui.gpreview.view_height') }}</option>
+          </select>
+          <select v-model="gpreview.lod" class="gpreview-view"
+                  :title="t('ui.gpreview.lod_hint')">
+            <option value="auto">{{ t('ui.gpreview.lod_auto') }} ({{ gpreviewLod }})</option>
+            <option value="ribbon">{{ t('ui.gpreview.lod_ribbon') }}</option>
+            <option value="solid">{{ t('ui.gpreview.lod_solid') }}</option>
+          </select>
           <label class="gpreview-toggle">
             <input type="checkbox" v-model="gpreview.showTravel">
             {{ t('ui.gpreview.show_travel') }}
           </label>
+          <label class="gpreview-toggle">
+            <input type="checkbox" v-model="gpreview.showToolchanges">
+            {{ t('ui.gpreview.show_toolchanges') }}
+          </label>
+          <label class="gpreview-toggle">
+            <input type="checkbox" v-model="gpreview.showPlate">
+            {{ t('ui.gpreview.show_plate') }}
+          </label>
         </div>
-        <div class="gpreview-legend" v-if="preflight.report.slicer_colors">
-          <span v-for="c in preflight.report.slicer_colors" :key="'gpl-'+c.t"
-                class="gpreview-legend-item">
-            <i class="swatch" :style="{background: c.hex}"></i>
-            T{{ c.t }} · {{ c.material || '?' }}
+        <!-- LEGEND ROWS NAME THE HARDWARE. Not "Tool 2" but
+             "T2 · ACE 1 / slot 3 · PLA Silver" - the preview answers a
+             question the slicer cannot: which spool, in which bay, prints
+             this part. Hovering a row isolates that filament in the view. -->
+        <div class="gpreview-legend" v-if="gpreview.viewType === 'filament'">
+          <span v-for="row in gpreviewLegend" :key="'gpl-'+row.t"
+                class="gpreview-legend-item"
+                :class="{infeasible: !row.feasible, dim: gpreview.isolate !== null && gpreview.isolate !== row.t}"
+                @mouseenter="gpreviewIsolate(row.t)"
+                @mouseleave="gpreviewIsolate(null)"
+                :title="row.feasible ? '' : t('ui.gpreview.infeasible_hint')">
+            <i class="swatch" :style="{background: row.color}"></i>
+            {{ row.label }}
+            <b v-if="!row.feasible" class="gpreview-warn">!</b>
           </span>
         </div>
+        <div class="gpreview-legend" v-else-if="gpreview.viewType === 'feature'">
+          <span v-for="row in gpreviewFeatureLegend" :key="'gpf-'+row.r"
+                class="gpreview-legend-item">
+            <i class="swatch" :style="{background: row.color}"></i>{{ row.label }}
+          </span>
+        </div>
+        <div class="gpreview-legend" v-else>
+          <span class="gpreview-legend-item">
+            <i class="gpreview-ramp"></i>
+            {{ t('ui.gpreview.ramp_hint') }}
+          </span>
+        </div>
+        <p class="gpreview-note muted small">
+          <span class="num">{{ gpreview.segments }}</span>
+          {{ t('ui.gpreview.segments_shown') }}
+          <template v-if="gpreview.mode === '2d'">
+            · {{ t('ui.gpreview.no_webgl') }}
+          </template>
+          <template v-if="gpreview.decimated">
+            · <span class="gpreview-warn">{{ t('ui.gpreview.decimated', {
+                  dropped: gpreview.decimated.dropped }) }}</span>
+          </template>
+        </p>
       </div>
       <div class="row">
         <button @click="closePreflight"
@@ -1795,6 +2042,12 @@ reboot</pre>
           <button @click="simulateEvent('gcode_error', {msg: 'Simulated error'})">
             {{ t('ui.debug.sim_error') }}</button>
           <button @click="simulateEvent('clear')">{{ t('ui.debug.sim_clear') }}</button>
+          <!-- Fetches the 4-colour Snapmaker Orca fixture, wraps the bytes
+               in a File and drops it into the SAME preflightFile path a
+               real pick uses - so it exercises the real code path rather
+               than a bypass. -->
+          <button @click="loadSampleGcode" :disabled="sampleBusy">
+            {{ sampleBusy ? t('ui.common.saving') : t('ui.debug.sample_print') }}</button>
         </div>
       </template>
       <p v-else class="muted small">{{ t('ui.debug.mock_only') }}</p>

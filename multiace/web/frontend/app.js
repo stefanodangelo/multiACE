@@ -520,6 +520,11 @@ createApp({
     const wiringPaths = ref([]);
     const wiringViewBox = ref("0 0 100 100");
     function recomputeWiring() {
+      // Collapsed, every getBoundingClientRect() below reads zero and the
+      // overlay would draw - or worse, cache - garbage. The panel body is
+      // v-if so the refs are already gone; this is the belt to that
+      // braces, and covers the frame in between.
+      if (!secOpen("lanes")) { wiringPaths.value = []; return; }
       const c = wiringContainerEl.value;
       if (!c) { wiringPaths.value = []; return; }
       const cb = c.getBoundingClientRect();
@@ -1597,6 +1602,10 @@ createApp({
         for (const a of actions) {
           enqueue(a.name, a.args || {});
         }
+        // What the collapsed Loadouts header reports. Set only here, on
+        // an apply that actually went through.
+        appliedSnapshot.value = name;
+        localStorage.setItem("multiace.appliedSnapshot", name);
       };
       if (warns.length) {
         confirm({
@@ -2924,14 +2933,26 @@ createApp({
     // =================================================================
     const gpreview = reactive({
       open: false, busy: false, error: "", progress: 0,
-      layer: 0, totalLayers: 0, playing: false,
-      cumulative: true, showTravel: false,
+      // A layer RANGE, not a single layer: a range is what shows where a
+      // colour starts and stops, which is the question this app exists to
+      // answer. layerLo/layerHi are inclusive.
+      layerLo: 0, layerHi: 0, totalLayers: 0,
+      // Sequential-move scrub within the TOP visible layer.
+      move: 0, moveMax: 0, playing: false,
+      viewType: "filament", lod: "auto",
+      showTravel: false, showToolchanges: true, showPlate: true,
+      maximized: false,
+      // "gl" or "2d" - the UI says which, rather than letting the two
+      // pretend to be the same thing.
+      mode: "gl", segments: 0, decimated: null, roles: [],
+      isolate: null,
     });
     const gpreviewCanvasEl = ref(null);
     let gpreviewData = null;
     let gpreviewRenderer = null;
     let gpreviewTimer = null;
     let gpreviewResizeObs = null;
+    let gpreviewRaf = 0;
 
     function _gpreviewColorForT(t) {
       const rep = preflight.report;
@@ -2939,15 +2960,117 @@ createApp({
       return (c && c.hex) || "#888888";
     }
 
-    function _gpreviewRedraw() {
-      if (!gpreviewRenderer) return;
-      gpreviewRenderer.setLayer(gpreview.layer);
-      gpreviewRenderer.setCumulative(gpreview.cumulative);
-      gpreviewRenderer.setShowTravel(gpreview.showTravel);
-      gpreviewRenderer.draw();
+    // ---- the multiACE twist (plan 7.5) ---------------------------------
+    // OrcaSlicer colours "Tool" by extruder index because a slicer knows
+    // nothing about the hardware. multiACE knows which physical ACE unit
+    // and slot feeds each tool, and knows from the preflight report
+    // whether the current loadout can actually satisfy the print. So the
+    // legend names the HARDWARE, and the toolchange markers carry
+    // FEASIBILITY - the preview shows where the print will fail, before it
+    // starts.
+    function _gpreviewTarget(t) {
+      const rep = preflight.report;
+      if (!rep) return null;
+      if (rep.head_mode) {
+        const id = headEffectiveTargetId(t);
+        return id ? (headTargets().find(x => x.id === id) || null) : null;
+      }
+      return slicerEffectiveSlot(t) || null;
     }
-    watch(() => [gpreview.layer, gpreview.cumulative, gpreview.showTravel],
-          _gpreviewRedraw);
+    function gpreviewFeasible(t) {
+      return !!_gpreviewTarget(t);
+    }
+    const gpreviewLegend = computed(() => {
+      if (!gpreviewData) return [];
+      const seen = new Set();
+      for (let i = 0; i < gpreviewData.segmentCount; i++) seen.add(gpreviewData.tool[i]);
+      return [...seen].sort((a, b) => a - b).map(tt => {
+        const tg = _gpreviewTarget(tt);
+        const bits = ["T" + dispIdx(tt)];
+        if (tg && tg.kind === "feeder") {
+          bits.push(t("ui.preflight.feeder"));
+        } else if (tg && tg.ace !== null && tg.ace !== undefined) {
+          bits.push(`ACE ${dispIdx(tg.ace)} / ${t("ui.gpreview.slot")} ${dispIdx(tg.slot)}`);
+        }
+        const mat = (tg && tg.material) || "";
+        if (mat) bits.push(mat);
+        return {
+          t: tt,
+          color: _gpreviewColorForT(tt),
+          label: bits.join(" · "),
+          feasible: !!tg,
+        };
+      });
+    });
+    // Feature-view legend: only the roles this file actually contains.
+    const gpreviewFeatureLegend = computed(() => {
+      if (!gpreviewData || gpreview.viewType !== "feature") return [];
+      const seen = new Set();
+      for (let i = 0; i < gpreviewData.segmentCount; i++) seen.add(gpreviewData.role[i]);
+      return [...seen].sort((a, b) => a - b).map(r => ({
+        r,
+        color: MultiAceGcodePreview.ROLE_COLORS[r] || "#e6e6e6",
+        label: (gpreviewData.roles || [])[r] || "?",
+      }));
+    });
+
+    function _gpreviewScheduleDraw() {
+      if (gpreviewRaf) return;
+      gpreviewRaf = requestAnimationFrame(() => {
+        gpreviewRaf = 0;
+        if (gpreviewRenderer) gpreviewRenderer.draw();
+      });
+    }
+    function _gpreviewApply() {
+      const r = gpreviewRenderer;
+      if (!r) return;
+      r.setLayerRange(gpreview.layerLo, gpreview.layerHi);
+      gpreview.moveMax = r.topLayerMoveCount();
+      if (gpreview.move > gpreview.moveMax) gpreview.move = gpreview.moveMax;
+      r.setMoveLimit(gpreview.move >= gpreview.moveMax ? null : gpreview.move);
+      r.setViewType(gpreview.viewType);
+      r.setLod(gpreview.lod);
+      r.setShowTravel(gpreview.showTravel);
+      r.setShowToolchanges(gpreview.showToolchanges);
+      r.setShowPlate(gpreview.showPlate);
+      r.setIsolateTool(gpreview.isolate);
+      gpreview.segments = r.visibleSegmentCount();
+      _gpreviewScheduleDraw();
+    }
+    watch(() => [gpreview.layerLo, gpreview.layerHi, gpreview.move,
+                 gpreview.viewType, gpreview.lod, gpreview.showTravel,
+                 gpreview.showToolchanges, gpreview.showPlate,
+                 gpreview.isolate],
+          _gpreviewApply);
+
+    function gpreviewSetLayerLo(v) {
+      gpreview.layerLo = Math.min(Number(v), gpreview.layerHi);
+    }
+    function gpreviewSetLayerHi(v) {
+      gpreview.layerHi = Math.max(Number(v), gpreview.layerLo);
+    }
+    function gpreviewPreset(name) {
+      if (!gpreviewRenderer) return;
+      gpreviewRenderer.setPreset(name);
+      _gpreviewScheduleDraw();
+    }
+    function gpreviewIsolate(t) {
+      gpreview.isolate = (t === null || t === undefined) ? null : t;
+    }
+    function gpreviewToggleMax() {
+      gpreview.maximized = !gpreview.maximized;
+      nextTick(() => {
+        if (!gpreviewRenderer) return;
+        gpreviewRenderer.resize();
+        _gpreviewScheduleDraw();
+      });
+    }
+    // The effective LOD, for the readout - `auto` has to say what it
+    // actually chose, or the control is a mystery box.
+    const gpreviewLod = computed(() => {
+      void gpreview.segments;   // recompute when the visible band changes
+      return gpreviewRenderer ? gpreviewRenderer.effectiveLod() : "ribbon";
+    });
 
     async function openGcodePreview() {
       if (!preflightFile || gpreview.busy) return;
@@ -2958,21 +3081,32 @@ createApp({
         gpreviewData = await MultiAceGcodePreview.parse(preflightFile, {
           onProgress: (pct) => { gpreview.progress = pct; },
         });
-        gpreview.totalLayers = gpreviewData.layers.length;
+        if (!gpreviewData.segmentCount) {
+          throw new Error(t("ui.gpreview.no_extrusion"));
+        }
+        gpreview.totalLayers = gpreviewData.layerCount;
+        gpreview.roles = gpreviewData.roles || [];
+        gpreview.decimated = gpreviewData.decimated;
         // Start on the whole print rather than layer 0 - the first thing
         // worth seeing is "does the finished object look right".
-        gpreview.layer = Math.max(0, gpreview.totalLayers - 1);
+        gpreview.layerLo = 0;
+        gpreview.layerHi = Math.max(0, gpreview.totalLayers - 1);
         gpreview.open = true;
         await nextTick();
         gpreviewRenderer = new MultiAceGcodePreview.Renderer(gpreviewCanvasEl.value);
+        gpreview.mode = gpreviewRenderer.mode;
         gpreviewRenderer.setData(gpreviewData, _gpreviewColorForT);
+        gpreviewRenderer.setToolchangeColor(
+          (tc) => gpreviewFeasible(tc.t) ? _gpreviewColorForT(tc.t) : "#ff4d4d");
+        gpreviewRenderer.onDraw(_gpreviewScheduleDraw);
         gpreviewRenderer.resize();
-        _gpreviewRedraw();
+        gpreview.move = gpreviewRenderer.topLayerMoveCount();
+        _gpreviewApply();
         if (!gpreviewResizeObs && window.ResizeObserver) {
           gpreviewResizeObs = new ResizeObserver(() => {
             if (!gpreviewRenderer) return;
             gpreviewRenderer.resize();
-            _gpreviewRedraw();
+            _gpreviewScheduleDraw();
           });
           gpreviewResizeObs.observe(gpreviewCanvasEl.value);
         }
@@ -2986,20 +3120,36 @@ createApp({
     function closeGcodePreview() {
       gpreview.open = false;
       gpreview.playing = false;
+      gpreview.maximized = false;
+      gpreview.isolate = null;
       if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
+      if (gpreviewRaf) { cancelAnimationFrame(gpreviewRaf); gpreviewRaf = 0; }
       if (gpreviewResizeObs) { gpreviewResizeObs.disconnect(); gpreviewResizeObs = null; }
+      if (gpreviewRenderer) gpreviewRenderer.dispose();
       gpreviewRenderer = null;
       gpreviewData = null;
     }
 
+    // Play drives the MOVE slider, and rolls onto the next layer when it
+    // runs off the end of this one - which is the print building itself,
+    // rather than a layer flicker book.
     function gpreviewTogglePlay() {
       gpreview.playing = !gpreview.playing;
       if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
       if (gpreview.playing) {
         gpreviewTimer = setInterval(() => {
-          gpreview.layer = (gpreview.layer >= gpreview.totalLayers - 1)
-            ? 0 : gpreview.layer + 1;
-        }, 120);
+          const step = Math.max(1, Math.round(gpreview.moveMax / 60));
+          if (gpreview.move + step >= gpreview.moveMax) {
+            if (gpreview.layerHi >= gpreview.totalLayers - 1) {
+              gpreview.layerHi = Math.max(gpreview.layerLo, 0);
+            } else {
+              gpreview.layerHi += 1;
+            }
+            gpreview.move = 0;
+          } else {
+            gpreview.move += step;
+          }
+        }, 60);
       }
     }
 
@@ -3402,24 +3552,148 @@ createApp({
       });
     }
     let resizeObserver = null;
+
+    // =================================================================
+    // Shell: left navigation rail
+    //
+    // Icon AND label, always rendered. Not a preference: the primary
+    // device is a touchscreen at the printer, and a hover-to-reveal
+    // tooltip does not exist there. The collapse control exists for the
+    // printer's own 1024x600 panel, where 168px is worth reclaiming.
+    // =================================================================
+    const RAIL_ICONS = {dashboard: "▤", history: "◷", config: "⚙", plugin: "◫"};
+    const railCollapsed = ref(localStorage.getItem("multiace.rail") === "1");
+    function toggleRail() { railCollapsed.value = !railCollapsed.value; }
+    // The class goes on <html>, not on .shell, because --rail-w has to
+    // reach the position:fixed chrome that lives OUTSIDE the shell
+    // (.cmd-queue-bar, .notif-strip).
+    watch(railCollapsed, (v) => {
+      localStorage.setItem("multiace.rail", v ? "1" : "0");
+      document.documentElement.classList.toggle("rail-tight", v);
+      // The rail's width changes the width of every card to its right.
+      scheduleWiringRecompute();
+    }, {immediate: true});
+
+    const railItems = computed(() => {
+      const items = [];
+      if (state.mode !== "normal") {
+        items.push({key: "dashboard", icon: RAIL_ICONS.dashboard,
+                    label: t("ui.tabs.dashboard")});
+      }
+      items.push({key: "history", icon: RAIL_ICONS.history,
+                  label: t("ui.tabs.history")});
+      items.push({key: "config", icon: RAIL_ICONS.config,
+                  label: t("ui.tabs.config")});
+      for (const p of plugins.items) {
+        items.push({key: "plugin:" + p.name, icon: RAIL_ICONS.plugin,
+                    label: p.label});
+      }
+      return items;
+    });
+    // While a load or unload is running the active segment takes the
+    // colour of the filament that is actually moving, so the rail reports
+    // machine state as well as position. The state already exists; the
+    // cost is one custom property.
+    const railSegColor = computed(() => {
+      const ops = toolheadOps.value;
+      for (const th of (state.toolheads || [])) {
+        if (!ops[th.idx]) continue;
+        if (th.color) return th.color;
+      }
+      return "";
+    });
+    const railSegStyle = computed(() => {
+      const i = railItems.value.findIndex(it => it.key === tab.value);
+      const st = {"--seg-i": String(Math.max(0, i))};
+      if (i < 0) st["--seg-op"] = "0";
+      if (railSegColor.value) st["--seg-color"] = railSegColor.value;
+      return st;
+    });
+
+    // =================================================================
+    // Collapsible panels
+    //
+    // Markup plus two helpers rather than a component: this app runs off
+    // vue.global.prod.js with one createApp and zero registered
+    // components, and introducing a component system for a handful of
+    // call sites would be out of character. Same idiom `sidebar` uses.
+    //
+    // The four rarely-touched config sections default CLOSED; everything
+    // you look at while standing at the printer defaults open.
+    // =================================================================
+    const SEC_DEFAULT_CLOSED = {
+      "cfg.firmware": true, "cfg.perace": true,
+      "cfg.tipform": true, "cfg.update": true,
+    };
+    const secClosed = reactive((() => {
+      let stored = {};
+      try { stored = JSON.parse(localStorage.getItem("multiace.sections") || "{}"); }
+      catch (_) { stored = {}; }
+      return Object.assign({}, SEC_DEFAULT_CLOSED, stored || {});
+    })());
+    const secOpen = (k) => !secClosed[k];
+    function toggleSec(k) {
+      secClosed[k] = !secClosed[k];
+      localStorage.setItem("multiace.sections", JSON.stringify(secClosed));
+    }
+    // Collapsing the lanes panel tears the slot/toolhead elements out of
+    // the DOM, so the overlay has to be recomputed on the way back in -
+    // scheduleWiringRecompute already does nextTick + rAF, which is
+    // exactly what a collapse -> expand needs.
+    watch(() => secClosed.lanes, scheduleWiringRecompute);
+    // The container element itself comes and goes with the panel, so the
+    // ResizeObserver has to follow it rather than being attached once.
+    watch(wiringContainerEl, (el) => {
+      if (!resizeObserver) return;
+      try { resizeObserver.disconnect(); } catch (_) {}
+      if (el) resizeObserver.observe(el);
+    });
+
+    // Collapsed headers keep their data. A bare title bar is a loss on a
+    // status board: you collapsed to reclaim space, not to stop knowing.
+    const laneChips = computed(() => {
+      const out = [];
+      for (const ace of visibleAces.value) {
+        for (const slot of (ace.slots || [])) {
+          out.push({
+            color: slot.color || "",
+            failed: false,
+            title: `ACE ${dispIdx(ace.idx)} / ${dispIdx(slot.idx)}` +
+                   (slot.material ? ` · ${slot.material}` : ""),
+          });
+        }
+      }
+      for (const th of (state.toolheads || [])) {
+        if (!th.load_failed) continue;
+        out.push({color: th.color || "", failed: true,
+                  title: `T${dispIdx(th.idx)} · ${t("ui.dashboard.load_failed")}`});
+      }
+      return out;
+    });
+    // Which loadout is on the machine right now. Only ever set by
+    // applying one from here, so it says what it knows and no more.
+    const appliedSnapshot = ref(localStorage.getItem("multiace.appliedSnapshot") || "");
+
     // =================================================================
     // Unified dashboard: webcam + console side pane
     //
     // The point is to stop context-switching between Fluidd's camera and
-    // this panel during a swap. Both live in ONE collapsible sidebar and
-    // are lazily started: no camera stream is opened and no console
-    // subscription is sent until the pane that shows them is visible.
+    // this panel during a swap - so the pane is always on screen, as the
+    // shell's right-hand column, mirroring the rail on the left. It is
+    // not something you open: a pane you have to open first is one you
+    // look at after the fact.
+    //
+    // Which of the three is showing is still real state, and still what
+    // gates the work: no camera stream is opened and no console
+    // subscription is sent for a pane that is not the visible one, so
+    // exactly one of the three is ever live.
     // =================================================================
     const sidebar = reactive({
-      open: localStorage.getItem("multiace.sidebar.open") === "1",
       pane: localStorage.getItem("multiace.sidebar.pane") || "webcam",
     });
-    watch(() => sidebar.open,
-          v => localStorage.setItem("multiace.sidebar.open", v ? "1" : "0"));
     watch(() => sidebar.pane,
           v => localStorage.setItem("multiace.sidebar.pane", v));
-    function toggleSidebar() { sidebar.open = !sidebar.open; }
-    function setSidebarPane(p) { sidebar.pane = p; sidebar.open = true; }
+    function setSidebarPane(p) { sidebar.pane = p; }
 
     // =================================================================
     // Live print control (plan section 8)
@@ -3527,7 +3801,7 @@ createApp({
     // dialog on the control you reach for in a hurry is its own hazard.
 
     const printControlShown = computed(() =>
-      !panelMode && sidebar.open && sidebar.pane === "print");
+      !panelMode && sidebar.pane === "print");
     watch(printControlShown, on => { if (on) loadPrintControlLimits(); });
 
     // =================================================================
@@ -3588,7 +3862,7 @@ createApp({
       nonce: 0,
     });
     const webcamShown = computed(() =>
-      !panelMode && sidebar.open && sidebar.pane === "webcam");
+      !panelMode && sidebar.pane === "webcam");
     const webcamSrc = computed(() =>
       webcam.available ? `${API}/webcam/stream?n=${webcam.nonce}` : "");
     async function loadWebcam() {
@@ -3617,7 +3891,7 @@ createApp({
     const consoleBusy = ref(false);
     const consoleEl = ref(null);
     const consoleShown = computed(() =>
-      !panelMode && sidebar.open && sidebar.pane === "console");
+      !panelMode && sidebar.pane === "console");
     let lastConsoleId = 0;
     watch(consoleFollow,
           v => localStorage.setItem("multiace.console.follow", v ? "1" : "0"));
@@ -3875,6 +4149,31 @@ createApp({
       messages: 0,
       log: "",
     });
+    // The highest-value dev affordance here: the preview parses a File the
+    // user picked, and reaching it from a cold start otherwise means
+    // finding a g-code file and walking the whole upload -> preflight flow
+    // every single time. This fetches the 4-colour Snapmaker Orca fixture
+    // and hands it to the SAME path a real pick takes, so what gets
+    // exercised is the real code and not a shortcut around it.
+    const sampleBusy = ref(false);
+    async function loadSampleGcode() {
+      if (sampleBusy.value) return;
+      sampleBusy.value = true;
+      debugPanel.log = "";
+      try {
+        const r = await fetch(`${API}/debug/sample-gcode`);
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const blob = await r.blob();
+        const f = new File([blob], "sample_4color.gcode",
+                           {type: "text/plain"});
+        debugPanel.open = false;
+        onUploadGcode([f]);
+      } catch (e) {
+        debugPanel.log = String(e && e.message ? e.message : e);
+      } finally {
+        sampleBusy.value = false;
+      }
+    }
     async function simulateEvent(event, extra) {
       try {
         const r = await fetch(`${API}/debug/simulate`, {
@@ -3992,7 +4291,9 @@ createApp({
       preflight, closePreflight, startPreflightPrint, applyLoadout, stageLabel,
       downloadRewrittenGcode, fmtDuration, estimateDelta, wastePercent,
       gpreview, gpreviewCanvasEl, openGcodePreview, closeGcodePreview,
-      gpreviewTogglePlay,
+      gpreviewTogglePlay, gpreviewLegend, gpreviewFeatureLegend,
+      gpreviewSetLayerLo, gpreviewSetLayerHi, gpreviewPreset,
+      gpreviewIsolate, gpreviewToggleMax, gpreviewLod, gpreviewFeasible,
       swimLanes, swapColor, swapTitle,
       virtualLoadout, virtualSeed, virtualAceCount, virtualExport,
       tierLabel, tierWarn, rgbDec, sortedMapping, slicerColorsInPrintOrder,
@@ -4021,7 +4322,9 @@ createApp({
       sendingAll, sendAllToPrinter,
       fmtArgs, cmdLabel,
       uploading, uploadInput, triggerUpload, onUploadGcode,
-      sidebar, toggleSidebar, setSidebarPane,
+      sidebar, setSidebarPane,
+      railCollapsed, toggleRail, railItems, railSegStyle,
+      secOpen, toggleSec, laneChips, appliedSnapshot,
       printCtl, printCtlLimits, printCtlDraft, printCtlBusy, printCtlError,
       printCtlSlide, printCtlRelease, printCtlReset, printCtlCancel,
       sendPrintControl,
@@ -4035,6 +4338,7 @@ createApp({
       firmware, firmwareWarn,
       applyModal, closeApplyModal, applyRestart, restartLabel,
       debugPanel, simulateEvent, debugSince,
+      sampleBusy, loadSampleGcode,
     };
   },
 }).mount("#app");

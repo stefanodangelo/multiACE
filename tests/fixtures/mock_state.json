@@ -234,32 +234,45 @@
       }
     },
     {
+      "_comment": "Mid-operation on purpose: channel_state 'load_pull' is what makes toolheadOps report 'loading', which is what gives the navigation rail's active segment a live filament colour to take. Without a head in flight that signal can never be seen in mock mode.",
       "idx": 1,
       "name": "T1",
-      "ace": null,
-      "slot": null,
+      "ace": 0,
+      "slot": 1,
       "filament_detected": false,
-      "material": "",
-      "color": null,
-      "brand": "",
-      "subtype": "",
+      "channel_state": "load_pull",
+      "head_source_known": true,
+      "material": "PLA",
+      "color": "#3f7fd0",
+      "brand": "Generic",
+      "subtype": "Matte",
       "manual": false,
       "feeder": false,
-      "source": null
+      "source": {
+        "ace_index": 0,
+        "slot": 1
+      }
     },
     {
+      "_comment": "A failed load, so the collapsed lane-header chips have an error state to cope with as well as an absent one (ACE 1 slot 1 and 2 are empty).",
       "idx": 2,
       "name": "T2",
-      "ace": null,
-      "slot": null,
+      "ace": 1,
+      "slot": 3,
       "filament_detected": false,
-      "material": "",
-      "color": null,
-      "brand": "",
+      "head_source_known": true,
+      "load_failed": true,
+      "material": "TPU",
+      "color": "#e0a020",
+      "brand": "Generic",
       "subtype": "",
       "manual": false,
       "feeder": false,
-      "source": null
+      "source": {
+        "ace_index": 1,
+        "slot": 3,
+        "load_failed": true
+      }
     },
     {
       "idx": 3,
