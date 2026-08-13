@@ -416,6 +416,19 @@ if [ "$INSTALL_WEB" = "1" ]; then
     if [ -d "$INSTALL_DIR/i18n" ]; then
         cp -a "$INSTALL_DIR/i18n/." "$WEB_DEST/i18n/"
     fi
+    # main.py imports these as siblings of itself (next to
+    # preflight_core.py, which web/backend/ already covers via the cp
+    # above) - they live at the top of the multiace/ tree, not under
+    # web/, so they need their own copy or the backend crashes on
+    # startup importing firmware_compat.
+    for _f in firmware_compat.py config_changes.py; do
+        if [ -f "$INSTALL_DIR/$_f" ]; then
+            cp -f "$INSTALL_DIR/$_f" "$WEB_DEST/backend/"
+        else
+            log "  WARN: $INSTALL_DIR/$_f not found - multiACE Web will \
+fail to start until this is present in $WEB_DEST/backend/"
+        fi
+    done
     # Drop stale bytecode. May be root-owned (left over from when the web
     # head ran as root) while the updater runs as lava - so this can fail;
     # never let it abort the install (set -e). Stale .pyc is harmless:

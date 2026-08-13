@@ -234,6 +234,11 @@ mkdir -p "${ROOT}/home/lava/multiace"
 tar -C "${REPO_ROOT}/multiace" \
     --exclude='__pycache__' --exclude='*.pyc' \
     -cf - web i18n | tar -C "${ROOT}/home/lava/multiace" -xf -
+# _import_sibling's checkout-relative fallback candidate expects these
+# beside multiace/web/, matching the real checkout layout - keep this
+# bundle a genuine mirror rather than a web-only subset.
+cp "${REPO_ROOT}/multiace/firmware_compat.py" "${ROOT}/home/lava/multiace/"
+cp "${REPO_ROOT}/multiace/config_changes.py"  "${ROOT}/home/lava/multiace/"
 
 # tools/: ship what the printer and the backend actually import. NOTE this
 # deliberately ships MORE than the reference release, which predates
@@ -276,6 +281,15 @@ tar -C "${REPO_ROOT}/multiace/web" \
 rm -rf "${ROOT}/home/lava/multiace_web/backend/__pycache__"
 mkdir -p "${ROOT}/home/lava/multiace_web/i18n"
 cp "${REPO_ROOT}"/multiace/i18n/*.json "${ROOT}/home/lava/multiace_web/i18n/"
+# main.py imports these as siblings of itself (next to preflight_core.py,
+# already covered by the backend/ tar above) - they live at the top of
+# multiace/, not under web/, and every other deploy path (install_multiace.sh,
+# both push scripts) needs the identical extra copy for the same reason.
+# Without it the backend crashes on import at startup: FileNotFoundError on
+# firmware_compat.py, no traceback anywhere near obviously related to a
+# build-script omission.
+cp "${REPO_ROOT}/multiace/firmware_compat.py" "${ROOT}/home/lava/multiace_web/backend/"
+cp "${REPO_ROOT}/multiace/config_changes.py"  "${ROOT}/home/lava/multiace_web/backend/"
 # deploy/ is build input, not runtime state - it belongs to the source bundle.
 rm -rf "${ROOT}/home/lava/multiace_web/deploy"
 

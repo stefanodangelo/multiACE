@@ -69,11 +69,20 @@ job_history = _load_job_history()
 def _import_sibling(mod_name: str):
     """Import a top-level multiACE module (multiace/<name>.py).
 
-    Installed on the printer the backend lives at .../multiace/web/backend
-    with the repo root usually NOT on sys.path, so the plain package
-    import fails there while it works in a checkout. Try the package
-    first, then load the file directly - both point at the same file, so
-    the two paths cannot drift.
+    Two layouts to support, and their nesting depth differs by one level:
+      - checkout:  <repo>/multiace/web/backend/main.py
+                   parents[2] from here is <repo>/multiace - correct.
+      - installed: /home/lava/multiace_web/backend/main.py
+                   (every deploy path - install_multiace.sh, the push
+                   scripts, the PAXX overlay - flattens multiace/web into
+                   a single multiace_web/ directory). parents[2] from here
+                   is /home/lava, one level shallower than the checkout
+                   case, because "multiace" + "web" collapsed into one
+                   name. A single parents[N] cannot be right for both.
+    Try the package import (works if multiace is actually installed as a
+    package), then the file directly beside this one (what every deploy
+    path is expected to place there, alongside preflight_core.py), then
+    the checkout-relative path last.
     """
     try:
         import importlib
@@ -81,7 +90,15 @@ def _import_sibling(mod_name: str):
     except Exception:
         pass
     import importlib.util
-    path = Path(__file__).resolve().parents[2] / f"{mod_name}.py"
+    here = Path(__file__).resolve()
+    for path in (here.parent / f"{mod_name}.py",
+                 here.parents[2] / f"{mod_name}.py"):
+        if path.is_file():
+            break
+    else:
+        raise ImportError(
+            f"{mod_name}.py not found next to main.py or at the checkout "
+            f"location ({here.parent} or {here.parents[2]})")
     spec = importlib.util.spec_from_file_location(f"_multiace_{mod_name}", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")

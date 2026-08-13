@@ -10794,7 +10794,7 @@ class MultiAce:
             'retry_config': {
                 'max_auto_retries': self.filament_load_max_auto_retries,
                 'retry_delay_ms':   self.filament_load_retry_delay_ms,
-                'per_head':         dict(self.head_auto_retries),
+                'per_head':         {str(k): v for k, v in self.head_auto_retries.items()},
             },
             'firmware_version': self.firmware_version,
             'aces': aces,

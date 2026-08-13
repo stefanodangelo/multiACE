@@ -221,12 +221,24 @@ fi'
 restart_klipper() {
     say "restarting Klipper"
     if [ "$DRY_RUN" = "1" ]; then
-        echo "DRY-RUN: FIRMWARE_RESTART via Moonraker"
+        echo "DRY-RUN: /etc/init.d/S60klipper restart"
         return 0
     fi
-    curl -fsS -X POST --max-time 20 \
-        "http://${HOST}/printer/firmware_restart" >/dev/null \
-        || warn "firmware_restart request failed - check the printer"
+    # NOT firmware_restart, on purpose. Klipper's FIRMWARE_RESTART reloads
+    # config and reinitialises the object graph WITHOUT re-`import`ing
+    # already-loaded extras modules - Python's own sys.modules cache means
+    # a --full push's changed .py files sit on disk, verified, completely
+    # unused by the running process, and every symptom looks exactly like
+    # the fix didn't work (observed HW-side 2026-08-13: five separate
+    # source edits across a debugging session, each one silently ignored
+    # by a Klipper process that had been running since before any of
+    # them). Moonraker's own service-restart API is blocked for 'klipper'
+    # on this appliance ("Service 'klipper' not allowed"), so the only way
+    # to get a REAL process restart - a fresh `import`, not a reload - is
+    # the init script itself, over the same SSH channel everything else
+    # here already uses.
+    run_remote '/etc/init.d/S60klipper restart' \
+        || warn "S60klipper restart failed - check the printer"
 }
 
 restart_web() {
@@ -312,8 +324,24 @@ else
     tar -C "$REPO_ROOT" \
         --exclude='__pycache__' --exclude='*.pyc' \
         -cf - multiace/web multiace/tools multiace/i18n \
+              multiace/firmware_compat.py multiace/config_changes.py \
         | tar -C "$STAGE_DIR" -xf -
 fi
+
+# CRLF: this repo has no .gitattributes and Windows checkouts default to
+# CRLF. busybox ash chokes on a `#!/bin/bash\r` shebang with a bare
+# "cannot execute: required file not found" - no mention of line endings
+# anywhere in that message. install_multiace.sh hit exactly this on a
+# --full push: the file never got far enough to run its OWN internal
+# `sed -i 's/\r$//'` self-repair (that fixes a copied init script, not
+# itself) because the interpreter lookup for install_multiace.sh's own
+# shebang fails before the script body executes at all. Same fix as
+# build-paxx-mod.sh's strip_crlf: normalise on the way out, unconditionally
+# (a no-op on an already-LF file), rather than trust the checkout.
+find "${STAGE_DIR}/multiace" -type f \( -name '*.sh' -o -name '*.cfg' \
+    -o -name '*.py' -o -name '*.json' -o -name 'S[0-9][0-9]*' \
+    -o -name '*.sudoers' -o -name 'post-commit' \) \
+    -exec sed -i 's/\r$//' {} +
 
 stamp_version "$(dev_version)"
 
@@ -367,6 +395,12 @@ mkdir -p \"\$WEB_DEST/backend\" \"\$WEB_DEST/frontend\" \"\$WEB_DEST/i18n\"
 cp -a '${REMOTE_DIR}/multiace/web/backend/.'  \"\$WEB_DEST/backend/\"
 cp -a '${REMOTE_DIR}/multiace/web/frontend/.' \"\$WEB_DEST/frontend/\"
 cp -a '${REMOTE_DIR}/multiace/i18n/.'         \"\$WEB_DEST/i18n/\"
+# main.py imports these two as siblings of itself (next to
+# preflight_core.py) - they live at the top of the multiace/ tree in the
+# repo, not under web/, so the tar above ships them separately and they
+# need their own cp into backend/.
+cp -f '${REMOTE_DIR}/multiace/firmware_compat.py' \"\$WEB_DEST/backend/\"
+cp -f '${REMOTE_DIR}/multiace/config_changes.py'  \"\$WEB_DEST/backend/\"
 # Stale bytecode may be root-owned from an older install; never fatal,
 # because Python recompiles whenever the .py is newer anyway.
 rm -rf \"\$WEB_DEST/backend/__pycache__\" 2>/dev/null || true

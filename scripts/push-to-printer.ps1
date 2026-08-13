@@ -179,12 +179,19 @@ function Get-DevVersion {
 
 function Restart-Klipper {
     Say "restarting Klipper"
-    if ($DryRun) { Write-Host "DRY-RUN: FIRMWARE_RESTART via Moonraker"; return }
+    if ($DryRun) { Write-Host "DRY-RUN: /etc/init.d/S60klipper restart"; return }
+    # NOT firmware_restart, on purpose - see push-to-printer.sh's
+    # Restart-Klipper-equivalent comment. FIRMWARE_RESTART reloads
+    # Klipper's config/object graph WITHOUT re-importing already-loaded
+    # extras modules, so a --full push's changed .py files sit on disk,
+    # verified, completely unused by the running process. Moonraker's own
+    # service-restart API is blocked for 'klipper' on this appliance, so
+    # the init script over SSH is the only way to get a real process
+    # restart (a fresh import, not a reload).
     try {
-        Invoke-RestMethod -Method Post -TimeoutSec 20 `
-            -Uri "http://$PrinterHost/printer/firmware_restart" | Out-Null
+        Invoke-Remote '/etc/init.d/S60klipper restart' | Out-Null
     } catch {
-        Warn "firmware_restart request failed - check the printer"
+        Warn "S60klipper restart failed - check the printer"
     }
 }
 
@@ -286,7 +293,12 @@ try {
     $sources = if ($Mode -eq "full") {
         @("multiace")
     } else {
-        @("multiace/web", "multiace/tools", "multiace/i18n")
+        # firmware_compat.py / config_changes.py: main.py imports them as
+        # siblings of itself (next to preflight_core.py), but they live at
+        # the top of multiace/, not under web/ - without these two, a
+        # web-only push leaves the backend crashing on import at startup.
+        @("multiace/web", "multiace/tools", "multiace/i18n",
+          "multiace/firmware_compat.py", "multiace/config_changes.py")
     }
     foreach ($rel in $sources) {
         $src = Join-Path $RepoRoot ($rel -replace "/", "\")
@@ -299,6 +311,24 @@ try {
         | Remove-Item -Recurse -Force
     Get-ChildItem -Path $Stage -Recurse -Force -Filter "*.pyc" `
         | Remove-Item -Force
+
+    # CRLF: this repo has no .gitattributes and a Windows checkout defaults
+    # to CRLF. busybox ash chokes on a `#!/bin/bash\r` shebang with a bare
+    # "cannot execute: required file not found" - nothing in that message
+    # points at line endings. Normalise on the way out, unconditionally (a
+    # no-op on an already-LF file), same as build-paxx-mod.sh's strip_crlf.
+    # WriteAllText with a no-BOM UTF8 encoding matters here specifically:
+    # PowerShell's default UTF8 write prepends a BOM, and a BOM before
+    # `#!` breaks the shebang exactly the same way CRLF does.
+    $noBom = New-Object System.Text.UTF8Encoding $false
+    Get-ChildItem -Path $Stage -Recurse -Force -File `
+            -Include '*.sh','*.cfg','*.py','*.json','*.sudoers','post-commit','S[0-9][0-9]*' `
+        | ForEach-Object {
+            $text = [System.IO.File]::ReadAllText($_.FullName)
+            if ($text.Contains("`r`n")) {
+                [System.IO.File]::WriteAllText($_.FullName, ($text -replace "`r`n", "`n"), $noBom)
+            }
+        }
 
     # Stamp the tarball copy only, never the working tree, so a push never
     # dirties your git status.
@@ -376,6 +406,8 @@ mkdir -p "`$WEB_DEST/backend" "`$WEB_DEST/frontend" "`$WEB_DEST/i18n"
 cp -a '$RemoteDir/multiace/web/backend/.'  "`$WEB_DEST/backend/"
 cp -a '$RemoteDir/multiace/web/frontend/.' "`$WEB_DEST/frontend/"
 cp -a '$RemoteDir/multiace/i18n/.'         "`$WEB_DEST/i18n/"
+cp -f '$RemoteDir/multiace/firmware_compat.py' "`$WEB_DEST/backend/"
+cp -f '$RemoteDir/multiace/config_changes.py'  "`$WEB_DEST/backend/"
 rm -rf "`$WEB_DEST/backend/__pycache__" 2>/dev/null || true
 chown -R lava:lava "`$WEB_DEST" 2>/dev/null || true
 mkdir -p /home/lava/printer_data/config/tools
