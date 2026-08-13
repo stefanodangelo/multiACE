@@ -61,6 +61,28 @@ function Say  ($m) { Write-Host "STATUS: $m" }
 function Warn ($m) { Write-Warning $m }
 function Die  ($m) { Write-Error $m; exit 1 }
 
+# $ErrorActionPreference = "Stop" turns ANY stderr line written by a native
+# .exe into a terminating exception - independent of its exit code, and
+# empirically NOT reliably prevented by stream redirection alone (2>$null
+# on `git diff --quiet` still threw here). Every native call in this
+# script follows the same shape: run it, then decide success/failure from
+# $LASTEXITCODE or its output MYSELF - a git line-ending warning or a
+# `git diff --quiet` exit code of 1 ("there are differences", the expected
+# common case) must not be able to abort the script on their own. The only
+# reliable way to get that is to not be in "Stop" mode for the moment the
+# native command runs; -ErrorAction isn't valid on a native command, so the
+# preference variable itself has to move, temporarily, around the call.
+function Invoke-NativeChecked {
+    param([Parameter(Mandatory)][scriptblock]$Script)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Script
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 if (-not $PrinterHost) {
     Die "No printer host. Pass -PrinterHost or set MULTIACE_PRINTER_HOST."
 }
@@ -70,7 +92,7 @@ function Invoke-Remote ($Command) {
         Write-Host "DRY-RUN: ssh $PrinterUser@$PrinterHost $Command"
         return ""
     }
-    $out = & ssh -o BatchMode=yes "$PrinterUser@$PrinterHost" $Command 2>&1
+    $out = Invoke-NativeChecked { ssh -o BatchMode=yes "$PrinterUser@$PrinterHost" $Command 2>&1 }
     if ($LASTEXITCODE -ne 0) {
         Die "remote command failed ($LASTEXITCODE): $out"
     }
@@ -117,7 +139,7 @@ function Invoke-LocalTests {
     if ($DryRun) { Write-Host "DRY-RUN: python -m pytest -q"; return }
     Push-Location $RepoRoot
     try {
-        & python -m pytest -q
+        Invoke-NativeChecked { python -m pytest -q }
         if ($LASTEXITCODE -ne 0) {
             Die "tests failed - not pushing. Fix them, or -SkipTests if you truly mean to."
         }
@@ -147,9 +169,9 @@ function Assert-McuPatchable {
 function Get-DevVersion {
     Push-Location $RepoRoot
     try {
-        $sha = (& git rev-parse --short HEAD 2>$null)
+        $sha = Invoke-NativeChecked { git rev-parse --short HEAD 2>$null }
         if (-not $sha) { $sha = "nogit" }
-        & git diff --quiet 2>$null
+        Invoke-NativeChecked { git diff --quiet 2>$null } | Out-Null
         $dirty = if ($LASTEXITCODE -ne 0) { "-dirty" } else { "" }
         return "dev.$sha$dirty"
     } finally { Pop-Location }
@@ -291,7 +313,7 @@ try {
 
     Say "packing"
     $tarball = Join-Path $Stage "multiace-dev.tar.gz"
-    & tar -C $Stage -czf $tarball multiace
+    Invoke-NativeChecked { tar -C $Stage -czf $tarball multiace }
     if ($LASTEXITCODE -ne 0) { Die "tar failed - is bsdtar/tar on PATH?" }
 
     if ($DryRun) {
@@ -301,8 +323,30 @@ try {
     }
 
     Say "copying to ${PrinterHost}:$RemoteTar"
-    & scp -q -o BatchMode=yes $tarball "${PrinterUser}@${PrinterHost}:$RemoteTar"
-    if ($LASTEXITCODE -ne 0) { Die "scp failed" }
+    # NOT scp, on purpose. Both scp protocol modes (the default SFTP-based
+    # transfer and the legacy -O one) took this printer's sshd down
+    # entirely - the first during protocol negotiation, the second
+    # mid-transfer - rather than just failing that one session (observed
+    # HW-side 2026-08-13: Moonraker/nginx on the same box kept working the
+    # whole time, only sshd crashed). This streams the file over a plain
+    # SSH exec channel instead: base64 locally, decode remotely. Base64
+    # rather than a raw byte pipe because piping binary data through
+    # Windows PowerShell's own pipeline into a native process's stdin is
+    # unreliable (encoding conversions can corrupt it, especially on
+    # Windows PowerShell 5.1) - as plain ASCII text there is no such
+    # ambiguity, at the cost of ~33% more bytes on the wire, irrelevant at
+    # this file's size. The remote end only needs `base64`, a standard
+    # BusyBox applet, not the scp/sftp subsystem that keeps crashing.
+    $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($tarball))
+    # The pipe has to be INSIDE the scriptblock, not `$b64 | Invoke-
+    # NativeChecked {...}` - that form tries to bind $b64 to one of the
+    # wrapper's own parameters and throws a ParameterBindingException
+    # before ssh ever runs. Inside the block, $b64 is just a normal closed-
+    # over variable and pipes into the native command exactly as expected.
+    Invoke-NativeChecked {
+        $b64 | ssh -T -o BatchMode=yes "$PrinterUser@$PrinterHost" "base64 -d > $RemoteTar"
+    }
+    if ($LASTEXITCODE -ne 0) { Die "streaming copy to the printer failed" }
 
     Say "extracting"
     Invoke-Remote "rm -rf '$RemoteDir' && mkdir -p '$RemoteDir' && tar -C '$RemoteDir' -xzf '$RemoteTar'" | Out-Null

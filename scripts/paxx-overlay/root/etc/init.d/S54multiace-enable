@@ -1,0 +1,47 @@
+#!/bin/sh
+TWEAK_SRC=/usr/local/share/firmware-config/tweaks/klipper/multiace.cfg
+TWEAK_DST=/oem/printer_data/config/extended/klipper/multiace.cfg
+DISABLE_FLAG=/oem/printer_data/config/extended/klipper/multiace.disabled
+LOG_TAG="multiace-enable"
+log() {
+    logger -t "$LOG_TAG" "$1"
+}
+start() {
+    if [ -e "$DISABLE_FLAG" ]; then
+        log "disable flag present at $DISABLE_FLAG -- skipping auto-enable"
+        return 0
+    fi
+    if [ ! -f "$TWEAK_SRC" ]; then
+        log "tweak source missing: $TWEAK_SRC (firmware install incomplete?)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$TWEAK_DST")"
+    if [ -L "$TWEAK_DST" ]; then
+        existing="$(readlink "$TWEAK_DST")"
+        if [ "$existing" = "$TWEAK_SRC" ]; then
+            log "symlink already correct: $TWEAK_DST -> $TWEAK_SRC"
+            return 0
+        fi
+        log "symlink points elsewhere ($existing), repointing"
+        rm -f "$TWEAK_DST"
+    elif [ -e "$TWEAK_DST" ]; then
+        log "$TWEAK_DST exists as non-symlink, leaving alone"
+        return 0
+    fi
+    ln -sf "$TWEAK_SRC" "$TWEAK_DST"
+    log "enabled multiACE tweak ($TWEAK_DST -> $TWEAK_SRC)"
+}
+case "$1" in
+    start|"")
+        start
+        ;;
+    stop)
+        ;;
+    restart|reload)
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

@@ -1985,6 +1985,33 @@ createApp({
         },
       });
     }
+    // The reboot step debugEnable's success prompt asks for. Reuses the
+    // backend's existing /api/reboot (Moonraker's /machine/reboot) - there
+    // was no other caller of it in the whole frontend, which is exactly the
+    // kind of gap that leaves a working backend feature with no way to
+    // trigger it from the UI.
+    async function debugReboot() {
+      if (debugState.busy) return;
+      confirm({
+        title: t("ui.config.debug_reboot_title"),
+        message: t("ui.config.debug_reboot_msg"),
+        okLabel: t("ui.config.debug_reboot_btn"),
+        onOk: async () => {
+          debugState.busy = true;
+          try {
+            const r = await fetch(`${API}/reboot`, {method: "POST"});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+            debugState.rebootPrompt = false;
+            setMacroLog(t("ui.config.debug_reboot_sent"));
+          } catch (e) {
+            setMacroLog(`${t("ui.config.debug_reboot_failed")}: ${e.message || e}`);
+          } finally {
+            debugState.busy = false;
+          }
+        },
+      });
+    }
     function _parseUpdateResult(r) {
       const lines = r.status_lines || [];
       let cur = updateState.current, lat = updateState.latest;
@@ -4310,7 +4337,7 @@ createApp({
       headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
       updateState, updateCheck, updateApply,
-      debugState, debugEnable, debugDisable,
+      debugState, debugEnable, debugDisable, debugReboot,
       plugins, refreshPlugins, pluginIframeSrc,
       notifications, dismissNotification, dismissAllNotifications,
       confirmDialog, okConfirm, altConfirm, cancelConfirm,

@@ -448,8 +448,22 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
                      border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: .9rem; }
 .mode-row > button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
 .mode-row > button:hover:not(.active) { border-color: var(--accent); }
-.config-form { background: var(--card); border: 1px solid var(--border); padding: 1rem; border-radius: 6px; }
+/* Parameters form: fields two abreast when there is room for two readable
+   ones, otherwise one. NOT a hard `repeat(2, 1fr)`: this form sits inside a
+   panel that is itself one of two page columns, so a fixed 2 would put four
+   fields across the page and squeeze each input down to a couple of
+   characters - the values are still there, just too narrow to read. auto-fit
+   drops to one column per panel instead, and only pairs up on a wide window.
+   Anything that isn't a field row - hint paragraphs, the debug-log fieldset -
+   spans the full width so it still reads as one block. */
+.config-form { background: var(--card); border: 1px solid var(--border); padding: 1rem; border-radius: 6px;
+               display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+               column-gap: 1.5rem; align-items: start; }
+.config-form > :not(.config-row) { grid-column: 1 / -1; }
 .config-row { display: grid; grid-template-columns: 200px 1fr auto; gap: .8rem; align-items: center; margin-bottom: .5rem; }
+/* The label's fixed 200px would eat a narrow column's whole width before the
+   input got any, so let the label give way first. */
+.config-form .config-row { grid-template-columns: minmax(110px, 200px) minmax(90px, 1fr) auto; }
 .config-row .small { font-size: .8rem; }
 .update-card { background: var(--card); border: 1px solid var(--border);
                padding: .8rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
@@ -492,7 +506,9 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .checkbox-grid label { display: inline-flex; gap: .35rem; align-items: center; color: var(--fg); }
 .checkbox-grid code { color: var(--accent); font-size: .85rem; }
 .config-row label { font-size: .9rem; color: var(--muted); }
-.per-ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+/* Same reasoning as .config-form: inside a half-width panel a hard 2 columns
+   squeezes the cards, so pair them up only when the panel is wide enough. */
+.per-ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
                 gap: .6rem; margin-bottom: 1rem; }
 .per-ace-card { background: var(--card); border: 1px solid var(--border);
                 border-radius: 6px; padding: .8rem; }
@@ -801,6 +817,10 @@ body { padding-bottom: 64px; }
   .conn { order: 2; }
   .upload-btn { margin-left: auto; }
   .config-row { grid-template-columns: 1fr; }
+  .config-page { columns: 1; }
+  /* .config-form / .per-ace-grid need no override here - auto-fit is already
+     down to one column at this width. The rows still have to stack. */
+  .config-form .config-row { grid-template-columns: 1fr; }
 }
 
 /* Identity provenance badge (spec §4 / D3): where the shown filament
@@ -1568,6 +1588,25 @@ html.rail-tight .rail-conn { justify-content: center; padding: .2rem 0; }
   background: var(--ink-800); border: 1px solid var(--line);
   border-radius: 6px; margin: .8rem 0; overflow: hidden;
 }
+/* Config page: the panels sit two across (one column on mobile - see the
+   600px query). Multi-column rather than a grid, because the panels are
+   wildly different heights - Parameters expanded is a dozen fields, Fluidd
+   is one button - and a grid puts them in shared rows, so every mismatched
+   pair leaves dead space under the shorter one. Columns flow instead: the
+   browser balances the panels between the two, packing each one directly
+   under the last with no gaps, and rebalances as panels expand.
+   The cost is reading order - down the left column, then down the right,
+   rather than left-right-left-right. On a page of independent settings
+   panels that is not a sequence anyone reads in order, so it costs nothing
+   here; do not copy this to a list where order carries meaning. */
+.config-page { columns: 2; column-gap: .8rem; }
+.config-page > .pnl {
+  /* A panel split across the column break would show its header in one
+     column and its fields in the other. */
+  -webkit-column-break-inside: avoid; break-inside: avoid;
+  margin: 0 0 .8rem;
+}
+.config-page > :not(.pnl) { column-span: all; }
 .pnl-head {
   display: flex; align-items: center; gap: .6rem;
   margin: 0; padding: 0 .8rem 0 0;

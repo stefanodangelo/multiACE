@@ -1,0 +1,83 @@
+settings:
+  tweaks:
+    items:
+      multiace:
+        label: multiACE (Multi-ACE-Pro support)
+        description: >
+          Adds multi-ACE support to Klipper: up to 4 Anycubic ACE Pro
+          filament changers, in-print colour swaps, cross-ACE feed-assist,
+          hardened load/unload recovery, RFID + manual filament handling,
+          per-ACE dryer control, Snapshot/Loadout system, post-process
+          toolchanger remap. Optional Web UI via SSH `bash
+          /home/lava/multiace/install_web.sh`.
+        help_url: https://github.com/decay71/multiACE
+        get_cmd:
+          - bash
+          - -c
+          - test -f /oem/printer_data/config/extended/klipper/multiace.cfg && echo "enabled" || echo "disabled"
+        options:
+          enabled:
+            label: Enabled
+            confirm: "Enable multiACE? Requires up to 4 ACE Pro devices connected via USB. Klipper restarts after enabling."
+            cmd:
+              - bash
+              - -xc
+              - |
+                rm -f /oem/printer_data/config/extended/klipper/multiace.disabled &&
+                ln -sf /usr/local/share/firmware-config/tweaks/klipper/multiace.cfg \
+                       /oem/printer_data/config/extended/klipper/multiace.cfg &&
+                echo "multiACE enabled. Restarting Klipper..." &&
+                /etc/init.d/S60klipper restart
+          disabled:
+            label: Disabled
+            cmd:
+              - bash
+              - -xc
+              - |
+                touch /oem/printer_data/config/extended/klipper/multiace.disabled &&
+                rm -vf /oem/printer_data/config/extended/klipper/multiace.cfg &&
+                echo "multiACE disabled. Restarting Klipper..." &&
+                /etc/init.d/S60klipper restart
+        default: enabled
+      multiace_reset:
+        label: "multiACE: Reset / Uninstall config"
+        description: >
+          Clean uninstall for firmware-flasher users (no SSH needed). Removes
+          the multiACE include, sets the persistent disable flag, and deletes
+          all multiACE config state under printer_data
+          (extended/multiace: ace_vars, materials, snapshots/loadouts). The
+          engine .py files ship in the firmware image and are reverted by a
+          stock flash. Use this before flashing stock for a clean machine, or
+          to wipe multiACE state and start fresh. Choose "Active" to undo and
+          re-enable multiACE.
+        get_cmd:
+          - bash
+          - -c
+          - test -f /oem/printer_data/config/extended/klipper/multiace.disabled && echo "clean" || echo "active"
+        options:
+          active:
+            label: Active
+            cmd:
+              - bash
+              - -xc
+              - |
+                rm -f /oem/printer_data/config/extended/klipper/multiace.disabled &&
+                ln -sf /usr/local/share/firmware-config/tweaks/klipper/multiace.cfg \
+                       /oem/printer_data/config/extended/klipper/multiace.cfg &&
+                echo "multiACE re-enabled. Restarting Klipper..." &&
+                /etc/init.d/S60klipper restart
+          clean:
+            label: Reset / Uninstall
+            confirm: "Wipe all multiACE config and disable it? This deletes ace_vars, materials and saved snapshots/loadouts under printer_data and cannot be undone. The engine reverts on a stock flash. Klipper restarts."
+            cmd:
+              - bash
+              - -xc
+              - |
+                touch /oem/printer_data/config/extended/klipper/multiace.disabled &&
+                rm -vf /oem/printer_data/config/extended/klipper/multiace.cfg &&
+                rm -rf /oem/printer_data/config/extended/multiace &&
+                sed -i '/\[include extended\/ace.cfg\]/d' \
+                    /home/lava/printer_data/config/printer.cfg 2>/dev/null || true &&
+                echo "multiACE config wiped and disabled. Restarting Klipper..." &&
+                /etc/init.d/S60klipper restart
+        default: active

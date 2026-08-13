@@ -327,7 +327,16 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 say "copying to ${HOST}:${REMOTE_TAR}"
-scp -q -o BatchMode=yes "$TARBALL" "${USER_NAME}@${HOST}:${REMOTE_TAR}"
+# NOT scp, on purpose. Both scp protocol modes (the default SFTP-based
+# transfer and the legacy -O one) took this printer's sshd down entirely -
+# the first during protocol negotiation, the second mid-transfer - rather
+# than just failing that one session (observed HW-side 2026-08-13). This
+# streams the file over a plain SSH exec channel instead: the remote end
+# only has to run `cat`, which needs nothing beyond the most basic SSH
+# capability there is, not the scp/sftp subsystem that keeps crashing.
+cat "$TARBALL" | ssh -T -o BatchMode=yes "${USER_NAME}@${HOST}" \
+        "cat > '${REMOTE_TAR}'" \
+    || die "streaming copy to the printer failed"
 
 say "extracting"
 run_remote "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}' \

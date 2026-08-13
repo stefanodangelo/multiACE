@@ -1932,25 +1932,43 @@ async def debug_mode_get() -> dict:
 
 @app.post("/api/debug-mode/enable")
 async def debug_mode_enable() -> dict:
-    rc, out = await _sudo_run(["/usr/bin/touch", str(_DEBUG_FLAG_PATH)])
-    if rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=(f"sudo touch /oem/.debug failed (rc={rc}): {out.strip()}. "
-                    "Sudoers drop-in /etc/sudoers.d/multiace-debug may be "
-                    "missing - re-run install_multiace.sh."))
-    return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
+    # The web service runs AS ROOT on the only real deployment target
+    # (S98multiace-web: "Snapmaker U1 ships without sudo" - that is why the
+    # service is root in the first place). So try the direct write first;
+    # it is both simpler and the one that actually works on stock hardware.
+    # sudo is kept ONLY as a fallback for a deployment that runs this
+    # service as a non-root user with a sudoers drop-in configured - if
+    # direct access fails for a permission reason, THAT is the case sudo
+    # exists to cover, not the common one.
+    try:
+        _DEBUG_FLAG_PATH.touch()
+        return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": "touched directly"}
+    except OSError as direct_err:
+        rc, out = await _sudo_run(["/usr/bin/touch", str(_DEBUG_FLAG_PATH)])
+        if rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(f"could not create {_DEBUG_FLAG_PATH}: direct write "
+                        f"failed ({direct_err}), sudo touch also failed "
+                        f"(rc={rc}): {out.strip()}"))
+        return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
 
 @app.post("/api/debug-mode/disable")
 async def debug_mode_disable() -> dict:
     if not _DEBUG_FLAG_PATH.exists():
         return {"enabled": False, "stdout": "already disabled"}
-    rc, out = await _sudo_run(["/bin/rm", "-f", str(_DEBUG_FLAG_PATH)])
-    if rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"sudo rm /oem/.debug failed (rc={rc}): {out.strip()}")
-    return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
+    try:
+        _DEBUG_FLAG_PATH.unlink()
+        return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": "removed directly"}
+    except OSError as direct_err:
+        rc, out = await _sudo_run(["/bin/rm", "-f", str(_DEBUG_FLAG_PATH)])
+        if rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(f"could not remove {_DEBUG_FLAG_PATH}: direct remove "
+                        f"failed ({direct_err}), sudo rm also failed "
+                        f"(rc={rc}): {out.strip()}"))
+        return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
 
 @app.post("/api/reboot")
 async def reboot() -> dict:

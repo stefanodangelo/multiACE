@@ -1,0 +1,88 @@
+#!/bin/sh
+# Sync multiACE tools (e.g. post_process_virtual_toolheads.py) from the
+# squashfs bundle into the user-facing printer_data/config/tools/ path
+# on boot. install_multiace.sh (SSH-install path) puts these files there;
+# PAXX-baked firmware ships them only at /home/lava/multiace/tools/, which
+# isn't visible in Fluidd's web file browser and confuses users who follow
+# the slicer-post-process docs.
+#
+# PAXX's S49extended-config only mirrors /usr/local/share/firmware-config/
+# extended/ into printer_data/config/extended/ — anything outside that
+# subfolder is ignored. So we cannot rely on the firmware-config staging
+# mechanism for these files. This hook fills the gap.
+#
+# Logic per boot (md5-MARKER, mirroring S55multiace-cfg-refresh):
+#   1. If the bundle dir is missing, no-op.
+#   2. mkdir -p the destination.
+#   3. For each shipped .py: copy if the dest is missing. Otherwise REFRESH
+#      (overwrite, after a .bak backup) ONLY when the BUNDLE's md5 differs from
+#      the marker we stored at the last sync (= the firmware was re-baked with a
+#      newer tool). A mere dest!=bundle diff does NOT trigger a refresh.
+#
+# Why marker-tracked and not bundle-vs-dest: the bundle at SRC_DIR is baked into
+# the (read-only) squashfs, but printer_data is the CANONICAL copy that an SSH
+# install / online update keeps current (§17/§21) - it can be NEWER than the
+# baked bundle. A plain bundle-vs-dest refresh clobbered an SSH-installed newer
+# tool with the older baked bundle on every reboot. Tracking the bundle's own
+# md5 means we only push when the bundle itself changes (a new bake), so a newer
+# SSH copy survives reboots, AND a real bin upgrade (new bundle) still refreshes
+# a stale printer_data copy (the original preflight-500 fix). Missing marker ->
+# treat as changed (first run / pre-marker firmware) so a genuinely stale copy
+# is still fixed; from the next boot the marker exists and SSH copies persist.
+#
+# This runs before S60klipper but its content is independent of Klipper —
+# the script position only matters for ordering relative to other multiACE
+# hooks. S57 sits between S55multiace-cfg-refresh / S56multiace-trsync and
+# S58multiace-mode.
+
+SRC_DIR=/home/lava/multiace/tools
+DST_DIR=/home/lava/printer_data/config/tools
+LOG_TAG="multiace-tools"
+
+log() { logger -t "$LOG_TAG" "$1"; }
+hash_of() {
+    [ -f "$1" ] || { echo ""; return; }
+    md5sum "$1" 2>/dev/null | awk '{print $1}'
+}
+
+start() {
+    if [ ! -d "$SRC_DIR" ]; then
+        log "bundle dir $SRC_DIR missing — skip"
+        return 0
+    fi
+    mkdir -p "$DST_DIR" 2>/dev/null || true
+    copied=0
+    refreshed=0
+    for src in "$SRC_DIR"/*.py; do
+        [ -f "$src" ] || continue
+        base=$(basename "$src")
+        dst="$DST_DIR/$base"
+        marker="$DST_DIR/.$base.bundle.md5"
+        src_md5="$(hash_of "$src")"
+        if [ ! -e "$dst" ]; then
+            cp "$src" "$dst" 2>/dev/null && copied=$((copied + 1))
+            printf '%s\n' "$src_md5" > "$marker" 2>/dev/null
+            continue
+        fi
+        old_md5="$(head -n1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+        if [ "$old_md5" != "$src_md5" ]; then
+            ts=$(date -u '+%Y%m%d-%H%M%S')
+            cp "$dst" "$dst.bak.$ts" 2>/dev/null
+            cp "$src" "$dst" 2>/dev/null && refreshed=$((refreshed + 1))
+            printf '%s\n' "$src_md5" > "$marker" 2>/dev/null
+        fi
+    done
+    chown -R lava:lava "$DST_DIR" 2>/dev/null || true
+    if [ "$copied" -gt 0 ] || [ "$refreshed" -gt 0 ]; then
+        log "tools sync: $copied new, $refreshed refreshed in $DST_DIR"
+    fi
+}
+
+case "$1" in
+    start|"")    start ;;
+    stop)        ;;
+    restart)     start ;;
+    *)           echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+
+exit 0

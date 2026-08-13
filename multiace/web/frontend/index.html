@@ -608,7 +608,7 @@
       </table>
     </section>
 
-    <section v-show="tab==='config'">
+    <section v-show="tab==='config'" class="config-page">
       <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
       <!-- Config is where the panel pattern pays off most: this was one
            long scroll of eight <h3>s with no way to skip past any of it.
@@ -993,11 +993,41 @@
                : t('ui.config.debug_off') }}
           </span>
         </div>
-        <div v-if="!debugState.enabled" class="debug-instruction">
+        <div v-if="!debugState.enabled && !debugState.rebootPrompt"
+             class="debug-instruction">
           <p class="muted small">{{ t('ui.config.debug_explain') }}</p>
+          <div class="update-actions">
+            <button @click="debugEnable" :disabled="debugState.busy">
+              {{ debugState.busy ? t('ui.config.debug_working')
+                                 : t('ui.config.debug_enable_btn') }}
+            </button>
+          </div>
+          <!-- The button above does exactly this over HTTP via the
+               sudoers drop-in from install - kept as a fallback for a
+               printer where that drop-in is missing (the button's own
+               error message says so if it fails) or for anyone who just
+               prefers a shell. -->
+          <p class="muted small">{{ t('ui.config.debug_ssh_fallback') }}</p>
           <pre class="debug-cmd">ssh root@&lt;printer-ip&gt;
 touch /oem/.debug
 reboot</pre>
+        </div>
+        <div v-if="debugState.rebootPrompt" class="debug-instruction">
+          <p class="muted small">{{ t('ui.config.debug_reboot_prompt') }}</p>
+          <div class="update-actions">
+            <button @click="debugReboot" class="primary"
+                    :disabled="debugState.busy">
+              {{ debugState.busy ? t('ui.config.debug_working')
+                                 : t('ui.config.debug_reboot_btn') }}
+            </button>
+          </div>
+        </div>
+        <div v-if="debugState.enabled && !debugState.rebootPrompt"
+             class="update-actions">
+          <button @click="debugDisable" :disabled="debugState.busy">
+            {{ debugState.busy ? t('ui.config.debug_working')
+                               : t('ui.config.debug_disable_btn') }}
+          </button>
         </div>
         <div class="update-row">
           <span class="muted">{{ t('ui.config.update_current') }}:</span>

@@ -1,0 +1,55 @@
+#!/bin/sh
+# multiACE TRSYNC mask for the multi-MCU homing window. Stock 1.4.1 ships
+# klipper with TRSYNC_TIMEOUT=0.050; on non-clean-baked installs this causes
+# 0003 "Communication timeout during homing" on every homing. We raise it to
+# 0.350 (stock 1.5's own default). The SSH install_multiace.sh applies the same
+# guard; firmware-flasher users never run it, so we patch idempotently at boot
+# before S60klipper starts. Masking mitigation, not the root fix.
+# ONLY-RAISE: never pull the window back DOWN (stock 1.5 = 0.350 already; a
+# future stock may go higher). Patch only when the live value is LOWER.
+MCU_PY=/home/lava/klipper/klippy/mcu.py
+TRSYNC_VALUE=0.350
+DISABLE_FLAG=/oem/printer_data/config/extended/klipper/multiace.disabled
+LOG_TAG="multiace-trsync"
+log() {
+    logger -t "$LOG_TAG" "$1"
+}
+start() {
+    if [ -e "$DISABLE_FLAG" ]; then
+        log "disable flag present -- skipping TRSYNC patch"
+        return 0
+    fi
+    if [ ! -f "$MCU_PY" ]; then
+        log "mcu.py not found at $MCU_PY -- skipping"
+        return 0
+    fi
+    if ! grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY"; then
+        log "no TRSYNC_TIMEOUT line in $MCU_PY -- skipping"
+        return 0
+    fi
+    TRSYNC_CUR="$(grep -oE '^TRSYNC_TIMEOUT = [0-9.]+' "$MCU_PY" | awk '{print $3}')"
+    if [ -z "$TRSYNC_CUR" ] || ! awk "BEGIN{exit !($TRSYNC_CUR < $TRSYNC_VALUE)}"; then
+        log "TRSYNC_TIMEOUT already >= ${TRSYNC_VALUE} (${TRSYNC_CUR}) -- leaving stock untouched"
+        return 0
+    fi
+    if ! [ -w "$MCU_PY" ]; then
+        log "WARNING: $MCU_PY is not writable -- mask NOT applied"
+        return 0
+    fi
+    sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_VALUE}/" "$MCU_PY"
+    log "TRSYNC_TIMEOUT raised ${TRSYNC_CUR} -> ${TRSYNC_VALUE} in $MCU_PY"
+}
+case "$1" in
+    start|"")
+        start
+        ;;
+    stop)
+        ;;
+    restart|reload)
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

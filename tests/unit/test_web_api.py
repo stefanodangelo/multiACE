@@ -783,3 +783,96 @@ class TestPrinterIdleGuard:
         # Past the print check, stopped by the persistent-updates gate.
         assert r.status_code == 409
         assert "Persistent updates" in r.json()["detail"]
+
+
+class TestDebugModeFlag:
+    """The web service runs AS ROOT on the only real deployment target
+    (S98multiace-web's own comment: "Snapmaker U1 ships without sudo" -
+    that is why it runs as root at all). /api/debug-mode/enable used to
+    shell out to sudo unconditionally and hard-fail with "sudo not on
+    PATH" on stock hardware, even though the process already had every
+    permission it needed to touch the file directly. Direct access has to
+    be tried first; sudo is the fallback for a hypothetical non-root
+    deployment, not the primary path.
+    """
+
+    def test_enable_writes_the_flag_directly(self, client, tmp_path):
+        c, main, cfg, calls = client
+        flag = tmp_path / "debug-flag-direct"
+        main._DEBUG_FLAG_PATH = flag
+        r = c.post("/api/debug-mode/enable")
+        assert r.status_code == 200
+        assert r.json()["enabled"] is True
+        assert flag.is_file()
+
+    def test_enable_never_shells_out_when_direct_write_works(self, client,
+                                                              tmp_path,
+                                                              monkeypatch):
+        """The common case (root, no sudo binary) must not even attempt the
+        subprocess - that is exactly the call that fails on stock hardware."""
+        c, main, cfg, calls = client
+        main._DEBUG_FLAG_PATH = tmp_path / "debug-flag-no-sudo"
+
+        async def boom(argv, timeout=5.0):
+            raise AssertionError("sudo should not have been called")
+
+        monkeypatch.setattr(main, "_sudo_run", boom)
+        r = c.post("/api/debug-mode/enable")
+        assert r.status_code == 200
+
+    def test_disable_removes_the_flag_directly(self, client, tmp_path):
+        c, main, cfg, calls = client
+        flag = tmp_path / "debug-flag-disable"
+        flag.touch()
+        main._DEBUG_FLAG_PATH = flag
+        r = c.post("/api/debug-mode/disable")
+        assert r.status_code == 200
+        assert r.json()["enabled"] is False
+        assert not flag.exists()
+
+    def test_disable_is_a_no_op_when_already_absent(self, client, tmp_path):
+        c, main, cfg, calls = client
+        main._DEBUG_FLAG_PATH = tmp_path / "debug-flag-absent"
+        r = c.post("/api/debug-mode/disable")
+        assert r.status_code == 200
+        assert r.json()["stdout"] == "already disabled"
+
+    def test_enable_falls_back_to_sudo_when_direct_write_is_denied(
+            self, client, tmp_path, monkeypatch):
+        """A hypothetical non-root deployment with a sudoers drop-in - the
+        one case sudo genuinely exists for."""
+        c, main, cfg, calls = client
+        # A path INSIDE a file, not a directory: Path.touch() on it always
+        # raises NotADirectoryError/OSError, on every OS, with no setup
+        # step of its own to accidentally leave behind - unlike a
+        # nonexistent parent directory, which a naive fallback can silently
+        # create as a side effect and pollute a real path with.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        flag = blocker / "debug-flag"
+        main._DEBUG_FLAG_PATH = flag
+
+        async def fake_sudo(argv, timeout=5.0):
+            return 0, "sudo touched it"
+
+        monkeypatch.setattr(main, "_sudo_run", fake_sudo)
+        r = c.post("/api/debug-mode/enable")
+        assert r.status_code == 200
+        assert r.json()["stdout"] == "sudo touched it"
+
+    def test_enable_reports_both_failures_when_neither_path_works(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        blocker = tmp_path / "blocker2"
+        blocker.write_text("not a directory")
+        main._DEBUG_FLAG_PATH = blocker / "debug-flag"
+
+        async def fake_sudo(argv, timeout=5.0):
+            return 127, "sudo not on PATH"
+
+        monkeypatch.setattr(main, "_sudo_run", fake_sudo)
+        r = c.post("/api/debug-mode/enable")
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert "direct write failed" in detail
+        assert "sudo touch also failed" in detail

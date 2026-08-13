@@ -1,0 +1,35 @@
+#!/bin/sh
+VARS_FILE=/home/lava/printer_data/config/extended/multiace/ace_vars.cfg
+SWITCH_SCRIPT=/home/lava/printer_data/config/extended/multiace/ace_mode_switch.sh
+start() {
+    if [ ! -x "$SWITCH_SCRIPT" ]; then
+        logger -t multiace-mode "ace_mode_switch.sh missing at $SWITCH_SCRIPT - skip"
+        return 0
+    fi
+    mode="multi"
+    if [ -f "$VARS_FILE" ]; then
+        m="$(sed -n "s/^ace__mode *= *'\\([^']*\\)'.*/\\1/p" "$VARS_FILE" | head -1)"
+        [ -n "$m" ] && mode="$m"
+    fi
+    case "$mode" in
+        multi|single|head)
+            logger -t multiace-mode "applying mode swap: $mode -> ace"
+            bash "$SWITCH_SCRIPT" ace >/dev/null 2>&1 \
+                && logger -t multiace-mode "swap ok" \
+                || logger -t multiace-mode "swap returned non-zero (continuing)"
+            ;;
+        normal|"")
+            logger -t multiace-mode "mode=$mode - leaving stock Klipper modules in place"
+            ;;
+        *)
+            logger -t multiace-mode "unknown mode '$mode' - leaving as-is"
+            ;;
+    esac
+}
+case "$1" in
+    start|"")    start ;;
+    stop)        ;;
+    restart)     start ;;
+    *)           echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0

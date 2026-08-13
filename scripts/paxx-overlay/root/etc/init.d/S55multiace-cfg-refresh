@@ -1,0 +1,71 @@
+#!/bin/sh
+CFG_DIR=/home/lava/printer_data/config/extended
+ACE_CFG=$CFG_DIR/ace.cfg
+ACE_DEFAULT=$CFG_DIR/ace.cfg.default
+ACE_MARKER=$CFG_DIR/ace.cfg.default.applied
+LOG_TAG="multiace-cfg-refresh"
+log() { logger -t "$LOG_TAG" "$1"; }
+hash_of() {
+    [ -f "$1" ] || { echo ""; return; }
+    md5sum "$1" 2>/dev/null | awk '{print $1}'
+}
+write_marker() {
+    printf '%s\n' "$1" > "$ACE_MARKER"
+    chown lava:lava "$ACE_MARKER" 2>/dev/null
+}
+start() {
+    if [ ! -f "$ACE_DEFAULT" ]; then
+        return 0
+    fi
+    new_hash="$(hash_of "$ACE_DEFAULT")"
+    if [ -z "$new_hash" ]; then
+        log "could not hash $ACE_DEFAULT - skipping"
+        return 0
+    fi
+    if [ ! -f "$ACE_CFG" ]; then
+        cp "$ACE_DEFAULT" "$ACE_CFG"
+        chown lava:lava "$ACE_CFG" 2>/dev/null
+        write_marker "$new_hash"
+        log "no existing ace.cfg - installed from .default ($new_hash)"
+        return 0
+    fi
+    old_hash=""
+    if [ -f "$ACE_MARKER" ]; then
+        old_hash="$(head -n1 "$ACE_MARKER" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if [ "$old_hash" = "$new_hash" ]; then
+        return 0
+    fi
+    ts=$(date -u '+%Y%m%d-%H%M%S')
+    backup=$ACE_CFG.bak.$ts
+    cp "$ACE_CFG" "$backup"
+    MERGE_BIN=/usr/local/bin/multiace_merge_cfg.py
+    merged_ok=0
+    if [ -f "$MERGE_BIN" ]; then
+        tmp_out="$ACE_CFG.merged.$$"
+        if python3 "$MERGE_BIN" "$ACE_CFG" "$ACE_DEFAULT" "$tmp_out" \
+                2>&1 | logger -t "$LOG_TAG"; then
+            mv "$tmp_out" "$ACE_CFG"
+            merged_ok=1
+        else
+            rm -f "$tmp_out"
+        fi
+    fi
+    if [ "$merged_ok" -ne 1 ]; then
+        cp "$ACE_DEFAULT" "$ACE_CFG"
+    fi
+    chown lava:lava "$ACE_CFG" 2>/dev/null
+    write_marker "$new_hash"
+    if [ "$merged_ok" -eq 1 ]; then
+        log "cfg refresh ($old_hash -> $new_hash) - merged user values (backup: $backup)"
+    else
+        log "cfg refresh ($old_hash -> $new_hash) - clean refresh (backup: $backup)"
+    fi
+}
+case "$1" in
+    start|"")    start ;;
+    stop)        ;;
+    restart)     start ;;
+    *)           echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0
