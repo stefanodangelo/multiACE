@@ -123,42 +123,59 @@ VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/multiace/VERSION")"
 
 # --- version derivation ----------------------------------------------------
 # multiace/VERSION is the marketing version and it does not move between
-# releases, so it cannot be the whole artifact name: two builds of different
-# commits would both be multiace-0.99.6.2b-paxx-mod.tar.gz and the second
-# would silently overwrite the first. Git already knows the answer - the repo
-# carries release tags (v0.99.6.2b etc.) - so ask it.
+# releases, so it cannot be the whole artifact name: two builds would both be
+# multiace-0.99.8b-paxx-mod.tar.gz and the second would silently overwrite
+# the first. Not git-derived (no dev/g<sha> tag) - instead an auto-
+# incrementing local build number: look at what is already in dist/ and
+# bump its patch component by one, so runs keep incrementing without git
+# state entering the name at all.
 #
-#   HEAD is exactly a tag, tree clean  -> release:  0.99.6.2b
-#   anything else                      -> dev:      0.99.6.2b.dev7.g138463a[.dirty]
+#   dist/ has no multiace-*.bin yet  -> bump multiace/VERSION itself
+#   dist/ already has one or more    -> bump the newest one found there
 #
-# The dev form is unique per commit, so builds accumulate in dist/ instead of
-# clobbering each other, and a flashed image can always be traced back.
-SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
-DIRTY=""
-if ! ( cd "$REPO_ROOT" && git diff --quiet 2>/dev/null ) \
-   || ! ( cd "$REPO_ROOT" && git diff --cached --quiet 2>/dev/null ); then
-    DIRTY=".dirty"
+# "bump" touches only the last dot-separated numeric segment and preserves
+# any trailing letter suffix: 0.99.6 -> 0.99.7, 0.99.8b -> 0.99.9b.
+_split_version() {
+    NUM_PART="$(printf '%s' "$1" | grep -oE '^[0-9]+(\.[0-9]+)*')"
+    SUFFIX_PART="${1#$NUM_PART}"
+}
+_bump_patch() {
+    _split_version "$1"
+    [ -n "$NUM_PART" ] || die "cannot parse a numeric version out of '$1'"
+    if [ "${NUM_PART%.*}" = "$NUM_PART" ]; then
+        printf '%s%s' "$((NUM_PART + 1))" "$SUFFIX_PART"
+    else
+        printf '%s.%s%s' "${NUM_PART%.*}" "$(( ${NUM_PART##*.} + 1 ))" "$SUFFIX_PART"
+    fi
+}
+
+# Only filenames that are already a clean "digits[.digits...][letters]"
+# version (multiace-0.99.8b-extended.bin) count - this is what lets old
+# git-derived names (multiace-0.99.8b.dev12.gb8b0247-extended.bin) sit in
+# dist/ unnoticed instead of corrupting the "latest" comparison.
+LATEST_DIST_VERSION=""
+if [ -d "$OUT_DIR" ]; then
+    while IFS= read -r f; do
+        v="$(basename "$f")"
+        v="${v#multiace-}"
+        v="${v%%-*}"
+        printf '%s' "$v" | grep -qE '^[0-9]+(\.[0-9]+)*[A-Za-z]*$' || continue
+        if [ -z "$LATEST_DIST_VERSION" ]; then
+            LATEST_DIST_VERSION="$v"
+        else
+            LATEST_DIST_VERSION="$(printf '%s\n%s\n' "$LATEST_DIST_VERSION" "$v" | sort -V | tail -1)"
+        fi
+    done < <(find "$OUT_DIR" -maxdepth 1 -name 'multiace-*.bin' -type f 2>/dev/null)
 fi
 
-EXACT_TAG="$(cd "$REPO_ROOT" && git describe --exact-match --tags HEAD 2>/dev/null || true)"
-IS_RELEASE=0
-if [ -n "$EXACT_TAG" ] && [ -z "$DIRTY" ]; then
-    IS_RELEASE=1
-    ARTIFACT_VERSION="$VERSION"
-    # A tag that disagrees with VERSION means one of the two was not bumped.
-    # Do not guess which - name both and let the user decide.
-    TAG_VERSION="${EXACT_TAG#v}"
-    if [ "$TAG_VERSION" != "$VERSION" ]; then
-        warn "tag ${EXACT_TAG} and multiace/VERSION (${VERSION}) disagree. \
-Naming the artifact after VERSION. Bump one of them if this is a release."
-    fi
+if [ -n "$LATEST_DIST_VERSION" ]; then
+    ARTIFACT_VERSION="$(_bump_patch "$LATEST_DIST_VERSION")"
+    say "dist/ has ${LATEST_DIST_VERSION} - next build is ${ARTIFACT_VERSION}"
 else
-    COMMITS_SINCE="$(cd "$REPO_ROOT" \
-        && git rev-list --count "$(git describe --tags --abbrev=0 2>/dev/null || echo HEAD)"..HEAD 2>/dev/null \
-        || echo 0)"
-    ARTIFACT_VERSION="${VERSION}.dev${COMMITS_SINCE}.g${SHA}${DIRTY}"
+    ARTIFACT_VERSION="$(_bump_patch "$VERSION")"
+    say "no prior build in dist/ - bumping multiace/VERSION (${VERSION}) to ${ARTIFACT_VERSION}"
 fi
-# Keep the name filesystem- and PAXX-safe regardless of what git produced.
+# Keep the name filesystem- and PAXX-safe regardless of what the bump produced.
 ARTIFACT_VERSION="$(printf '%s' "$ARTIFACT_VERSION" | tr -c 'A-Za-z0-9._-' '-')"
 
 # --- CRLF ------------------------------------------------------------------
@@ -442,11 +459,10 @@ say "bundle sha: ${BUNDLE_SHA}"
 if [ "$REPO_BUNDLE_SHA" != "$BUNDLE_SHA" ]; then
     say "  (repo had ${REPO_BUNDLE_SHA}; recomputed from the staged bundle)"
 fi
-if [ "$IS_RELEASE" = "1" ]; then
-    say "release build from tag ${EXACT_TAG}"
-else
-    warn "not a release build (untagged commit and/or dirty tree). The image \
-will contain your uncommitted changes and reports itself as ${TAG}."
+if ! ( cd "$REPO_ROOT" && git diff --quiet 2>/dev/null ) \
+   || ! ( cd "$REPO_ROOT" && git diff --cached --quiet 2>/dev/null ); then
+    warn "working tree has uncommitted changes - they are included in this \
+build (${TAG}) but the tag itself does not say so."
 fi
 sed -e "s|@VERSION@|${VERSION}|g" -e "s|@TAG@|${TAG}|g" \
     "${GLUE_DIR}/README.md" > "${MOD}/README.md"
@@ -787,6 +803,18 @@ untouched)"
 
         BIN_NAME="U1_${PROFILE}.bin"
         BIN_OUTPUT_REL="firmware/${BIN_NAME}"
+        # PAXX's Makefile writes to this fixed path and refuses to overwrite
+        # an existing one ("Error: Output file ... already exists") - it has
+        # no versioning of its own, that is what ARTIFACT_VERSION/dist/ are
+        # for. We copy it out to the versioned name immediately below, so
+        # nothing needs it to survive here; every run must start clean or
+        # the second run in a row fails on the first run's own leftover.
+        if [ -f "${PAXX_FORK}/${BIN_OUTPUT_REL}" ]; then
+            say "removing stale ${PAXX_FORK}/${BIN_OUTPUT_REL} (leftover \
+from a prior build - already copied out to dist/ before this point, so \
+nothing is lost)"
+            rm -f "${PAXX_FORK}/${BIN_OUTPUT_REL}"
+        fi
         say "building PROFILE=${PROFILE} in ${PAXX_FORK} (this downloads \
 stock firmware and runs a Docker build - it can take a while the first time)"
         (
