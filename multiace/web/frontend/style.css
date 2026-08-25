@@ -120,34 +120,43 @@ body {
   background: var(--bg); color: var(--fg);
   -webkit-font-smoothing: antialiased;
 }
-header {
-  display: flex; align-items: center; gap: 1rem;
-  padding: .8rem 1rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
-  position: sticky; top: 0; z-index: 10;
+.rail-brand {
+  display: flex; flex-direction: column; gap: .1rem;
+  padding: .5rem .55rem .6rem;
+  margin-bottom: .2rem;
+  border-bottom: 1px solid var(--line);
 }
-header h1 { margin: 0; font-size: 1.2rem; font-weight: 600; }
-header h1 small { color: var(--muted); font-weight: 400; font-size: .8rem; margin-left: .3rem; }
-header h1 small.printer-tag { color: var(--accent); }
-nav { display: flex; gap: .3rem; flex-wrap: wrap; }
-nav button {
-  background: transparent; color: var(--fg);
-  border: 1px solid var(--border);
-  padding: .4rem .9rem; cursor: pointer;
-  border-radius: 4px; font-size: .9rem;
+.rail-brand-mark {
+  font-size: 1rem; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
-nav button:hover { border-color: var(--accent); }
-nav button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.rail-brand-mark .hl { color: var(--accent); }
+.rail-brand-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-brand-sub small { color: var(--muted); font-size: .68rem; }
+.rail-brand-sub small.printer-tag { color: var(--accent); }
+html.rail-tight .rail-brand-sub {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.rail-lang.lang-select { width: 100%; }
 .upload-input { display: none; }
 .upload-btn {
-  margin-left: auto;
   background: var(--card); color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px;
   padding: .35rem .8rem; font-size: .85rem; cursor: pointer;
 }
 .upload-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .upload-btn:disabled { opacity: .5; cursor: progress; }
+/* Prominent CTA in the new Dashboard (monitor) tab - bigger than the
+   compact chrome button it replaced, since it is now the primary action
+   on that tab rather than a corner affordance. */
+.start-print-btn {
+  font-size: 1rem; padding: .7rem 1.4rem; font-weight: 600;
+}
+.monitor-panel { display: flex; flex-direction: column; gap: 1rem; max-width: 900px; }
+.monitor-webcam { background: var(--ink-800); border: 1px solid var(--line);
+                  border-radius: 6px; overflow: hidden; }
+.monitor-start { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
 .lang-select {
   background: transparent; color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px;
@@ -735,7 +744,7 @@ pre { background: #0d0d0d; color: #cfc; padding: .8rem; border-radius: 4px;
 canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
          touch-action: none; cursor: crosshair; image-rendering: pixelated; display: block; }
 .screen-popout {
-  position: fixed; right: calc(var(--pane-w) + 1rem); bottom: 80px;
+  position: fixed; right: 1rem; bottom: 80px;
   width: 380px; max-width: calc(100vw - 2rem);
   background: var(--card); border: 1px solid var(--accent); border-radius: 6px;
   box-shadow: 0 8px 32px rgba(0,0,0,.5);
@@ -764,11 +773,11 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
 .pill.pill-btn:hover { filter: brightness(1.15); }
 .pill.pill-btn.active { background: var(--accent); color: var(--accent-fg); }
 @media (max-width: 600px) {
-  .screen-popout { width: 240px; right: calc(var(--pane-w) + .5rem); bottom: 72px; }
+  .screen-popout { width: 240px; right: .5rem; bottom: 72px; }
 }
 .notif-strip {
-  position: fixed; left: calc(var(--rail-w) + 1rem);
-  right: calc(var(--pane-w) + 1rem); bottom: 8px;
+  position: fixed; left: calc(var(--rail-w) + var(--pane-w) + 1rem);
+  right: 1rem; bottom: 8px;
   z-index: 55;
   background: var(--card); border: 1px solid var(--error);
   border-radius: 4px; padding: .35rem .55rem;
@@ -818,7 +827,7 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
 .notif-enter-from, .notif-leave-to { opacity: 0; transform: translateY(-4px); }
 .notif-enter-active, .notif-leave-active { transition: opacity .2s ease, transform .2s ease; }
 .cmd-queue-bar {
-  position: fixed; bottom: 0; left: var(--rail-w); right: var(--pane-w);
+  position: fixed; bottom: 0; left: calc(var(--rail-w) + var(--pane-w)); right: 0;
   display: flex; align-items: center; gap: .5rem;
   padding: .5rem .8rem;
   background: var(--card);
@@ -892,8 +901,23 @@ body { padding-bottom: 64px; }
 .overlay-top { z-index: 110; }
 .dialog { background: var(--card); border: 1px solid var(--border); border-radius: 6px;
           padding: 1.5rem; max-width: 500px; box-shadow: 0 8px 32px rgba(0,0,0,.4); }
+/* header / scrolling body / sticky actions - the Print button on the
+   printer's own 1024x600 panel must never be a screen away no matter how
+   long the body gets. */
 .preflight-dialog { width: 96vw; max-width: none; max-height: 92vh;
-                    overflow-y: auto; }
+                    display: grid; grid-template-rows: auto 1fr auto;
+                    overflow: hidden; padding-bottom: 0; }
+.preflight-body { overflow-y: auto; min-height: 0; padding: 0 0 .4rem 0; }
+.preflight-actions {
+  position: sticky; bottom: 0; z-index: 15;
+  display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+  margin: 0 -1.5rem; padding: .7rem 1.5rem; background: var(--card);
+  border-top: 1px solid var(--border);
+}
+.preflight-actions label { display: flex; align-items: center; gap: .35rem;
+                           font-size: .85rem; color: var(--muted); cursor: pointer; }
+.preflight-actions input { accent-color: var(--accent); cursor: pointer; }
+.preflight-actions .spacer { flex: 1; }
 .preflight-dialog h4 { margin: 1rem 0 .4rem 0; font-size: .95rem; }
 .preflight-grid { display: grid; gap: .5rem;
                   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -986,6 +1010,59 @@ body { padding-bottom: 64px; }
                    margin: .2rem 0 .6rem 0; font-size: .85rem; color: var(--muted); }
 .preflight-prefs label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
 .preflight-prefs input { accent-color: var(--accent); cursor: pointer; }
+
+/* --- Colour map (redesign plan section 5) ------------------------------ */
+/* One strip for every mode (normal/multi, head, FOrca): what the file asks
+   for, an arrow, what will actually feed it. Directly under the preview so
+   hovering a pair can isolate that filament in the view above. */
+.cmap { margin: .6rem 0 1rem 0; }
+.cmap-head { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+             margin-bottom: .4rem; }
+.cmap-head h4 { margin: 0; }
+.cmap-summary { font-size: .82rem; color: var(--muted); flex: 1; }
+.cmap-band-head { display: flex; align-items: baseline; gap: .5rem;
+                  margin: .6rem 0 .3rem 0; font-size: .85rem; }
+.cmap-strip { display: grid; gap: .5rem; overflow-x: auto; padding-bottom: .1rem;
+              grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.cmap-pair { border: 1px solid var(--border); border-radius: 6px;
+             overflow: hidden; background: var(--card); transition: opacity .12s ease; }
+.cmap-pair.warn { border-color: var(--warn, #c4651e); }
+.cmap-pair.bad { border-color: var(--error); }
+.cmap-pair.dim { opacity: .35; }
+.cmap-pair.changed { border-left: 3px solid var(--accent); }
+.cmap-src { padding: .4rem .5rem; display: flex; flex-direction: column;
+            gap: .1rem; line-height: 1.2; }
+.cmap-src .small { font-size: .78rem; opacity: .9; }
+.cmap-src .tiny { font-size: .7rem; opacity: .8; }
+.cmap-arrow { text-align: center; font-size: .8rem; opacity: .55;
+              background: rgba(127,127,127,.08); }
+.cmap-dst { padding: .35rem .5rem; }
+.cmap-dst .hm-dd { min-width: 0; width: 100%; }
+.cmap-dst-ro { display: flex; align-items: center; gap: .4rem;
+               padding: .3rem 0; font-size: .85rem; }
+.cmap-tier { padding: .15rem .5rem .4rem .5rem; font-size: .72rem;
+             color: var(--muted); text-align: right; }
+.cmap-proposal-hint { font-size: .8rem; color: var(--muted); margin: -.1rem 0 .4rem 0; }
+
+/* --- Loadout strategies (redesign plan section 6) ---------------------- */
+/* One tab strip + one panel replaces three/four stacked plan blocks - each
+   tab's chip is the comparison ("28 swaps · -19 min") the old layout could
+   not express at all. */
+.strat { margin: .8rem 0 .4rem 0; }
+.strat-tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin: .6rem 0 .5rem 0; }
+.strat-tab { border: 1px solid var(--border); border-radius: 6px;
+             background: var(--card); color: var(--fg); cursor: pointer;
+             padding: .35rem .7rem; text-align: left; min-width: 7rem; }
+.strat-tab.sel { border-color: var(--accent); background: rgba(21, 189, 198, .12); }
+.strat-tab[disabled] { opacity: .5; cursor: not-allowed; }
+.strat-tab-label { font-size: .88rem; font-weight: 500; display: block; }
+.strat-chip { display: block; font-size: .74rem; color: var(--muted); margin-top: .1rem; }
+.strat-panel { border: 1px solid var(--border); border-radius: 4px;
+               padding: .6rem .8rem; margin: .2rem 0 .6rem 0; }
+.loadout-moves { margin: .4rem 0; font-size: .85rem; }
+.loadout-moves ul { margin: .3rem 0 0 1.2rem; }
+.loadout-moves li { margin: .1rem 0; }
+
 .preflight-progress { margin: 1rem 0 .4rem 0; }
 .preflight-progress-sticky {
     position: sticky; top: 0; z-index: 10;
@@ -1020,6 +1097,15 @@ body { padding-bottom: 64px; }
    gets the error colour rather than the warn one. */
 .dialog-input input.invalid { border-color: var(--error); }
 .dialog-input-err { font-size: .8rem; color: var(--error); }
+@media (max-width: 700px) {
+  .cmap-strip { grid-template-columns: 1fr; }
+  .cmap-pair { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  .cmap-arrow { grid-row: 1; }
+  .cmap-tier { grid-column: 1 / -1; text-align: left; }
+  .strat-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .strat-tab { flex: 0 0 auto; }
+  .gpreview-stage { height: clamp(180px, 34vh, 360px); }
+}
 @media (max-width: 600px) {
   header { flex-wrap: wrap; }
   nav { order: 3; width: 100%; }
@@ -1585,22 +1671,23 @@ body:has(.panel) .overlay .dialog {
 }
 
 /* ============================================================
-   UNIFIED DASHBOARD: webcam + console + print side pane
-   The pane is the shell's RIGHT-HAND COLUMN, permanently on screen and
-   mirroring the rail on the left: fixed, full height, its own scroll,
-   and the body offset by --pane-w so nothing ever slides under it. The
-   point of the pane is to watch the print while driving a swap, and a
-   pane you have to open first is one you look at after the fact.
+   UNIFIED DASHBOARD: console + print side pane
+   The pane sits directly right of the rail - the shell's chrome packs
+   to the left edge, and main content fills the rest of the width to
+   the right. Fixed, full height, its own scroll, and the body offset
+   by --rail-w + --pane-w so nothing ever slides under it. The point of
+   the pane is to watch the print while driving a swap, and a pane you
+   have to open first is one you look at after the fact.
 
    The dashboard column keeps its own max-width, so widening the chrome
    never squeezes the slot cards - which are the thing you came to look
    at.
    ============================================================ */
-.side-pane { position: fixed; right: 0; top: 0; bottom: 0; z-index: 20;
+.side-pane { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 20;
              width: var(--pane-w);
              display: flex; flex-direction: column;
              background: var(--ink-800);
-             border-left: 1px solid var(--line);
+             border-right: 1px solid var(--line);
              /* The panes scroll inside themselves (.console-log,
                 .side-print); the pane itself never does. */
              overflow: hidden; }
@@ -1641,7 +1728,7 @@ body:has(.panel) .overlay .dialog {
    the only honest thing to do with 380px you do not have. */
 @media (max-width: 1100px) {
   :root { --pane-w: 0px; }
-  .side-pane { position: static; width: auto; border-left: 0;
+  .side-pane { position: static; width: auto; border-right: 0;
                border-top: 1px solid var(--line); margin-top: 1rem; }
   .console-log { max-height: 40vh; }
 }
@@ -1698,7 +1785,7 @@ body:has(.panel) .overlay .dialog {
 /* ============================================================
    DEBUG PANEL (?debug=1)
    ============================================================ */
-.debug-panel { position: fixed; right: calc(var(--pane-w) + .75rem);
+.debug-panel { position: fixed; right: .75rem;
                bottom: .75rem; z-index: 90;
                display: flex; flex-direction: column; align-items: flex-end;
                gap: .35rem; }
@@ -1765,7 +1852,7 @@ body:has(.panel) .overlay .dialog {
 /* Parsed and rendered entirely client-side (gcode_preview.js +
    gcode_preview_worker.js) - no upload, no printer required. WebGL2 with
    a Canvas2D top-down fallback; the note under the legend says which. */
-.gpreview-pane { margin: .5rem 0; }
+.gpreview-pane { margin: 0 0 .6rem 0; }
 /* A 3D view in a strip is not worth having, and the preflight dialog is
    already 96vw - so the pane can take the screen when you ask it to. */
 .gpreview-pane.maximized {
@@ -1775,14 +1862,43 @@ body:has(.panel) .overlay .dialog {
 }
 .gpreview-pane.maximized .gpreview-stage { flex: 1; min-height: 0; }
 .gpreview-pane.maximized .gpreview-canvas { height: 100%; }
-.gpreview-stage { position: relative; }
-.gpreview-canvas { width: 100%; height: 50vh; display: block;
+/* Collapse hides the stage but keeps the parsed data and renderer alive -
+   only closing the dialog disposes them, so re-expanding is instant rather
+   than a 20 s re-parse. */
+.gpreview-pane.collapsed .gpreview-stage,
+.gpreview-pane.collapsed .gpreview-controls,
+.gpreview-pane.collapsed .gpreview-legend,
+.gpreview-pane.collapsed .gpreview-note { display: none; }
+.gpreview-head { display: flex; align-items: center; gap: .6rem;
+                 margin: 0 0 .3rem 0; }
+.gpreview-head h4 { margin: 0; flex: 0 0 auto; }
+.gpreview-collapse { background: transparent; border: none; color: var(--fg);
+                     font-size: .9rem; cursor: pointer; padding: .1rem .3rem; }
+.gpreview-head .spacer { flex: 1; }
+/* Fixed height in every phase - the colour map below must not jump when
+   the parse finishes; that is the single worst thing a first-at-the-top
+   element can do. */
+.gpreview-stage { position: relative; height: clamp(220px, 42vh, 520px); }
+.gpreview-pane.collapsed .gpreview-stage { height: 0; }
+.gpreview-canvas { width: 100%; height: 100%; display: block;
                    border: 1px solid var(--border); border-radius: 4px;
                    background: #0c0c0e;
                    /* Orbit / pan / pinch are ours; the browser must not
                       steal the gesture to scroll the dialog. */
                    touch-action: none; cursor: grab; }
 .gpreview-canvas:active { cursor: grabbing; }
+/* Parsing / error / skipped overlay - the canvas frame itself stays put in
+   every phase so nothing below it shifts. */
+.gpreview-phase {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: .6rem;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: rgba(12, 12, 14, .9); text-align: center; padding: 1rem;
+}
+.gpreview-phase-bar { width: 60%; max-width: 260px; height: 8px;
+  border-radius: 4px; background: rgba(255,255,255,.12); overflow: hidden; }
+.gpreview-phase-fill { height: 100%; background: var(--accent);
+  transition: width .2s ease-out; }
 /* Vertical layer RANGE, on the right edge - Orca's arrangement, and a
    range beats a single layer for spotting where a colour starts and
    stops. Two handles rather than one, because that is the question. */
@@ -1808,6 +1924,15 @@ body:has(.panel) .overlay .dialog {
 }
 .gpreview-controls { display: flex; align-items: center; gap: .6rem;
                      flex-wrap: wrap; margin: .4rem 0; }
+/* 1x/2x/4x, shown only while playing - a paused viewer keeps today's
+   uncluttered control row. */
+.gpv-speed { display: inline-flex; border: 1px solid var(--border);
+             border-radius: 4px; overflow: hidden; }
+.gpv-speed button { border: none; border-right: 1px solid var(--border);
+                    background: var(--card); color: var(--fg);
+                    padding: .25rem .55rem; font-size: .8rem; cursor: pointer; }
+.gpv-speed button:last-child { border-right: none; }
+.gpv-speed button.sel { background: var(--accent); color: var(--accent-fg); }
 .gpreview-slider { flex: 1; min-width: 8rem; accent-color: var(--accent); }
 .gpreview-view { font-size: .85rem; }
 .gpreview-layer-label { min-width: 5.5rem; font-size: .8rem; }
@@ -1859,7 +1984,7 @@ body:has(.panel) .overlay .dialog {
    ============================================================ */
 html.rail-tight { --rail-w: 56px; }
 .shell-body {
-  margin-left: var(--rail-w); margin-right: var(--pane-w);
+  margin-left: calc(var(--rail-w) + var(--pane-w)); margin-right: 0;
   transition: margin-left .15s ease;
 }
 .rail {
@@ -1943,16 +2068,15 @@ html.rail-tight .rail-conn { justify-content: center; padding: .2rem 0; }
 }
 
 /* Below the two-column threshold the rail becomes a horizontally
-   scrolling strip of icon+label chips UNDER the header - not a
+   scrolling strip of icon+label chips at the TOP of the shell - not a
    hamburger and not icon-only, because the always-visible label is the
-   entire point. Flex order puts it after the header without moving it in
-   the document, so the desktop layout keeps the rail's natural place. */
+   entire point. Flex order keeps it first without moving it in the
+   document, so the desktop layout keeps the rail's natural place. */
 @media (max-width: 900px) {
   :root, html.rail-tight { --rail-w: 0px; }
   .shell-body { display: flex; flex-direction: column; }
-  .shell-body > * { order: 3; }
-  .shell-body > header { order: 1; }
-  .shell-body > .rail { order: 2; }
+  .shell-body > * { order: 2; }
+  .shell-body > .rail { order: 1; }
   .rail {
     position: static; width: auto; flex-direction: row; align-items: center;
     gap: .4rem; padding: .4rem .6rem;

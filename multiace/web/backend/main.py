@@ -1083,6 +1083,39 @@ def _live_slots_from_state(parsed: dict) -> list[dict]:
 async def _live_slots_async() -> list[dict]:
     return _live_slots_from_state(_parse_state(await _query_state_gated()))
 
+def _spool_prices_from_state(parsed: dict) -> dict:
+    """€/kg for every bound spool, keyed "ace:<ace>:<slot>" / "head:<h>" -
+    string keys (not tuples) because this also travels as JSON to the
+    in-browser Pyodide preflight worker. See
+    preflight_core._mapping_row_price for the reader. A spool with no price
+    (added before this field existed) defaults to 20.0, the same default
+    ACE_SPOOL_ADD applies, so the estimate always has a number to show
+    rather than silently going quiet for old spools."""
+    spools = parsed.get("spools") or {}
+    binding = parsed.get("spool_binding") or {}
+    out: dict = {}
+    for key, sid in binding.items():
+        spool = spools.get(str(sid))
+        if not spool:
+            continue
+        price = spool.get("price_per_kg")
+        try:
+            price = 20.0 if price is None else float(price)
+        except (TypeError, ValueError):
+            price = 20.0
+        if key.startswith("h"):
+            try:
+                out["head:%d" % int(key[1:])] = price
+            except ValueError:
+                continue
+        else:
+            try:
+                a, s = key.split("_")
+                out["ace:%d:%d" % (int(a), int(s))] = price
+            except ValueError:
+                continue
+    return out
+
 def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> list[dict]:
     """Apply a T-index → T-index remap on top of an existing slicer-T →
     physical-slot mapping. The remap is the format that
@@ -1246,6 +1279,12 @@ async def preflight(request: Request, file: UploadFile = File(...),
         raise HTTPException(status_code=409,
                             detail="no slots are loaded on the printer")
 
+    if mocked:
+        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+    else:
+        spool_prices = _spool_prices_from_state(
+            _parse_state(await _query_state_gated()))
+
     # The what-if overlay answers "would 2 ACEs beat 1?" without touching
     # the printer. It NEVER reaches rewrite_pipeline, which reads
     # live_slots and only live_slots.
@@ -1257,7 +1296,8 @@ async def preflight(request: Request, file: UploadFile = File(...),
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
             fuzzy=_PREFLIGHT_FUZZY, header_text=header_text,
             cost_params=_swap_cost_params(),
-            calibration=_swap_calibration(), meta=meta)
+            calibration=_swap_calibration(), meta=meta,
+            spool_prices=spool_prices)
     except ValueError as e:
 
         raise HTTPException(status_code=409, detail=str(e))
@@ -1544,12 +1584,18 @@ async def preflight_livedata(request: Request) -> dict:
     Mock-aware: with no printer attached the same shape comes out of
     mock_state.json, so the whole planner works on a laptop (§2)."""
     live_slots, head_ctx, mocked = await _preflight_loadout(request)
+    if mocked:
+        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+    else:
+        spool_prices = _spool_prices_from_state(
+            _parse_state(await _query_state_gated()))
     return {
-        "live_slots":  live_slots,
-        "head_ctx":    head_ctx,
-        "cost_params": _swap_cost_params(),
-        "calibration": _swap_calibration(),
-        "mock":        mocked,
+        "live_slots":    live_slots,
+        "head_ctx":      head_ctx,
+        "cost_params":   _swap_cost_params(),
+        "calibration":   _swap_calibration(),
+        "spool_prices":  spool_prices,
+        "mock":          mocked,
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}

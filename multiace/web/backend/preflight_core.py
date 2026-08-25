@@ -149,7 +149,7 @@ def used_tool_indices(pp, gcode: str) -> set:
 
 def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
                       slicer_colors=None, slicer_types=None,
-                      event_times=None, bg_heads=None):
+                      event_times=None, bg_heads=None, spool_prices=None):
     """Everything the per-plan estimate needs, built once per preflight.
 
     Returns None when the estimate cannot be produced (no swap_cost module,
@@ -182,7 +182,31 @@ def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
         "materials":   dict(slicer_types or {}),
         "event_times": event_times,
         "bg_heads":    list(bg_heads or []),
+        "prices":      dict(spool_prices or {}),
     }
+
+
+def _mapping_row_price(row, prices):
+    """€/kg for one mapping row, or None when no bound spool has a price.
+
+    Multi-mode rows nest the target in `slot` ({ace, slot, ...} or None);
+    head-mode rows carry `kind`/`head`/`ace`/`slot` flat. `prices` is keyed
+    "ace:<ace>:<slot>" / "head:<head>" (string keys, not tuples, since this
+    travels as JSON to the in-browser Pyodide preflight worker too) - built
+    once in main.py from the live spool table, defaulting an unpriced spool
+    to 20 already, so a miss here just means the tool has no physical spool
+    assigned (not yet matched, or an infeasible plan)."""
+    if not prices:
+        return None
+    slot = row.get("slot")
+    if isinstance(slot, dict):
+        return prices.get("ace:%s:%s" % (slot.get("ace"), slot.get("slot")))
+    kind = row.get("kind")
+    if kind == "ace":
+        return prices.get("ace:%s:%s" % (row.get("ace"), row.get("slot")))
+    if kind == "pin":
+        return prices.get("head:%s" % row.get("head"))
+    return None
 
 
 def attach_estimate(ctx, plan, events, assignment):
@@ -197,10 +221,18 @@ def attach_estimate(ctx, plan, events, assignment):
     try:
         timeline = ctx_timeline(ctx, events, assignment)
         plan["timeline"] = timeline
+        # Price depends on WHICH physical spool this plan assigned to each
+        # tool, which differs between plans (slicer/optimize/layer) - so it
+        # is resolved here, per plan, from its own `mapping`, rather than
+        # once in the shared ctx like colors/materials.
+        prices = {row["t"]: _mapping_row_price(row, ctx["prices"])
+                  for row in plan.get("mapping") or []
+                  if _mapping_row_price(row, ctx["prices"]) is not None}
         plan["estimate"] = _swap_cost.build_estimate(
             ctx["model"], ctx["header"], timeline,
             materials=ctx["materials"], colors=ctx["colors"],
-            used_tools=sorted(ctx["colors"].keys()) or None)
+            used_tools=sorted(ctx["colors"].keys()) or None,
+            prices=prices)
     except Exception:
         # An estimate is informational; a plan without one is still a plan.
         plan.pop("timeline", None)
@@ -605,7 +637,8 @@ def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_heads,
 def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
                       slicer_types, head_ctx, ace_slots, plan_proxy,
                       fuzzy=DEFAULT_FUZZY, header_text=None,
-                      cost_params=None, calibration=None, meta=None) -> dict:
+                      cost_params=None, calibration=None, meta=None,
+                      spool_prices=None) -> dict:
     """The head-mode preflight preview: THREE plans, mirroring multi:
       loadout  - match against the currently-loaded feeders + ACE slots (editable)
       optimize - swap-minimal proposed loadout (free, Belady per ACE head)
@@ -636,7 +669,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     estimate_ctx = make_estimate_ctx(
         pp, header_text, cost_params=cost_params, calibration=calibration,
         slicer_colors=slicer_colors, slicer_types=slicer_types,
-        event_times=event_times, bg_heads=bg_heads)
+        event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices)
 
     nz_groups, nz_mixed = nozzle_context(pp, meta, head_ctx)
     layout = pp.compute_head_mode_layout(
@@ -723,7 +756,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
                  live_slots, head_ctx, token, filename, size,
                  fuzzy=DEFAULT_FUZZY, header_text=None, cost_params=None,
-                 calibration=None, meta=None) -> dict:
+                 calibration=None, meta=None, spool_prices=None) -> dict:
     """Build the full preflight report dict (the /api/preflight payload).
 
     Refuses an ALREADY-PROCESSED file (the "; multiACE processed:" /
@@ -759,7 +792,7 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
             pp, token, filename, size, slicer_colors, slicer_types,
             head_ctx, live_slots, plan_proxy, fuzzy=fuzzy,
             header_text=header_text, cost_params=cost_params,
-            calibration=calibration, meta=meta)
+            calibration=calibration, meta=meta, spool_prices=spool_prices)
 
     missing_mats = pp.check_material_availability(slicer_types, live_slots)
 
@@ -808,7 +841,7 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         estimate_ctx = make_estimate_ctx(
             pp, header_text, cost_params=cost_params, calibration=calibration,
             slicer_colors=slicer_colors, slicer_types=slicer_types,
-            event_times=ev_times, bg_heads=bg_heads)
+            event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices)
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
                 pp, mode, result, mapping,

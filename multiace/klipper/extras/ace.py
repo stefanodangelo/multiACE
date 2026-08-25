@@ -9696,10 +9696,11 @@ class MultiAce:
     cmd_ACE_SPOOL_ADD_help = (
         '[multiACE] Add a spool to the local table: ACE_SPOOL_ADD '
         'MATERIAL=PLA [COLOR=RRGGBB] [VENDOR=..] [SUBTYPE=..] [WEIGHT=1000] '
-        '[DENSITY=..] '
+        '[DENSITY=..] [PRICE_PER_KG=20] '
         '[LABEL=..] [SKU=..] [SPOOLMAN_ID=..] [ACE=n SLOT=n]. WEIGHT is the filament weight '
-        'in grams (net, without the core); with ACE+SLOT the new spool is '
-        'bound to that slot right away.')
+        'in grams (net, without the core); PRICE_PER_KG defaults to 20 when not '
+        'given, so the preflight filament estimate always has a price to show; '
+        'with ACE+SLOT the new spool is bound to that slot right away.')
 
     def cmd_ACE_SPOOL_ADD(self, gcmd):
         sid = str(self._spool_next_id)
@@ -9715,6 +9716,8 @@ class MultiAce:
             'label': (gcmd.get('LABEL', '') or '').strip(),
             'sku': (gcmd.get('SKU', '') or '').strip(),
             'used_mm': 0.,
+            'price_per_kg': gcmd.get_float('PRICE_PER_KG', 20.0,
+                                           minval=0., maxval=1000.),
         }
 
         spool['sku'], _sku_suffixed = self._spool_unique_sku(spool['sku'])
@@ -9747,7 +9750,8 @@ class MultiAce:
 
     cmd_ACE_SPOOL_SET_help = (
         '[multiACE] Edit a spool: ACE_SPOOL_SET ID=n [WEIGHT=..] '
-        '[MATERIAL=..] [COLOR=..] [VENDOR=..] [SUBTYPE=..] [DENSITY=..] [LABEL=..] '
+        '[MATERIAL=..] [COLOR=..] [VENDOR=..] [SUBTYPE=..] [DENSITY=..] '
+        '[PRICE_PER_KG=..] [LABEL=..] '
         '[SKU=..] [RESET_USED=1]. WEIGHT corrects the remaining grams (the '
         'value is an estimate, so correcting it against a scale is normal).')
 
@@ -9794,6 +9798,10 @@ class MultiAce:
         d = gcmd.get_float('DENSITY', None, minval=0.5, maxval=3.0)
         if d is not None:
             spool['density'] = d
+            _user_edit = True
+        p = gcmd.get_float('PRICE_PER_KG', None, minval=0., maxval=1000.)
+        if p is not None:
+            spool['price_per_kg'] = p
             _user_edit = True
         if gcmd.get_int('RESET_USED', 0):
             spool['used_mm'] = 0.

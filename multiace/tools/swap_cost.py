@@ -696,7 +696,7 @@ def _round(value, digits=1):
 
 
 def build_estimate(model, header, timeline, *, materials=None, colors=None,
-                   used_tools=None, extra_assumptions=None):
+                   used_tools=None, extra_assumptions=None, prices=None):
     """Assemble the `estimate` block the report attaches to each plan.
 
     `timeline` is §3.2's per-event trace: a list of dicts with at least
@@ -706,6 +706,7 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     """
     materials = materials or {}
     colors = colors or {}
+    prices = prices or {}
     assumptions = list(extra_assumptions or [])
 
     counts = {"inline": 0, "bg": 0, "pin": 0, "unknown_window": 0,
@@ -781,6 +782,8 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     per_color = []
     totals_mm = 0.0
     totals_g = 0.0
+    totals_price = 0.0
+    any_price_known = False
     tools = sorted(used_tools) if used_tools else sorted(
         set(list(per_tool_purge_mm.keys())
             + list(range(len(header.per_tool_mm) if header else 0))))
@@ -790,15 +793,23 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
         print_g = header.grams_for(t, material) if header else 0.0
         pmm = per_tool_purge_mm.get(t, 0.0)
         pg = model.purge_grams(pmm, material)
+        tool_total_g = print_g + (pg if purge_is_extra else 0.0)
         totals_mm += print_mm + (pmm if purge_is_extra else 0.0)
-        totals_g += print_g + (pg if purge_is_extra else 0.0)
-        per_color.append({
+        totals_g += tool_total_g
+        row = {
             "t": t,
             "print_mm": _round(print_mm), "print_g": _round(print_g, 2),
             "purge_mm": _round(pmm), "purge_g": _round(pg, 2),
             "total_m": _round((print_mm + (pmm if purge_is_extra else 0.0))
                               / 1000.0, 2),
-        })
+        }
+        price_per_kg = prices.get(t)
+        if price_per_kg is not None:
+            row_price = tool_total_g / 1000.0 * price_per_kg
+            row["price_eur"] = _round(row_price, 2)
+            totals_price += row_price
+            any_price_known = True
+        per_color.append(row)
 
     purge_g_total = sum(model.purge_grams(mm, materials.get(t))
                         for t, mm in per_tool_purge_mm.items())
@@ -821,7 +832,8 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                   "destination": dest, "counted_in_total": purge_is_extra},
         "per_color": per_color,
         "totals": {"mm": _round(totals_mm), "m": _round(totals_mm / 1000.0, 2),
-                   "g": _round(totals_g, 2)},
+                   "g": _round(totals_g, 2),
+                   "price_eur": _round(totals_price, 2) if any_price_known else None},
         "layers": header.layers if header else None,
         "first_layer_s": _round(header.first_layer_s, 0) if header else None,
         "confidence": confidence,

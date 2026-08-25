@@ -398,6 +398,10 @@ void main() {
     setShowPlate(v) { this.showPlate = !!v; }
     setIsolateTool(t) { this.isolateTool = (t === null || t === undefined) ? -1 : t; }
     setToolchangeColor(fn) { this.toolchangeColor = fn; this._buildToolchanges(); }
+    // Re-point the per-tool colour lookup without re-uploading geometry
+    // buffers - colorForT is consulted per draw for the moving geometry
+    // already, so only the cached toolchange markers need a rebuild here.
+    setColorForT(fn) { this.colorForT = fn; this._buildToolchanges(); }
     setPreset(name) {
       if (name === "top")        { this.cam.yaw = -Math.PI / 2; this.cam.pitch = 1.5533; }
       else if (name === "front") { this.cam.yaw = -Math.PI / 2; this.cam.pitch = 0.0; }

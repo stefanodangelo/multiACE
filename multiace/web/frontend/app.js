@@ -9,7 +9,7 @@ const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
 const SCREEN = "/screen";
 createApp({
   setup() {
-    const _validTabs = new Set(["dashboard", "history", "spools", "config"]);
+    const _validTabs = new Set(["dashboard", "monitor", "history", "spools", "config"]);
     const _storedTab = localStorage.getItem("multiace.tab");
     const _isPluginTab = (s) => typeof s === "string" && s.startsWith("plugin:");
     const tab = ref(
@@ -1584,7 +1584,8 @@ createApp({
     // untouched row filters on nothing. A new spool is NOT bound to a slot -
     // binding happens in the row's slot dropdown or from the slot card.
     const spoolForm = reactive({material: "", color: "", vendor: "",
-                               subtype: "", weight: "", label: "", sku: ""});
+                               subtype: "", weight: "", label: "", sku: "",
+                               price: "20"});
     // The RFID tag travels to Klipper as a gcode argument, and '#' TERMINATES
     // gcode arguments - so the marker '#' many users put in front of a
     // self-written tag must be stripped here. Harmless: the matcher compares
@@ -1798,7 +1799,7 @@ createApp({
       spoolEditId.value = "";
       spoolForm.material = ""; spoolForm.vendor = ""; spoolForm.subtype = "";
       spoolForm.label = ""; spoolForm.weight = ""; spoolForm.color = "";
-      spoolForm.sku = "";
+      spoolForm.sku = ""; spoolForm.price = "20";
     }
     function spoolIdForSlot(aceIdx, slotIdx) {
       return (state.spool_binding || {})[`${aceIdx}_${slotIdx}`] || null;
@@ -1917,10 +1918,13 @@ createApp({
         ? "" : Math.round(sp.weight_g);
       spoolForm.label = sp.label || "";
       spoolForm.sku = sp.sku || "";
+      spoolForm.price = (sp.price_per_kg === undefined || sp.price_per_kg === null)
+        ? "20" : sp.price_per_kg;
     }
     function spoolEditCancel() {
       spoolEditId.value = "";
       spoolForm.label = ""; spoolForm.weight = ""; spoolForm.sku = "";
+      spoolForm.price = "20";
     }
     function spoolSave() {
       if (!spoolEditId.value) { spoolAdd(); return; }
@@ -1932,6 +1936,7 @@ createApp({
                     SKU: _skuArg(spoolForm.sku),                        // "" clears it
                     COLOR: (spoolForm.color || "").replace("#", "")};   // "" clears it
       if (spoolForm.weight !== "") args.WEIGHT = spoolForm.weight;
+      if (spoolForm.price !== "") args.PRICE_PER_KG = spoolForm.price;
       spoolMacro("ACE_SPOOL_SET", args);
       spoolEditCancel();
     }
@@ -1942,6 +1947,7 @@ createApp({
       if (spoolForm.subtype) args.SUBTYPE = spoolForm.subtype;
       if (spoolForm.label) args.LABEL = spoolForm.label;
       if (spoolForm.weight !== "") args.WEIGHT = spoolForm.weight;
+      args.PRICE_PER_KG = spoolForm.price !== "" ? spoolForm.price : "20";
       // Ask BEFORE sending when the code is taken; null = cancelled, and then
       // nothing is created and the form keeps what was typed.
       const sku = await askFreeSku(spoolForm.sku);
@@ -4615,6 +4621,305 @@ createApp({
       if (m.kind === "pin") return t("ui.preflight.feeder") + " " + dispIdx(m.head);
       return "ACE " + dispIdx(m.ace) + " Slot " + dispIdx(m.slot);
     }
+    // =================================================================
+    // Colour map (redesign plan section 5): one row model for all three
+    // modes (normal/multi, head, FOrca). No new matching logic - this only
+    // changes how pp.match_colors_to_slots's result is SHOWN, and makes the
+    // override affordance identical everywhere.
+    //   row = {t, src:{hex,name,material}, dst:{...}|null, tier,
+    //          options:[{id,color,label}], unset:[{ace,slot}], editable,
+    //          group:{key,label,hint}|null, changed}
+    // =================================================================
+    const cmapDetails = ref(false);
+    function _rowsNormal() {
+      const r = preflight.report;
+      return slicerColorsInPrintOrder().map(c => {
+        const eff = slicerEffectiveSlot(c.t);
+        const base = ((r.plans.slicer && r.plans.slicer.mapping) || [])
+          .find(m => m.t === c.t);
+        return {
+          t: c.t,
+          src: {hex: c.hex, name: c.name, material: c.material},
+          dst: eff ? {
+            id: slotKey(eff), kind: "slot", color: eff.color,
+            material: eff.material,
+            label: "ACE " + dispIdx(eff.ace) + " / " + dispIdx(eff.slot),
+          } : null,
+          tier: (base && base.tier) || "no_slot",
+          options: slicerSlotOptions(c.t).map(o => ({
+            id: slotKey(o), color: o.color,
+            label: "ACE " + dispIdx(o.ace) + " / " + dispIdx(o.slot)
+                  + " · " + (o.material || "?"),
+          })),
+          unset: unsetSlotsForT(c.t),
+          editable: true,
+          group: null,
+        };
+      });
+    }
+    function _rowsHead() {
+      const r = preflight.report;
+      const loadoutMap = (r.plans.loadout && r.plans.loadout.mapping) || [];
+      return slicerColorsInPrintOrder().map(c => {
+        const id = headEffectiveTargetId(c.t);
+        const tg = id ? _headTargetById(id) : null;
+        const base = loadoutMap.find(m => m.t === c.t);
+        return {
+          t: c.t,
+          src: {hex: c.hex, name: c.name, material: c.material},
+          dst: tg ? {
+            id: tg.id, kind: tg.kind, color: tg.color, material: tg.material,
+            label: headTargetLabel(tg),
+          } : null,
+          tier: (base && base.tier) || "no_slot",
+          options: headTargetOptions(c.t).map(o => ({
+            id: o.id, color: o.color, label: headTargetLabel(o),
+          })),
+          unset: unsetSlotsForT(c.t),
+          editable: true,
+          group: null,
+        };
+      });
+    }
+    function _forcaColorRow(c, group) {
+      const r = preflight.report;
+      const head = !!(r && r.head_mode);
+      let dst = null, options;
+      if (head) {
+        const id = headEffectiveTargetId(c.t);
+        const tg = id ? _headTargetById(id) : null;
+        if (tg) dst = {id: tg.id, kind: tg.kind, color: tg.color,
+                       material: tg.material, label: headTargetLabel(tg)};
+        options = headTargetOptions(c.t).map(o => ({
+          id: o.id, color: o.color, label: headTargetLabel(o)}));
+      } else {
+        const eff = slicerEffectiveSlot(c.t);
+        if (eff) dst = {id: slotKey(eff), kind: "slot", color: eff.color,
+                        material: eff.material,
+                        label: "ACE " + dispIdx(eff.ace) + " / " + dispIdx(eff.slot)};
+        options = slicerSlotOptions(c.t).map(o => ({
+          id: slotKey(o), color: o.color,
+          label: "ACE " + dispIdx(o.ace) + " / " + dispIdx(o.slot)
+                + " · " + (o.material || "?")}));
+      }
+      return {
+        t: c.t, src: {hex: c.hex, name: c.name, material: c.material},
+        dst, tier: c.tier, options, unset: unsetSlotsForT(c.t),
+        editable: true, group,
+      };
+    }
+    function _rowsForca() {
+      const out = [];
+      forcaGroups().forEach(g => {
+        const label = g.heads.length
+          ? t("ui.preflight.head") + " " + g.heads.map(h => dispIdx(h)).join(" + ")
+          : t("ui.preflight.forca_no_head");
+        const hint = g.dia ? (g.dia + " mm") : "";
+        const key = String(g.head !== null && g.head !== undefined ? g.head : "x" + hint);
+        g.colors.forEach(c => out.push(_forcaColorRow(c, {key, label, hint})));
+      });
+      return out;
+    }
+    // The strip shows a PROPOSAL read-only when a non-base strategy is
+    // selected - the auto matcher's overrides only ever apply to the base
+    // (as-loaded) plan, so pretending the strip is still editable on the
+    // other tabs would silently do nothing (plan section 5.3).
+    function _rowsForPlan(key) {
+      const r = preflight.report;
+      const plan = r.plans[key];
+      if (!plan) return [];
+      const head = !!r.head_mode;
+      const baseRows = head ? _rowsHead()
+                    : (forcaMixed() ? _rowsForca() : _rowsNormal());
+      const baseByT = {};
+      baseRows.forEach(row => { baseByT[row.t] = row; });
+      return slicerColorsInPrintOrder().map(c => {
+        const m = (plan.mapping || []).find(x => x.t === c.t);
+        let dst = null;
+        if (head) {
+          if (m && m.kind && m.kind !== "none") {
+            dst = {kind: m.kind, color: c.hex, material: c.material,
+                   label: headProposalLabel(m)};
+          }
+        } else if (m && m.slot) {
+          dst = {kind: "slot", color: m.slot.color, material: m.slot.material,
+                 label: "ACE " + dispIdx(m.slot.ace) + " / " + dispIdx(m.slot.slot)};
+        }
+        const base = baseByT[c.t];
+        const changed = !!base && ((!!base.dst) !== (!!dst)
+          || (base.dst && dst && base.dst.label !== dst.label));
+        return {
+          t: c.t, src: {hex: c.hex, name: c.name, material: c.material},
+          dst, tier: (m && m.tier) || "no_slot",
+          options: [], unset: [], editable: false, group: null, changed,
+        };
+      });
+    }
+    const colorMapRows = computed(() => {
+      const r = preflight.report;
+      if (!r) return [];
+      const baseKey = r.head_mode ? "loadout" : "slicer";
+      if (strategy.value && strategy.value !== "whatif" && strategy.value !== baseKey) {
+        return _rowsForPlan(strategy.value);
+      }
+      if (forcaMixed()) return _rowsForca();
+      if (r.head_mode) return _rowsHead();
+      return _rowsNormal();
+    });
+    // One band per FOrca nozzle group, or a single unlabelled band otherwise.
+    function cmapBands() {
+      const rows = colorMapRows.value;
+      if (!rows.length) return [];
+      if (!rows[0].group) return [{key: "all", label: "", hint: "", rows}];
+      const order = [], byKey = {};
+      rows.forEach(row => {
+        const k = row.group.key;
+        if (!byKey[k]) { byKey[k] = {key: k, label: row.group.label, hint: row.group.hint, rows: []}; order.push(k); }
+        byKey[k].rows.push(row);
+      });
+      return order.map(k => byKey[k]);
+    }
+    function cmapSummary() {
+      const counts = {exact: 0, name: 0, fuzzy: 0, none: 0};
+      colorMapRows.value.forEach(row => {
+        if (!row.dst) { counts.none++; return; }
+        if (row.tier === "exact_hex") counts.exact++;
+        else if (String(row.tier || "").indexOf("name") === 0) counts.name++;
+        else counts.fuzzy++;
+      });
+      return t("ui.preflight.cmap_summary", counts);
+    }
+    function cmapEdited() {
+      return Object.keys(preflight.slicerOverrides).length > 0
+          || Object.keys(preflight.headOverrides).length > 0;
+    }
+    function cmapResetAuto() {
+      preflight.slicerOverrides = {};
+      preflight.slicerSwaps = null;
+      preflight.headOverrides = {};
+      preflight.headSwaps = null;
+    }
+    // A single picker for every mode/row: normal-mode rows hand a slotKey
+    // to onSlicerSlotChange, head/FOrca rows an id to onHeadTargetChange.
+    function cmapPick(row, id) {
+      const r = preflight.report;
+      if (r && r.head_mode) onHeadTargetChange(row.t, id);
+      else onSlicerSlotChange(row.t, id);
+    }
+    // =================================================================
+    // Loadout strategies (redesign plan section 6): one tab strip + one
+    // panel replaces the three/four stacked plan blocks. Plan KEYS are
+    // untouched (startPreflightPrint/applyLoadout/_rewritePayload keep
+    // their arguments) - only how they are presented changes.
+    // =================================================================
+    const strategy = ref("");   // "" = pick the default once a report lands
+    function strategyTabs() {
+      const r = preflight.report;
+      if (!r) return [];
+      const baseKey = r.head_mode ? "loadout" : "slicer";
+      // Optimize/layer/colour were never offered under mixed nozzles (the
+      // nozzle-blind optimizer does not know about the diameter gate) - the
+      // FOrca branch always printed from the base plan only, and that
+      // invariant carries over unchanged.
+      const keys = forcaMixed() ? [baseKey]
+                 : r.head_mode ? ["loadout", "optimize", "layer", "color"]
+                               : ["slicer", "optimize", "layer"];
+      const base = r.plans[baseKey];
+      const tabs = keys.filter(k => r.plans[k]).map(k => ({
+        key: k,
+        label: t("ui.preflight.strat_" + (k === "slicer" ? "loadout" : k)),
+        feasible: r.head_mode ? headPlanFeasible(k) : !!r.plans[k].feasible,
+        reason: (r.plans[k] && r.plans[k].reason) || "",
+        swaps: r.head_mode ? headPlanSwaps(k)
+                           : (k === "slicer" ? slicerSwapsDisplay() : r.plans[k].swaps),
+        delta: _planDelta(r.plans[k], base),
+      }));
+      tabs.push({key: "whatif", label: t("ui.preflight.strat_whatif"),
+                feasible: true, swaps: null, delta: ""});
+      return tabs;
+    }
+    // vs. the AS-LOADED plan's own estimate - a different number from
+    // estimateDelta (which compares against the slicer's own estimate and
+    // stays inside the card).
+    function _planDelta(plan, base) {
+      if (!plan || !plan.estimate || !base || !base.estimate) return "";
+      const d = Number(plan.estimate.total_s) - Number(base.estimate.total_s);
+      if (!d) return "";
+      return (d > 0 ? "+" : "-") + fmtDuration(Math.abs(d));
+    }
+    function selectedPlan() {
+      const r = preflight.report;
+      if (!r || !strategy.value || strategy.value === "whatif") return null;
+      return r.plans[strategy.value] || null;
+    }
+    // "To use this layout, move:" - the physical instruction the mapping
+    // table only implied today. Diffs _loadoutOps' overrides against the
+    // CURRENT live loadout.
+    function loadoutMoves() {
+      const r = preflight.report;
+      if (!r || !strategy.value || strategy.value === "whatif") return [];
+      const baseKey = r.head_mode ? "loadout" : "slicer";
+      if (strategy.value === baseKey) return [];
+      const ops = r.head_mode ? _loadoutOps("head", strategy.value)
+                              : _loadoutOps(strategy.value);
+      const moves = [];
+      ops.overrides.forEach(o => {
+        const live = (r.live_slots || []).find(s => s.ace === o.ace && s.slot === o.slot);
+        const from = live ? (live.material || live.color || t("ui.preflight.cmap_unassigned"))
+                          : t("ui.preflight.cmap_unassigned");
+        const to = o.material || o.color || "?";
+        if (from !== to) moves.push({ace: o.ace, slot: o.slot, from, to});
+      });
+      return moves;
+    }
+    function canPrint() {
+      const r = preflight.report;
+      if (!r || preflight.sending) return false;
+      if (!strategy.value || strategy.value === "whatif") return false;
+      if (r.missing_materials && r.missing_materials.length) return false;
+      if (forcaMixed() && !forcaFeasible()) return false;
+      if (r.head_mode) return headPlanFeasible(strategy.value);
+      const plan = r.plans[strategy.value];
+      return !!(plan && plan.feasible);
+    }
+    function canApplyLoadout() {
+      const r = preflight.report;
+      if (!r || preflight.applying || preflight.sending) return false;
+      if (!strategy.value || strategy.value === "whatif") return false;
+      const baseKey = r.head_mode ? "loadout" : "slicer";
+      if (strategy.value === baseKey) return false;   // nothing to apply
+      return r.head_mode ? headPlanFeasible(strategy.value)
+                         : !!(r.plans[strategy.value] && r.plans[strategy.value].feasible);
+    }
+    function printSelected() {
+      const r = preflight.report;
+      if (!r) return;
+      r.head_mode ? startPreflightPrint("head", strategy.value)
+                 : startPreflightPrint(strategy.value);
+    }
+    function applySelected() {
+      const r = preflight.report;
+      if (!r) return;
+      r.head_mode ? applyLoadout("head", strategy.value)
+                 : applyLoadout(strategy.value);
+    }
+    function downloadSelected() {
+      const r = preflight.report;
+      if (!r) return;
+      r.head_mode ? downloadRewrittenGcode("head", strategy.value)
+                 : downloadRewrittenGcode(strategy.value);
+    }
+    // Default tab on a new report: as-loaded, unless it is infeasible and
+    // another tab is not - the dialog must never open on a dead end.
+    watch(() => preflight.report, (r) => {
+      if (!r) { strategy.value = ""; return; }
+      const baseKey = r.head_mode ? "loadout" : "slicer";
+      const baseFeasible = r.head_mode ? headPlanFeasible(baseKey)
+                                       : !!(r.plans[baseKey] && r.plans[baseKey].feasible);
+      if (baseFeasible) { strategy.value = baseKey; return; }
+      const firstOk = strategyTabs().find(tb => tb.key !== "whatif" && tb.feasible);
+      strategy.value = firstOk ? firstOk.key : baseKey;
+    });
     // ---- Send-to-multiACE inbox -----------------------------------------
     // A slicer pushed a raw gcode to /api/preflight/inbox (store-only). The
     // pickup fetches it INTO THE BROWSER and runs the normal Pyodide
@@ -4803,6 +5108,13 @@ createApp({
     }
     // Entry point: try the browser path, offer the server fallback on failure.
     async function _runPreflight(f) {
+      // Opened here (not inside _runLocalPreflight/_runServerPreflight) so
+      // the dialog - and the canvas the preview renders into - exists before
+      // the parse worker is fired. Two separate workers, so this runs in
+      // parallel with the analysis below; never awaited, so a slow or
+      // failed parse can never delay or block the preflight itself.
+      preflight.open = true;
+      startGcodePreview(f);
       try {
         await _runLocalPreflight(f);
       } catch (e) {
@@ -4829,6 +5141,12 @@ createApp({
         });
       }
     }
+    // What-if (plan section 6.3): re-run the whole preflight against the
+    // edited virtual spools. preflightFile is a closure-local, not exposed
+    // to the template, so the button in the dialog calls this wrapper.
+    function whatifRerun() {
+      if (preflightFile) _runPreflight(preflightFile);
+    }
 
     async function _runLocalPreflight(f) {
       preflight.open    = true;
@@ -4852,6 +5170,7 @@ createApp({
         const j = await runPreflightWorker("analyze", {
           jobId: preflightJobId, file: f,
           liveSlots: vp || live.live_slots, headCtx: live.head_ctx,
+          spoolPrices: live.spool_prices,
         }, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -5007,14 +5326,22 @@ createApp({
     // multiACE's plan actually print", which the swim-lane timeline above
     // already answers without needing any geometry.
     // =================================================================
+    const GPREVIEW_SPEEDS = [1, 2, 4];
+    const GPREVIEW_AUTO_MAX_BYTES = 350 * 1024 * 1024;
     const gpreview = reactive({
-      open: false, busy: false, error: "", progress: 0,
+      // idle: dialog open, parse not started yet. parsing: worker running.
+      // ready: renderer live. error: parse threw. skipped: too large / opted
+      // out - the box still shows a [Load preview] affordance.
+      phase: "idle", error: "", progress: 0,
+      collapsed: localStorage.getItem("multiace.gpreview.collapsed") === "1",
       // A layer RANGE, not a single layer: a range is what shows where a
       // colour starts and stops, which is the question this app exists to
       // answer. layerLo/layerHi are inclusive.
       layerLo: 0, layerHi: 0, totalLayers: 0,
       // Sequential-move scrub within the TOP visible layer.
       move: 0, moveMax: 0, playing: false,
+      speed: GPREVIEW_SPEEDS.includes(Number(localStorage.getItem("multiace.gpreview.speed")))
+        ? Number(localStorage.getItem("multiace.gpreview.speed")) : 1,
       viewType: "filament", lod: "auto",
       showTravel: false, showToolchanges: true, showPlate: true,
       maximized: false,
@@ -5026,14 +5353,23 @@ createApp({
     const gpreviewCanvasEl = ref(null);
     let gpreviewData = null;
     let gpreviewRenderer = null;
-    let gpreviewTimer = null;
     let gpreviewResizeObs = null;
     let gpreviewRaf = 0;
 
+    // Distinguishable colours for the toolchange legend BEFORE the analysis
+    // report lands (the parse usually finishes first) - without this every
+    // tool falls back to the same grey and the preview shows an
+    // undifferentiated part while the user is staring right at it.
+    const GPREVIEW_FALLBACK_PALETTE = [
+      "#e6553a", "#3a8ee6", "#3ae67a", "#e6c73a",
+      "#a53ae6", "#e63aa0", "#3ae6d8", "#e6923a",
+    ];
     function _gpreviewColorForT(t) {
       const rep = preflight.report;
       const c = rep && (rep.slicer_colors || []).find(x => x.t === t);
-      return (c && c.hex) || "#888888";
+      if (c && c.hex) return c.hex;
+      const n = GPREVIEW_FALLBACK_PALETTE.length;
+      return GPREVIEW_FALLBACK_PALETTE[((Number(t) % n) + n) % n];
     }
 
     // ---- the multiACE twist (plan 7.5) ---------------------------------
@@ -5119,6 +5455,21 @@ createApp({
                  gpreview.isolate],
           _gpreviewApply);
 
+    // The parse usually finishes before the analysis does, so the preview
+    // starts with fallback colours; once the report (or a manual override)
+    // changes what feeds what, repaint without re-uploading geometry -
+    // feasibility (the red toolchange markers) is derived from the
+    // overrides too, so a pick in the colour map below must repaint the
+    // preview above.
+    watch(() => [preflight.report, preflight.slicerOverrides, preflight.headOverrides],
+          () => {
+      if (!gpreviewRenderer) return;
+      gpreviewRenderer.setColorForT(_gpreviewColorForT);
+      gpreviewRenderer.setToolchangeColor(
+        (tc) => gpreviewFeasible(tc.t) ? _gpreviewColorForT(tc.t) : "#ff4d4d");
+      _gpreviewScheduleDraw();
+    }, {deep: true});
+
     function gpreviewSetLayerLo(v) {
       gpreview.layerLo = Math.min(Number(v), gpreview.layerHi);
     }
@@ -5148,13 +5499,33 @@ createApp({
       return gpreviewRenderer ? gpreviewRenderer.effectiveLod() : "ribbon";
     });
 
-    async function openGcodePreview() {
-      if (!preflightFile || gpreview.busy) return;
-      gpreview.busy = true;
+    // Auto-start only below the size guard (the parse allocates several
+    // typed arrays per segment and would otherwise peak alongside Pyodide's
+    // heap); above it, or when the user opted out, the box shows a manual
+    // [Load preview] affordance instead. `opts.manual` bypasses both guards
+    // (Retry / Load preview button).
+    function _gpreviewShouldAutoStart(file) {
+      if (panelMode) return false;
+      if (localStorage.getItem("multiace.gpreview.auto") === "0") return false;
+      if (file && file.size > GPREVIEW_AUTO_MAX_BYTES) return false;
+      return true;
+    }
+    async function startGcodePreview(file, opts) {
+      opts = opts || {};
+      // The embedded Fluidd panel never shows this dialog at all, so it
+      // must never spend CPU/memory parsing a file it cannot render.
+      if (panelMode) { gpreview.phase = "skipped"; return; }
+      file = file || preflightFile;
+      if (!file || gpreview.phase === "parsing") return;
+      if (!opts.manual && !_gpreviewShouldAutoStart(file)) {
+        gpreview.phase = "skipped";
+        return;
+      }
+      gpreview.phase = "parsing";
       gpreview.error = "";
       gpreview.progress = 0;
       try {
-        gpreviewData = await MultiAceGcodePreview.parse(preflightFile, {
+        gpreviewData = await MultiAceGcodePreview.parse(file, {
           onProgress: (pct) => { gpreview.progress = pct; },
         });
         if (!gpreviewData.segmentCount) {
@@ -5167,8 +5538,9 @@ createApp({
         // worth seeing is "does the finished object look right".
         gpreview.layerLo = 0;
         gpreview.layerHi = Math.max(0, gpreview.totalLayers - 1);
-        gpreview.open = true;
         await nextTick();
+        // The dialog may have been closed while the parse was running.
+        if (!gpreviewCanvasEl.value) return;
         gpreviewRenderer = new MultiAceGcodePreview.Renderer(gpreviewCanvasEl.value);
         gpreview.mode = gpreviewRenderer.mode;
         gpreviewRenderer.setData(gpreviewData, _gpreviewColorForT);
@@ -5177,6 +5549,7 @@ createApp({
         gpreviewRenderer.onDraw(_gpreviewScheduleDraw);
         gpreviewRenderer.resize();
         gpreview.move = gpreviewRenderer.topLayerMoveCount();
+        gpreview.phase = "ready";
         _gpreviewApply();
         if (!gpreviewResizeObs && window.ResizeObserver) {
           gpreviewResizeObs = new ResizeObserver(() => {
@@ -5188,17 +5561,29 @@ createApp({
         }
       } catch (e) {
         gpreview.error = e.message || String(e);
-      } finally {
-        gpreview.busy = false;
+        gpreview.phase = "error";
       }
     }
 
+    function gpreviewToggleCollapse() {
+      gpreview.collapsed = !gpreview.collapsed;
+      try {
+        localStorage.setItem("multiace.gpreview.collapsed", gpreview.collapsed ? "1" : "0");
+      } catch (_) {}
+      if (gpreview.collapsed && gpreview.playing) gpreviewTogglePlay();
+    }
+    const gpreviewAutoEnabled = ref(localStorage.getItem("multiace.gpreview.auto") !== "0");
+    function gpreviewSetAutoStart(enabled) {
+      gpreviewAutoEnabled.value = enabled;
+      try { localStorage.setItem("multiace.gpreview.auto", enabled ? "1" : "0"); } catch (_) {}
+    }
+
     function closeGcodePreview() {
-      gpreview.open = false;
+      gpreview.phase = "idle";
       gpreview.playing = false;
       gpreview.maximized = false;
       gpreview.isolate = null;
-      if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
+      if (gpreviewPlayRaf) { cancelAnimationFrame(gpreviewPlayRaf); gpreviewPlayRaf = 0; }
       if (gpreviewRaf) { cancelAnimationFrame(gpreviewRaf); gpreviewRaf = 0; }
       if (gpreviewResizeObs) { gpreviewResizeObs.disconnect(); gpreviewResizeObs = null; }
       if (gpreviewRenderer) gpreviewRenderer.dispose();
@@ -5208,24 +5593,49 @@ createApp({
 
     // Play drives the MOVE slider, and rolls onto the next layer when it
     // runs off the end of this one - which is the print building itself,
-    // rather than a layer flicker book.
+    // rather than a layer flicker book. A rAF loop (not setInterval) so the
+    // speed can change mid-play without restarting or jumping, and so
+    // playback actually stops in a background tab instead of racing ahead
+    // invisibly.
+    const GPREVIEW_LAYER_SECONDS = 3.5;      // one layer at 1x
+    let gpreviewPlayRaf = 0;
+    let gpreviewPlayLast = 0;
+    let gpreviewMoveAcc = 0;                 // fractional moves carry over
+
+    function gpreviewSetSpeed(s) {
+      gpreview.speed = GPREVIEW_SPEEDS.includes(s) ? s : 1;
+      try { localStorage.setItem("multiace.gpreview.speed", String(gpreview.speed)); }
+      catch (_) {}
+    }
+    function _gpreviewPlayStep(now) {
+      if (!gpreview.playing) return;
+      const dt = Math.min(0.25, (now - gpreviewPlayLast) / 1000);   // tab-switch clamp
+      gpreviewPlayLast = now;
+      gpreviewMoveAcc += (gpreview.moveMax / GPREVIEW_LAYER_SECONDS) * gpreview.speed * dt;
+      const step = Math.floor(gpreviewMoveAcc);
+      if (step >= 1) {
+        gpreviewMoveAcc -= step;
+        if (gpreview.move + step >= gpreview.moveMax) {
+          // roll onto the next layer - the print building itself, as today
+          if (gpreview.layerHi >= gpreview.totalLayers - 1) {
+            gpreview.layerHi = Math.max(gpreview.layerLo, 0);
+          } else {
+            gpreview.layerHi += 1;
+          }
+          gpreview.move = 0;
+        } else {
+          gpreview.move += step;
+        }
+      }
+      gpreviewPlayRaf = requestAnimationFrame(_gpreviewPlayStep);
+    }
     function gpreviewTogglePlay() {
       gpreview.playing = !gpreview.playing;
-      if (gpreviewTimer) { clearInterval(gpreviewTimer); gpreviewTimer = null; }
+      if (gpreviewPlayRaf) { cancelAnimationFrame(gpreviewPlayRaf); gpreviewPlayRaf = 0; }
+      gpreviewMoveAcc = 0;
       if (gpreview.playing) {
-        gpreviewTimer = setInterval(() => {
-          const step = Math.max(1, Math.round(gpreview.moveMax / 60));
-          if (gpreview.move + step >= gpreview.moveMax) {
-            if (gpreview.layerHi >= gpreview.totalLayers - 1) {
-              gpreview.layerHi = Math.max(gpreview.layerLo, 0);
-            } else {
-              gpreview.layerHi += 1;
-            }
-            gpreview.move = 0;
-          } else {
-            gpreview.move += step;
-          }
-        }, 60);
+        gpreviewPlayLast = performance.now();
+        gpreviewPlayRaf = requestAnimationFrame(_gpreviewPlayStep);
       }
     }
 
@@ -5237,6 +5647,8 @@ createApp({
       preflight.sending = "";
       preflight.progress = null;
       preflight.local   = false;
+      strategy.value    = "";
+      cmapDetails.value = false;
       clearLocalPreflightJob();
     }
     // ---- estimate formatting (plan 1.4) ---------------------------------
@@ -5637,7 +6049,8 @@ createApp({
     // tooltip does not exist there. The collapse control exists for the
     // printer's own 1024x600 panel, where 168px is worth reclaiming.
     // =================================================================
-    const RAIL_ICONS = {dashboard: "▤", history: "◷", config: "⚙", plugin: "◫"};
+    const RAIL_ICONS = {dashboard: "▤", monitor: "▣", history: "◷",
+                        spools: "◍", config: "⚙", plugin: "◫"};
     const railCollapsed = ref(localStorage.getItem("multiace.rail") === "1");
     function toggleRail() { railCollapsed.value = !railCollapsed.value; }
     // The class goes on <html>, not on .shell, because --rail-w has to
@@ -5656,6 +6069,10 @@ createApp({
         items.push({key: "dashboard", icon: RAIL_ICONS.dashboard,
                     label: t("ui.tabs.dashboard")});
       }
+      items.push({key: "monitor", icon: RAIL_ICONS.monitor,
+                  label: t("ui.tabs.monitor")});
+      items.push({key: "spools", icon: RAIL_ICONS.spools,
+                  label: t("ui.tabs.spools")});
       items.push({key: "history", icon: RAIL_ICONS.history,
                   label: t("ui.tabs.history")});
       items.push({key: "config", icon: RAIL_ICONS.config,
@@ -5769,8 +6186,13 @@ createApp({
     // single page load. A console subscription is cheap; an MJPEG stream
     // costs the printer a connection whether or not anyone is watching
     // it. Picking the camera is a decision the user gets to make.
+    // "webcam" was a valid pane before the webcam moved to its own
+    // Dashboard tab - a browser with that stale value persisted must not
+    // land on a pane that no longer exists.
+    const _storedSidebarPane = localStorage.getItem("multiace.sidebar.pane");
     const sidebar = reactive({
-      pane: localStorage.getItem("multiace.sidebar.pane") || "console",
+      pane: (_storedSidebarPane === "console" || _storedSidebarPane === "print")
+        ? _storedSidebarPane : "console",
     });
     watch(() => sidebar.pane,
           v => localStorage.setItem("multiace.sidebar.pane", v));
@@ -5943,7 +6365,7 @@ createApp({
       nonce: 0,
     });
     const webcamShown = computed(() =>
-      !panelMode && sidebar.pane === "webcam");
+      !panelMode && tab.value === "monitor");
     const webcamSrc = computed(() =>
       webcam.available ? `${API}/webcam/stream?n=${webcam.nonce}` : "");
     async function loadWebcam() {
@@ -6394,8 +6816,9 @@ createApp({
       TIPFORM_STEP_TYPES, tipformToggleBuilder, tipformAddStep, tipformRemoveStep, tipformStepsToTable, tipformStepPlaceholder, tipformInsertStock,
       preflight, closePreflight, startPreflightPrint, applyLoadout, stageLabel,
       downloadRewrittenGcode, fmtDuration, estimateDelta, wastePercent,
-      gpreview, gpreviewCanvasEl, openGcodePreview, closeGcodePreview,
-      gpreviewTogglePlay, gpreviewLegend, gpreviewFeatureLegend,
+      gpreview, gpreviewCanvasEl, startGcodePreview, closeGcodePreview,
+      gpreviewToggleCollapse, gpreviewSetAutoStart, gpreviewAutoEnabled, whatifRerun,
+      gpreviewTogglePlay, gpreviewSetSpeed, gpreviewLegend, gpreviewFeatureLegend,
       gpreviewSetLayerLo, gpreviewSetLayerHi, gpreviewPreset,
       gpreviewIsolate, gpreviewToggleMax, gpreviewLod, gpreviewFeasible,
       swimLanes, swapColor, swapTitle,
@@ -6412,6 +6835,9 @@ createApp({
       hmDropOpen, hmDdToggle, hmDdClose, hmDdPick,
       headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanFlushG, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
+      cmapDetails, colorMapRows, cmapBands, cmapSummary, cmapEdited, cmapResetAuto, cmapPick,
+      strategy, strategyTabs, selectedPlan, loadoutMoves,
+      canPrint, canApplyLoadout, printSelected, applySelected, downloadSelected,
       updateState, updateCheck, updateApply,
       debugState, debugEnable, debugDisable, debugReboot,
       plugins, refreshPlugins, pluginIframeSrc,

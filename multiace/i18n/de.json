@@ -12,7 +12,8 @@
       "ws_error": "WS-Fehler"
     },
     "tabs": {
-      "dashboard": "Übersicht",
+      "dashboard": "Beladung",
+      "monitor": "Dashboard",
       "dry": "Trocknen",
       "config": "Konfiguration",
       "display": "Display",
@@ -47,7 +48,8 @@
       "panel_expand": "zum Vergrößern klicken",
       "panel_full": "Volle Oberfläche in neuem Tab öffnen",
       "collapse": "Einklappen",
-      "expand": "Ausklappen"
+      "expand": "Ausklappen",
+      "language": "Sprache"
     },
     "dashboard": {
       "no_aces": "Keine ACEs erkannt.",
@@ -317,7 +319,7 @@
       "config_conflict_failed": "Config hat sich geändert, automatisches Übernehmen fehlgeschlagen - Config-Tab neu laden"
     },
     "upload": {
-      "button": "G-Code",
+      "button": "Druck starten (G-Code hochladen)",
       "tooltip": "G-Code-Datei hochladen und sofort drucken",
       "in_progress": "Lade hoch...",
       "title": "G-Code Upload",
@@ -401,6 +403,7 @@
       "est_conf_degraded": "Schätzung unsicher",
       "est_confidence_hint": "Aus deiner ace.cfg modelliert, nicht an dieser Maschine gemessen. Die Druckhistorie kalibriert sie nach 5 abgeschlossenen Jobs.",
       "est_filament": "{m} m / {g} g Filament",
+      "est_price": "≈ {price} €",
       "est_waste": "{g} g Purge ({pct} %)",
       "est_purge_in_slicer": "bereits im Slicer-Gesamtwert",
       "est_swaps": "{inline} inline / {bg} Hintergrund-Wechsel",
@@ -563,6 +566,7 @@
       "color": "Farbe",
       "vendor": "Hersteller",
       "weight": "Gewicht (g)",
+      "price_per_kg": "Preis (€/kg)",
       "label": "Bezeichnung",
       "remaining": "Rest",
       "assigned": "Zugewiesen",
