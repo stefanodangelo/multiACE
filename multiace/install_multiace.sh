@@ -71,6 +71,18 @@ do
     fi
 done
 log "All source files found"
+# CONFIG_DIR is OURS to create - the klipper dirs are not. printer_data/
+# config/extended exists on a PAXX box (S49extended-config mirrors it) and
+# on any box that ran an earlier install, but NOT on clean stock firmware:
+# there the installer aborted with "Target directory not found" and the user
+# had to mkdir it by hand (forum report, stock 1.5.2, 2026-08-19). Our
+# include points straight at extended/ace.cfg, so the directory needs no
+# PAXX machinery behind it - creating it is enough.
+if [ ! -d "$CONFIG_DIR" ]; then
+    if mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+        log "Created config directory: $CONFIG_DIR"
+    fi
+fi
 for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     if [ ! -d "$d" ]; then
         log "ERROR: Target directory not found: $d"
@@ -78,6 +90,30 @@ for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     fi
 done
 log "Target directories verified"
+# OVERLAY PERSISTENCE GATE. Root is an overlay whose upper layer lives at
+# /oem/overlay/upper, and the firmware WIPES that layer on every boot unless
+# /oem/.debug exists. Everything we write under /home/lava/klipper/ is in
+# that layer; ace.cfg is not (printer_data is persistent). So without the
+# flag an install looks perfect, survives until the next reboot, and then
+# Klipper halts with "Section 'ace' is not a valid config section" - the
+# config is still included but the extras are gone. Clean stock firmware
+# ships WITHOUT the flag (HW 2026-08-20, stock 1.5.2), so this bit people
+# who never had to think about it. Creating the flag only takes effect at
+# the NEXT boot, which is why we set it and say so rather than trying to
+# work around it.
+if [ ! -e /oem/.debug ]; then
+    if touch /oem/.debug 2>/dev/null; then
+        sync 2>/dev/null || true
+        OVERLAY_FLAG_CREATED=1
+        log "  NOTE: /oem/.debug was missing - created it."
+        log "        Without it the firmware wipes /home/lava/klipper on"
+        log "        every boot and multiACE would vanish after a reboot."
+    else
+        log "  WARNING: /oem/.debug is missing and could not be created"
+        log "           (run the installer as root). Without it this"
+        log "           install will NOT survive a reboot."
+    fi
+fi
 log "Backing up current files..."
 for f in "filament_feed.py" "filament_switch_sensor.py"; do
     if [ -f "$EXTRAS_DIR/$f" ] && [ ! -f "$EXTRAS_DIR/${f%.py}_pre_multiace.py" ]; then
@@ -155,6 +191,15 @@ if [ -f "$INSTALL_DIR/deploy/S59multiace-prewarm" ]; then
         log "  SKIP: S59multiace-prewarm install needs root (existing copy stays active)"
     fi
 fi
+prune_cfg_backups() {
+    # Keep only the newest 3 timestamped ace.cfg backups - the names sort
+    # chronologically, so this needs no stat/find. Without it every install
+    # adds one forever (Dirk: the config already grows such a list).
+    ls -1 "$ACTIVE_CFG".bak.* 2>/dev/null | sort | head -n -3 | while read -r old_bak; do
+        rm -f "$old_bak" && log "  pruned old config backup: $old_bak"
+    done
+}
+
 NEW_CFG="$INSTALL_DIR/config/extended/ace.cfg"
 ACTIVE_CFG="$CONFIG_DIR/ace.cfg"
 MERGER="$INSTALL_DIR/tools/merge_ace_cfg.py"
@@ -165,6 +210,7 @@ elif [ -f "$ACTIVE_CFG" ] && [ -f "$MERGER" ]; then
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="$ACTIVE_CFG.bak.$ts"
     cp "$ACTIVE_CFG" "$backup"
+    prune_cfg_backups
     tmp_out="$ACTIVE_CFG.merged.$$"
     if python3 "$MERGER" "$ACTIVE_CFG" "$NEW_CFG" "$tmp_out"; then
         mv "$tmp_out" "$ACTIVE_CFG"
@@ -182,6 +228,7 @@ else
         ts=$(date -u '+%Y%m%d-%H%M%S')
         backup="$ACTIVE_CFG.bak.$ts"
         cp "$ACTIVE_CFG" "$backup"
+        prune_cfg_backups
         log "  existing ace.cfg backed up to $backup"
     fi
     cp "$NEW_CFG" "$ACTIVE_CFG"
@@ -550,16 +597,29 @@ PYEOF
         "$INITD_SCRIPT" stop  >>"$LOGFILE" 2>&1 || true
         "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start failed - see $LOGFILE"
         sleep 1
-        if "$INITD_SCRIPT" status 2>/dev/null | grep -q "running"; then
+        # Judge by the status EXIT CODE, not by grepping the text: the old
+        # `grep -q "running"` also matched "not running", so the installer
+        # reported "multiACE Web running" unconditionally - on 2026-08-05
+        # that green light hid an Errno-98 bind failure while the
+        # pre-update backend kept serving stale code all evening.
+        if "$INITD_SCRIPT" status >>"$LOGFILE" 2>&1; then
             log "  multiACE Web running"
             log "  -> http://<printer-ip>/multiace/"
         else
-            log "  WARN: multiACE Web not running - check $LOGFILE and $WEB_DEST/backend/"
+            log "  WARN: multiACE Web NOT healthy - check $LOGFILE and $WEB_DEST/backend/"
         fi
     else
         if pgrep -u lava -f 'uvicorn.*main:app' >/dev/null 2>&1; then
             pkill -TERM -u lava -f 'uvicorn.*main:app' 2>/dev/null || true
             log "  Sent SIGTERM to running uvicorn (restart needed for new code)"
+        fi
+        # A root-owned instance (S98 boot / web-update context) is out of
+        # lava's reach - the pkill above cannot touch it and the fresh code
+        # will NOT serve until a reboot. Say so instead of staying silent.
+        sleep 2
+        if netstat -tln 2>/dev/null | grep -q ':7126 '; then
+            log "  WARN: :7126 still served by an instance we cannot replace"
+            log "        (root-owned?) - new web code is NOT live until reboot"
         fi
         log "  Skipped service restart (non-root context) - reboot or use Web Restart"
     fi
@@ -594,4 +654,12 @@ fi
 log ""
 log "=== Installation complete ==="
 log "Please reboot the printer to activate multiACE."
+# Repeat the overlay note at the END too: the install output is long and a
+# line from the top scrolls away long before the user reads the result.
+if [ "${OVERLAY_FLAG_CREATED:-0}" = "1" ]; then
+    log ""
+    log "NOTE: /oem/.debug did not exist and was created by this install."
+    log "      It makes the Klipper-side files survive a reboot; it takes"
+    log "      effect from the next boot on. Reboot now."
+fi
 log ""

@@ -111,7 +111,7 @@ async function doAnalyze(jobId, file, liveSlots, headCtx) {
   const reportJson = py.runPython(`
 _live_slots = json.loads(_live)
 _head_ctx   = json.loads(_hctx)
-_colors, _types, _naces, _used, _plan, _hdr = _core.parse_meta(
+_colors, _types, _naces, _used, _plan, _meta, _hdr = _core.parse_meta(
     _pp, _gtext.splitlines(True), with_header=True)
 _report = _core.build_report(
     _pp,
@@ -119,7 +119,7 @@ _report = _core.build_report(
     plan_proxy=_plan, live_slots=_live_slots, head_ctx=_head_ctx,
     token="", filename=_fname, size=int(_fsize),
     header_text=_hdr, cost_params=json.loads(_cost),
-    calibration=json.loads(_calib))
+    calibration=json.loads(_calib), meta=_meta)
 json.dumps(_report)
 `);
   // free the big string from the Python globals
@@ -162,7 +162,7 @@ _live_slots = json.loads(_live)
 _head_ctx   = json.loads(_hctx)
 _remap_ov   = json.loads(_remap)
 _hassign_ov = json.loads(_hassign)
-_colors, _types, _naces, _used, _plan = _core.parse_meta(
+_colors, _types, _naces, _used, _plan, _meta = _core.parse_meta(
     _pp, open("/preflight/src.gcode", "r", encoding="utf-8", errors="replace"))
 _final = _core.rewrite_pipeline(
     _pp,
@@ -172,6 +172,7 @@ _final = _core.rewrite_pipeline(
     live_slots=_live_slots, head_ctx=_head_ctx, mode=_mode,
     remap_override=_remap_ov, head_assignment=_hassign_ov, head_plan=_hplan,
     cost_params=json.loads(_cost),
+    meta=_meta,
     set_stage=lambda s, p: _on_stage(s, p))
 open(_final, "r", encoding="utf-8", errors="replace").read()
 `);
