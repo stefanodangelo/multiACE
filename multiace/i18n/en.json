@@ -71,6 +71,8 @@
       "unload": "Unload",
       "manual": "Manual",
       "feeder": "Feeder",
+      "feeder_combo": "Combo (ACE + feeder)",
+      "feeder_combo_hint": "Hybrid per-head mode: a Y-splitter joins this head's stock feeder onto its ACE's path, so it can swap between its ACE slots and the feeder spool mid-print.",
       "manual_hint": "Manual feed: no ACE feed, retract, assist or RFID for this head. Load by hand.",
       "manual_unload_first": "Unload this head first to change manual mode.",
       "load_failed": "load FAILED",
@@ -843,6 +845,8 @@
     "spool_sku_taken": "[multiACE] Tag code {sku} already belongs to spool #{id}. A code may belong to only ONE spool - pick another one (an existing assignment is never overwritten).",
     "head_feeder_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to switch between feeder and ACE",
     "head_ace_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change which ACE feeds it",
+    "head_feeder_combo_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change its feeder combo tap",
+    "head_feeder_combo_needs_ace": "[multiACE] Head {head} is not ACE-driven - wire it with ACE_SET_HEAD_ACE first, then enable the feeder combo tap",
     "spool_head_not_feeder": "[multiACE] Head {head} is ACE-driven - its spool follows the slot it loads from. Bind the spool to the ACE slot instead; a head binding is for feeder/manual heads."
   }
 }

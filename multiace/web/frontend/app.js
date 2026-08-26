@@ -155,6 +155,7 @@ createApp({
       ace_head: 3,
       ace_heads: [],
       head_feeder: {},
+      head_feeder_combo: {},
       head_ace: {},
       dryer: null,
       swap_in_progress: false,
@@ -284,6 +285,7 @@ createApp({
       state.ace_head      = (typeof s.ace_head === "number") ? s.ace_head : 3;
       state.ace_heads     = Array.isArray(s.ace_heads) ? s.ace_heads : [];
       state.head_feeder   = (s.head_feeder && typeof s.head_feeder === "object") ? s.head_feeder : {};
+      state.head_feeder_combo = (s.head_feeder_combo && typeof s.head_feeder_combo === "object") ? s.head_feeder_combo : {};
       state.head_ace      = (s.head_ace && typeof s.head_ace === "object") ? s.head_ace : {};
       state.dryer         = s.dryer ?? null;
       state.swap_in_progress = !!s.swap_in_progress;
@@ -955,6 +957,19 @@ createApp({
     async function setHeadFeeder(idx, enable) {
       await headSet("head-feeder", {head: idx, enable: !!enable},
                     t("ui.dashboard.feeder"));
+    }
+    // Hybrid per-head mode: a Y-splitter joins the head's stock feeder onto
+    // its ACE's path, so it can swap between its ACE slots and the feeder
+    // spool mid-print (ACE_SWAP_HEAD ... SOURCE=FEEDER). Only meaningful on
+    // a head that is already ACE-driven (head_uses_ace) - the backend
+    // refuses it otherwise, same guard as the checkbox's v-if should apply.
+    function headFeederComboOf(idx) {
+      const hc = state.head_feeder_combo || {};
+      return !!(hc[String(idx)] ?? hc[idx] ?? false);
+    }
+    async function setHeadFeederCombo(idx, enable) {
+      await headSet("head-feeder-combo", {head: idx, enable: !!enable},
+                    t("ui.dashboard.feeder_combo"));
     }
     // head mode: background-swap opt-in per head (= the HARDWARE declaration
     // "this head's dock is open below"). Engine-persisted (ace__bg_heads),
@@ -6787,7 +6802,7 @@ createApp({
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
       spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
