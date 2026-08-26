@@ -10939,6 +10939,15 @@ class MultiAce:
         except Exception:
             sval = None
         src = self._head_source.get(head) if self.head_uses_ace(head) else None
+        if src and self.head_source_is_feeder_tap(head):
+            # Routed through the combo feeder tap right now: head_source is
+            # just the FEEDER_TAP_SOURCE sentinel (no ACE slot), so it says
+            # nothing about physical load state - only the toolhead sensor
+            # does. Trusting the sentinel here permanently blocked
+            # ACE_SET_HEAD_FEEDER_COMBO's disable path once a combo head had
+            # ever loaded through its feeder tap, even after the filament
+            # was physically removed.
+            src = None
         if src and src.get('load_failed') and sval is False:
 
             src = None
@@ -11066,8 +11075,20 @@ class MultiAce:
         head = gcmd.get_int('HEAD', minval=0, maxval=3)
         enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
         was_combo = bool(self.head_feeder_combo.get(head, False))
+        changing = bool(enable) != was_combo
 
-        if bool(enable) != was_combo and self._head_is_loaded(head):
+        # A head currently sourced from its OWN feeder tap is not a foreign
+        # source being orphaned by this toggle - it IS the tap being turned
+        # off. Blocking on _head_is_loaded here would refuse the disable
+        # for as long as filament keeps physically feeding through it,
+        # which is the combo tap's whole normal operating state. Only an
+        # ACE-slot source (or a load the sensor sees but nothing here can
+        # explain) still needs an unload first, since clearing THAT would
+        # lose real routing information rather than the tap sentinel this
+        # exact call is retiring.
+        on_feeder_tap = changing and self.head_source_is_feeder_tap(head)
+
+        if changing and not on_feeder_tap and self._head_is_loaded(head):
             self._head_loaded_refusal_info(head, 'ACE_SET_HEAD_FEEDER_COMBO')
             raise gcmd.error(
                 self._t('msg.head_feeder_combo_loaded', head=self._disp(head)))
@@ -11076,14 +11097,17 @@ class MultiAce:
             raise gcmd.error(
                 self._t('msg.head_feeder_combo_needs_ace', head=self._disp(head)))
 
-        if bool(enable) != was_combo and self.head_source_is_feeder_tap(head):
+        if on_feeder_tap:
             # Disabling the tap while it is the head's current source would
             # leave a head_source pointing at a source that no longer
             # exists - clear it the same way the other setters clear a stale
-            # head_source on a state change.
+            # head_source on a state change. From here on the head is
+            # tracked purely by its toolhead sensor, same as a plain
+            # feeder/manual head with no head_source at all.
             logging.info(
-                '[multiACE] ACE_SET_HEAD_FEEDER_COMBO: clearing stale '
-                'feeder-tap head_source of head %d' % head)
+                '[multiACE] ACE_SET_HEAD_FEEDER_COMBO: clearing feeder-tap '
+                'head_source of head %d (was the head\'s current source)'
+                % head)
             self._head_source[head] = None
             self._save_head_source()
 
