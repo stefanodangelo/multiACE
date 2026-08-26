@@ -67,10 +67,10 @@ UNMEASURED_S = {
 }
 
 SWAP_KINDS = ("feeder_pin", "same_ace", "cross_ace_inline", "cross_ace_bg",
-              "first_load")
+              "first_load", "feeder_swap")
 
 #: Kinds whose cost lands on the print's critical path in full.
-INLINE_KINDS = ("same_ace", "cross_ace_inline")
+INLINE_KINDS = ("same_ace", "cross_ace_inline", "feeder_swap")
 
 # Fallback densities in g/cm3, used only when the slicer wrote no
 # `; filament used [g]` line (see parse_header - the Snapmaker Orca fork
@@ -466,6 +466,16 @@ class SwapCostModel(object):
             p.get("swap_anti_ooze_retract", 10) or 0)
         self.swap_purge_length = float(p.get("swap_purge_length", 0) or 0)
 
+        # Hybrid per-head mode (§3/§4.1): a combo head's feeder-tap leg of a
+        # swap uses the feeder's own load/retract config, not the ACE's -
+        # the two are physically different runs (local drive gear vs. the
+        # ACE's own bowden). No per-head override plumbing here (unlike the
+        # ACE per-slot table above) - this model is an estimate, and a
+        # global default is enough for that.
+        self.feeder_load_length = float(p.get("feeder_load_length", 1100) or 0)
+        self.feeder_swap_retract_length = float(
+            p.get("feeder_swap_retract_length", 150) or 0)
+
         # §3.4 colour-aware purge. Off by default: over-purging wastes more
         # than it saves, and an overflowing purge bin is a hotend-ending
         # blob (§13.2).
@@ -542,6 +552,15 @@ class SwapCostModel(object):
             # other one keeps printing, so none of their mechanical time is
             # on the critical path.
             return 0.0
+        if kind == "feeder_swap":
+            # A combo head's feeder tap: retract/load lengths come from the
+            # feeder's own config, not the ACE's (§3.2/§4.1 of the hybrid
+            # per-head mode plan) - no per-head override table for these
+            # yet, so this is the global default only.
+            pull = (self.feeder_swap_retract_length
+                    + self._p("swap_anti_ooze_retract", ace, slot, 0.0))
+            return pull / retract + self.feeder_load_length / feed \
+                + (2.0 * seat) / feed
         pull = (self._p("swap_retract_length", ace, slot, 0.0)
                 + self._p("swap_anti_ooze_retract", ace, slot, 0.0))
         return pull / retract + load_len / feed + (2.0 * seat) / feed
@@ -555,6 +574,11 @@ class SwapCostModel(object):
         if kind == "first_load":
             return (c["tool_pickup"] + c["seat_press"] + c["heat_settle"]
                     + c["sensor_wait"] + c["first_load_extra"])
+        if kind == "feeder_swap":
+            # No ACE spool change involved either direction - the feeder
+            # tap has exactly one spool, always ready.
+            return (c["tip_form"] + c["seat_press"] + c["heat_settle"]
+                    + c["tool_pickup"] + c["sensor_wait"])
         return (c["tip_form"] + c["ace_spool_change"] + c["seat_press"]
                 + c["heat_settle"] + c["tool_pickup"] + c["sensor_wait"])
 
@@ -696,7 +720,7 @@ def _round(value, digits=1):
 
 
 def build_estimate(model, header, timeline, *, materials=None, colors=None,
-                   used_tools=None, extra_assumptions=None):
+                   used_tools=None, extra_assumptions=None, prices=None):
     """Assemble the `estimate` block the report attaches to each plan.
 
     `timeline` is §3.2's per-event trace: a list of dicts with at least
@@ -706,6 +730,7 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     """
     materials = materials or {}
     colors = colors or {}
+    prices = prices or {}
     assumptions = list(extra_assumptions or [])
 
     counts = {"inline": 0, "bg": 0, "pin": 0, "unknown_window": 0,
@@ -781,6 +806,8 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     per_color = []
     totals_mm = 0.0
     totals_g = 0.0
+    totals_price = 0.0
+    any_price_known = False
     tools = sorted(used_tools) if used_tools else sorted(
         set(list(per_tool_purge_mm.keys())
             + list(range(len(header.per_tool_mm) if header else 0))))
@@ -790,15 +817,23 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
         print_g = header.grams_for(t, material) if header else 0.0
         pmm = per_tool_purge_mm.get(t, 0.0)
         pg = model.purge_grams(pmm, material)
+        tool_total_g = print_g + (pg if purge_is_extra else 0.0)
         totals_mm += print_mm + (pmm if purge_is_extra else 0.0)
-        totals_g += print_g + (pg if purge_is_extra else 0.0)
-        per_color.append({
+        totals_g += tool_total_g
+        row = {
             "t": t,
             "print_mm": _round(print_mm), "print_g": _round(print_g, 2),
             "purge_mm": _round(pmm), "purge_g": _round(pg, 2),
             "total_m": _round((print_mm + (pmm if purge_is_extra else 0.0))
                               / 1000.0, 2),
-        })
+        }
+        price_per_kg = prices.get(t)
+        if price_per_kg is not None:
+            row_price = tool_total_g / 1000.0 * price_per_kg
+            row["price_eur"] = _round(row_price, 2)
+            totals_price += row_price
+            any_price_known = True
+        per_color.append(row)
 
     purge_g_total = sum(model.purge_grams(mm, materials.get(t))
                         for t, mm in per_tool_purge_mm.items())
@@ -821,7 +856,8 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                   "destination": dest, "counted_in_total": purge_is_extra},
         "per_color": per_color,
         "totals": {"mm": _round(totals_mm), "m": _round(totals_mm / 1000.0, 2),
-                   "g": _round(totals_g, 2)},
+                   "g": _round(totals_g, 2),
+                   "price_eur": _round(totals_price, 2) if any_price_known else None},
         "layers": header.layers if header else None,
         "first_layer_s": _round(header.first_layer_s, 0) if header else None,
         "confidence": confidence,

@@ -15,7 +15,7 @@
  *   <- {type:"init", pyodideIndexURL, postprocessSrc, coreSrc, swapCostSrc,
  *                        costParams, calibration}
  *   -> {type:"ready"}                                   (or {type:"error"})
- *   <- {type:"analyze", jobId, file, liveSlots, headCtx}
+ *   <- {type:"analyze", jobId, file, liveSlots, headCtx, spoolPrices}
  *   -> {type:"analyze-done", jobId, report}             (+ {type:"progress"})
  *   <- {type:"rewrite", jobId, file, liveSlots, headCtx, mode, remapOverride,
  *                        headAssignment, headPlan}
@@ -92,7 +92,7 @@ import preflight_core as _core
 }
 
 // Analyze: meta-parse + build the report (multi or head-mode preview).
-async function doAnalyze(jobId, file, liveSlots, headCtx) {
+async function doAnalyze(jobId, file, liveSlots, headCtx, spoolPrices) {
   files.set(jobId, file);
   slotsByJob.set(jobId, liveSlots);
   ctxByJob.set(jobId, headCtx);
@@ -108,6 +108,7 @@ async function doAnalyze(jobId, file, liveSlots, headCtx) {
   py.globals.set("_fsize", file.size || text.length);
   py.globals.set("_cost", JSON.stringify(costParams || {}));
   py.globals.set("_calib", JSON.stringify(calibration || {}));
+  py.globals.set("_prices", JSON.stringify(spoolPrices || {}));
   const reportJson = py.runPython(`
 _live_slots = json.loads(_live)
 _head_ctx   = json.loads(_hctx)
@@ -119,7 +120,8 @@ _report = _core.build_report(
     plan_proxy=_plan, live_slots=_live_slots, head_ctx=_head_ctx,
     token="", filename=_fname, size=int(_fsize),
     header_text=_hdr, cost_params=json.loads(_cost),
-    calibration=json.loads(_calib), meta=_meta)
+    calibration=json.loads(_calib), meta=_meta,
+    spool_prices=json.loads(_prices))
 json.dumps(_report)
 `);
   // free the big string from the Python globals
@@ -195,7 +197,8 @@ self.onmessage = async (ev) => {
     }
     if (msg.type === "analyze") {
       await ensureInit(msg);
-      const report = await doAnalyze(jobId, msg.file, msg.liveSlots, msg.headCtx);
+      const report = await doAnalyze(
+        jobId, msg.file, msg.liveSlots, msg.headCtx, msg.spoolPrices);
       self.postMessage({type: "analyze-done", jobId, report});
       return;
     }

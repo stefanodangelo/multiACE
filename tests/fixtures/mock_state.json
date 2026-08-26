@@ -297,5 +297,25 @@
       "color": "#d94040"
     }
   ],
+  "spools": {
+    "1": {"id": "1", "material": "PLA", "color": "D94040", "vendor": "Snapmaker",
+          "subtype": "Basic", "label": "", "sku": "", "weight_g": 850.0,
+          "weight_initial_g": 1000.0, "price_per_kg": 18.5},
+    "2": {"id": "2", "material": "PLA", "color": "3F7FD0", "vendor": "Generic",
+          "subtype": "Matte", "label": "", "sku": "", "weight_g": 620.0,
+          "weight_initial_g": 1000.0, "price_per_kg": 22.0},
+    "3": {"id": "3", "material": "PETG", "color": "3CC07A", "vendor": "Generic",
+          "subtype": "", "label": "", "sku": "", "weight_g": 900.0,
+          "weight_initial_g": 1000.0, "price_per_kg": 25.0},
+    "4": {"id": "4", "material": "ABS", "color": "222222", "vendor": "Generic",
+          "subtype": "", "label": "", "sku": "", "weight_g": 400.0,
+          "weight_initial_g": 1000.0, "price_per_kg": 19.0},
+    "5": {"id": "5", "material": "TPU", "color": "E0A020", "vendor": "Generic",
+          "subtype": "", "label": "", "sku": "", "weight_g": 500.0,
+          "weight_initial_g": 500.0, "price_per_kg": 32.0}
+  },
+  "spool_binding": {
+    "0_0": "1", "0_1": "2", "0_3": "3", "1_0": "4", "1_3": "5"
+  },
   "retry_state": null
 }

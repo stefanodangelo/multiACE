@@ -356,6 +356,7 @@ def _parse_state(status: dict) -> dict:
     head_source = ace.get("head_source", {}) or {}
     head_manual = ace.get("head_manual", {}) or {}
     head_feeder = ace.get("head_feeder", {}) or {}
+    head_feeder_combo = ace.get("head_feeder_combo", {}) or {}
 
     head_reader = ace.get("head_reader_spool", {}) or {}
     raw_aces = ace.get("aces", []) or []
@@ -621,6 +622,15 @@ def _parse_state(status: dict) -> dict:
         is_feeder = (op_mode == "head"
                      and bool(head_feeder.get(str(t), head_feeder.get(t, False)))
                      and not is_manual)
+        # Hybrid combo head currently sourced from its feeder tap
+        # (head_source resolves to slot='feeder', not a real ACE slot - see
+        # _resolve_head_source). Its identity comes from the same
+        # display-pushed PTC record a plain feeder head uses, since the
+        # sentinel itself carries no material/colour.
+        is_combo_on_feeder = (op_mode == "head" and not is_manual
+                              and bool(head_feeder_combo.get(
+                                  str(t), head_feeder_combo.get(t, False)))
+                              and sl_explicit == "feeder")
         if is_manual or is_feeder:
 
             d_explicit = sl_explicit = None
@@ -628,6 +638,14 @@ def _parse_state(status: dict) -> dict:
             color = None
             material = subtype = sku = brand = ""
             source = None
+            ptc_id = _ptc_at(t)
+            if ptc_id:
+                material = ptc_id.get("material", "") or ""
+                color = ptc_id.get("color")
+                subtype = ptc_id.get("sku", "") or ""
+                brand = ptc_id.get("brand", "") or ""
+        elif is_combo_on_feeder:
+            slot_field = "feeder"
             ptc_id = _ptc_at(t)
             if ptc_id:
                 material = ptc_id.get("material", "") or ""
@@ -716,6 +734,7 @@ def _parse_state(status: dict) -> dict:
         "ace_head":           int(ace.get("ace_head", 3) or 3),
         "ace_heads":          ace.get("ace_heads", []) or [],
         "head_feeder":        head_feeder,
+        "head_feeder_combo":  head_feeder_combo,
         "head_ace":           ace.get("head_ace", {}) or {},
         "language":           language,
         "display_index_base": idx_base,
@@ -826,6 +845,10 @@ class HeadManual(BaseModel):
     enable: bool
 
 class HeadFeeder(BaseModel):
+    head: int
+    enable: bool
+
+class HeadFeederCombo(BaseModel):
     head: int
     enable: bool
 
@@ -1083,6 +1106,39 @@ def _live_slots_from_state(parsed: dict) -> list[dict]:
 async def _live_slots_async() -> list[dict]:
     return _live_slots_from_state(_parse_state(await _query_state_gated()))
 
+def _spool_prices_from_state(parsed: dict) -> dict:
+    """€/kg for every bound spool, keyed "ace:<ace>:<slot>" / "head:<h>" -
+    string keys (not tuples) because this also travels as JSON to the
+    in-browser Pyodide preflight worker. See
+    preflight_core._mapping_row_price for the reader. A spool with no price
+    (added before this field existed) defaults to 20.0, the same default
+    ACE_SPOOL_ADD applies, so the estimate always has a number to show
+    rather than silently going quiet for old spools."""
+    spools = parsed.get("spools") or {}
+    binding = parsed.get("spool_binding") or {}
+    out: dict = {}
+    for key, sid in binding.items():
+        spool = spools.get(str(sid))
+        if not spool:
+            continue
+        price = spool.get("price_per_kg")
+        try:
+            price = 20.0 if price is None else float(price)
+        except (TypeError, ValueError):
+            price = 20.0
+        if key.startswith("h"):
+            try:
+                out["head:%d" % int(key[1:])] = price
+            except ValueError:
+                continue
+        else:
+            try:
+                a, s = key.split("_")
+                out["ace:%d:%d" % (int(a), int(s))] = price
+            except ValueError:
+                continue
+    return out
+
 def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> list[dict]:
     """Apply a T-index → T-index remap on top of an existing slicer-T →
     physical-slot mapping. The remap is the format that
@@ -1121,20 +1177,36 @@ async def _head_ctx_from_state(parsed: dict) -> dict:
         except (TypeError, ValueError):
             head_ace[h] = h
     feeders = []
+    combo_heads = []
+    raw_combo = parsed.get("head_feeder_combo", {}) or {}
     for th in parsed.get("toolheads", []) or []:
-        if not th.get("feeder"):
+        if th.get("feeder"):
+            if not th.get("filament_detected"):
+                continue
+            mat = (th.get("material") or "").strip()
+            col = (th.get("color") or "").strip()
+            if not mat and not col:
+                continue
+            feeders.append({"head": int(th["idx"]), "material": mat, "color": col})
             continue
-        if not th.get("filament_detected"):
-            continue
-        mat = (th.get("material") or "").strip()
-        col = (th.get("color") or "").strip()
-        if not mat and not col:
-            continue
-        feeders.append({"head": int(th["idx"]), "material": mat, "color": col})
+        h = int(th["idx"])
+        is_combo = bool(raw_combo.get(str(h), raw_combo.get(h, False)))
+        # Best-effort only: the combo tap's identity is read from whatever
+        # is CURRENTLY loaded there (th["slot"] == "feeder"). Once the head
+        # swaps to an ACE slot the identity is no longer tracked separately
+        # here, so a colour that would match the tap will not be offered
+        # again until the head is back on it - a real gap (no persistent
+        # per-head feeder identity store yet), not a crash risk.
+        if is_combo and th.get("slot") == "feeder" and th.get("filament_detected"):
+            mat = (th.get("material") or "").strip()
+            col = (th.get("color") or "").strip()
+            if mat or col:
+                combo_heads.append({"head": h, "material": mat, "color": col})
     bgs = parsed.get("bg_swap") or {}
 
     return {"mode": mode, "ace_head": ace_head, "ace_heads": ace_heads,
             "head_ace": head_ace, "feeders": feeders,
+            "combo_heads": combo_heads,
             "head_nozzles": {str(h): d
                              for h, d in (await _machine_nozzles()).items()},
             "pickup_cleaning": bool(parsed.get("pickup_cleaning")),
@@ -1246,6 +1318,12 @@ async def preflight(request: Request, file: UploadFile = File(...),
         raise HTTPException(status_code=409,
                             detail="no slots are loaded on the printer")
 
+    if mocked:
+        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+    else:
+        spool_prices = _spool_prices_from_state(
+            _parse_state(await _query_state_gated()))
+
     # The what-if overlay answers "would 2 ACEs beat 1?" without touching
     # the printer. It NEVER reaches rewrite_pipeline, which reads
     # live_slots and only live_slots.
@@ -1257,7 +1335,8 @@ async def preflight(request: Request, file: UploadFile = File(...),
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
             fuzzy=_PREFLIGHT_FUZZY, header_text=header_text,
             cost_params=_swap_cost_params(),
-            calibration=_swap_calibration(), meta=meta)
+            calibration=_swap_calibration(), meta=meta,
+            spool_prices=spool_prices)
     except ValueError as e:
 
         raise HTTPException(status_code=409, detail=str(e))
@@ -1544,12 +1623,18 @@ async def preflight_livedata(request: Request) -> dict:
     Mock-aware: with no printer attached the same shape comes out of
     mock_state.json, so the whole planner works on a laptop (§2)."""
     live_slots, head_ctx, mocked = await _preflight_loadout(request)
+    if mocked:
+        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+    else:
+        spool_prices = _spool_prices_from_state(
+            _parse_state(await _query_state_gated()))
     return {
-        "live_slots":  live_slots,
-        "head_ctx":    head_ctx,
-        "cost_params": _swap_cost_params(),
-        "calibration": _swap_calibration(),
-        "mock":        mocked,
+        "live_slots":    live_slots,
+        "head_ctx":      head_ctx,
+        "cost_params":   _swap_cost_params(),
+        "calibration":   _swap_calibration(),
+        "spool_prices":  spool_prices,
+        "mock":          mocked,
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
@@ -4881,6 +4966,26 @@ async def head_feeder_set(req: HeadFeeder) -> dict:
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
     return {"ok": True, "head": req.head, "feeder": req.enable}
+
+@app.post("/api/head-feeder-combo")
+async def head_feeder_combo_set(req: HeadFeederCombo) -> dict:
+    """Toggle the hybrid combo feeder tap on an ACE-driven head (head mode
+    only): a Y-splitter joins the head's stock feeder onto its ACE's path,
+    so it can swap between its ACE slots and the feeder spool mid-print.
+    Requires the head to already be ACE-driven. Persisted by the Klipper
+    module."""
+    if req.head < 0 or req.head > 3:
+        raise HTTPException(status_code=400, detail="head must be 0..3")
+    script = "ACE_SET_HEAD_FEEDER_COMBO HEAD=%d ENABLE=%d" % (
+        req.head, 1 if req.enable else 0)
+    try:
+        await _mr_post("/printer/gcode/script", {"script": script})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    return {"ok": True, "head": req.head, "feeder_combo": req.enable}
 
 @app.post("/api/head-ace")
 async def head_ace_set(req: HeadAce) -> dict:

@@ -1,0 +1,163 @@
+"""Hybrid per-head mode: the ace.py side (config accessors, state helpers,
+and the ACE_SET_HEAD_FEEDER_COMBO guard rails).
+
+Uses the same throwaway-import fixture as test_load_retry.py so this runs
+without a real Klipper environment: MultiAce.__new__ bypasses __init__ and
+each test wires up only the attributes the method under test touches.
+"""
+import pytest
+
+from .test_load_retry import ace_module  # noqa: F401  (module fixture)
+
+
+@pytest.fixture
+def ace(ace_module):
+    obj = ace_module.MultiAce.__new__(ace_module.MultiAce)
+    obj._ace_mode = 'head'
+    obj.head_manual = {0: False, 1: False, 2: False, 3: False}
+    obj.head_feeder = {0: False, 1: True, 2: True, 3: True}
+    obj.head_feeder_combo = {0: False, 1: False, 2: False, 3: False}
+    obj.head_ace = {0: 0, 1: 1, 2: 2, 3: 3}
+    obj._head_source = {0: None, 1: None, 2: None, 3: None}
+    obj.feeder_load_length = 1100.0
+    obj._feeder_load_length_head = {}
+    obj.feeder_retract_length = None
+    obj._feeder_retract_length_head = {}
+    obj.retract_length = 1950.0
+    obj.feeder_swap_retract_length = 150.0
+    obj._feeder_swap_retract_length_head = {}
+    return obj
+
+
+class TestHeadHasFeederTap:
+    def test_false_outside_head_mode(self, ace):
+        ace._ace_mode = 'multi'
+        ace.head_feeder_combo[0] = True
+        assert ace.head_has_feeder_tap(0) is False
+
+    def test_false_when_not_ace_driven(self, ace):
+        # head 1 is a plain feeder head (head_feeder[1] = True)
+        ace.head_feeder_combo[1] = True
+        assert ace.head_uses_ace(1) is False
+        assert ace.head_has_feeder_tap(1) is False
+
+    def test_true_once_enabled_on_an_ace_head(self, ace):
+        assert ace.head_uses_ace(0) is True
+        assert ace.head_has_feeder_tap(0) is False
+        ace.head_feeder_combo[0] = True
+        assert ace.head_has_feeder_tap(0) is True
+
+
+class TestHeadSourceIsFeederTap:
+    def test_none_source_is_not_the_feeder_tap(self, ace):
+        assert ace.head_source_is_feeder_tap(0) is False
+
+    def test_ace_slot_source_is_not_the_feeder_tap(self, ace):
+        ace._head_source[0] = {'ace_index': 0, 'slot': 2}
+        assert ace.head_source_is_feeder_tap(0) is False
+
+    def test_sentinel_is_the_feeder_tap(self, ace):
+        ace._head_source[0] = dict(ace_module_source_sentinel(ace))
+        assert ace.head_source_is_feeder_tap(0) is True
+
+
+def ace_module_source_sentinel(ace):
+    # FEEDER_TAP_SOURCE is a module-level constant in ace.py.
+    import sys
+    mod = sys.modules[type(ace).__module__]
+    return mod.FEEDER_TAP_SOURCE
+
+
+class TestHeadAceActiveFor:
+    """The DYNAMIC predicate filament_feed_ace.py uses instead of
+    head_uses_ace for per-operation branching - must reflect the head's
+    CURRENT source, not just its static wiring."""
+
+    def test_true_for_a_plain_ace_head(self, ace):
+        assert ace.head_ace_active_for(0) is True
+
+    def test_false_for_a_plain_feeder_head(self, ace):
+        assert ace.head_ace_active_for(1) is False
+
+    def test_false_for_a_combo_head_currently_on_its_feeder_tap(self, ace):
+        ace.head_feeder_combo[0] = True
+        ace._head_source[0] = dict(ace_module_source_sentinel(ace))
+        assert ace.head_uses_ace(0) is True, (
+            "static wiring must stay True - the dashboard/UI still needs "
+            "to show this head's ACE slots as belonging to it")
+        assert ace.head_ace_active_for(0) is False
+
+    def test_true_for_a_combo_head_currently_on_an_ace_slot(self, ace):
+        ace.head_feeder_combo[0] = True
+        ace._head_source[0] = {'ace_index': 0, 'slot': 1}
+        assert ace.head_ace_active_for(0) is True
+
+
+class TestFeederLengthAccessors:
+    def test_load_length_falls_back_to_the_global(self, ace):
+        assert ace.feeder_load_length_for(2) == 1100.0
+
+    def test_load_length_per_head_override_wins(self, ace):
+        ace._feeder_load_length_head[2] = 1350.0
+        assert ace.feeder_load_length_for(2) == 1350.0
+        assert ace.feeder_load_length_for(0) == 1100.0
+
+    def test_retract_length_falls_back_to_the_ace_retract_length(self, ace):
+        # No feeder_retract_length configured at all: compat fallback to
+        # retract_length, so an upgrade with no new config changes nothing.
+        assert ace.feeder_retract_length_for(0) == 1950.0
+
+    def test_retract_length_global_override_wins_over_compat_fallback(self, ace):
+        ace.feeder_retract_length = 150.0
+        assert ace.feeder_retract_length_for(0) == 150.0
+
+    def test_retract_length_per_head_override_wins_over_global(self, ace):
+        ace.feeder_retract_length = 150.0
+        ace._feeder_retract_length_head[0] = 80.0
+        assert ace.feeder_retract_length_for(0) == 80.0
+        assert ace.feeder_retract_length_for(1) == 150.0
+
+    def test_swap_retract_length_precedence(self, ace):
+        assert ace.get_feeder_swap_retract_length(0) == 150.0
+        ace._feeder_swap_retract_length_head[0] = 80.0
+        assert ace.get_feeder_swap_retract_length(0) == 80.0
+        assert ace.get_feeder_swap_retract_length(1) == 150.0
+
+
+class TestSetHeadFeederComboGuardRails:
+    def _gcmd(self, **params):
+        class G:
+            def __init__(self, p):
+                self._p = p
+
+            def get_int(self, name, default=None, minval=None, maxval=None):
+                return int(self._p.get(name, default))
+
+            def error(self, msg):
+                return AssertionError(msg)
+        return G(params)
+
+    def test_refuses_when_head_has_no_ace_wiring(self, ace, monkeypatch):
+        # head 1 is a plain feeder head - not ACE-driven.
+        monkeypatch.setattr(ace, '_head_is_loaded', lambda h: False)
+        monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
+        gcmd = self._gcmd(HEAD=1, ENABLE=1)
+        with pytest.raises(AssertionError):
+            ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
+        assert ace.head_feeder_combo[1] is False
+
+    def test_refuses_when_the_head_is_loaded(self, ace, monkeypatch):
+        monkeypatch.setattr(ace, '_head_is_loaded', lambda h: True)
+        monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
+        gcmd = self._gcmd(HEAD=0, ENABLE=1)
+        with pytest.raises(AssertionError):
+            ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
+        assert ace.head_feeder_combo[0] is False
+
+    def test_enables_on_a_free_ace_head(self, ace, monkeypatch):
+        monkeypatch.setattr(ace, '_head_is_loaded', lambda h: False)
+        ace.save_variables = None
+        monkeypatch.setattr(ace, 'log_always', lambda *a, **k: None)
+        gcmd = self._gcmd(HEAD=0, ENABLE=1)
+        ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
+        assert ace.head_feeder_combo[0] is True

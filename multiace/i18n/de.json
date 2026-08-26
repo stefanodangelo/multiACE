@@ -12,7 +12,8 @@
       "ws_error": "WS-Fehler"
     },
     "tabs": {
-      "dashboard": "Übersicht",
+      "dashboard": "Beladung",
+      "monitor": "Dashboard",
       "dry": "Trocknen",
       "config": "Konfiguration",
       "display": "Display",
@@ -47,7 +48,8 @@
       "panel_expand": "zum Vergrößern klicken",
       "panel_full": "Volle Oberfläche in neuem Tab öffnen",
       "collapse": "Einklappen",
-      "expand": "Ausklappen"
+      "expand": "Ausklappen",
+      "language": "Sprache"
     },
     "dashboard": {
       "no_aces": "Keine ACEs erkannt.",
@@ -69,6 +71,8 @@
       "unload": "Entladen",
       "manual": "Manuell",
       "feeder": "Feeder",
+      "feeder_combo": "Kombi (ACE + Feeder)",
+      "feeder_combo_hint": "Hybrider Per-Kopf-Modus: Ein Y-Splitter verbindet den Feeder dieses Kopfes mit dem Pfad seines ACE, sodass mitten im Druck zwischen ACE-Slots und Feeder-Spule gewechselt werden kann.",
       "manual_hint": "Manueller Vorschub: kein ACE-Vorschub, kein Retract, keine Assist/RFID für diesen Kopf. Von Hand laden.",
       "manual_unload_first": "Diesen Kopf erst entladen, um den Manuell-Modus zu ändern.",
       "load_failed": "Load FEHLGESCHLAGEN",
@@ -317,7 +321,7 @@
       "config_conflict_failed": "Config hat sich geändert, automatisches Übernehmen fehlgeschlagen - Config-Tab neu laden"
     },
     "upload": {
-      "button": "G-Code",
+      "button": "Druck starten (G-Code hochladen)",
       "tooltip": "G-Code-Datei hochladen und sofort drucken",
       "in_progress": "Lade hoch...",
       "title": "G-Code Upload",
@@ -401,6 +405,7 @@
       "est_conf_degraded": "Schätzung unsicher",
       "est_confidence_hint": "Aus deiner ace.cfg modelliert, nicht an dieser Maschine gemessen. Die Druckhistorie kalibriert sie nach 5 abgeschlossenen Jobs.",
       "est_filament": "{m} m / {g} g Filament",
+      "est_price": "≈ {price} €",
       "est_waste": "{g} g Purge ({pct} %)",
       "est_purge_in_slicer": "bereits im Slicer-Gesamtwert",
       "est_swaps": "{inline} inline / {bg} Hintergrund-Wechsel",
@@ -563,6 +568,7 @@
       "color": "Farbe",
       "vendor": "Hersteller",
       "weight": "Gewicht (g)",
+      "price_per_kg": "Preis (€/kg)",
       "label": "Bezeichnung",
       "remaining": "Rest",
       "assigned": "Zugewiesen",
@@ -826,6 +832,8 @@
     "spool_sku_taken": "[multiACE] Der Tag-Code {sku} gehört schon zu Spule #{id}. Ein Code darf nur zu EINER Spule gehören – wähl einen anderen (eine bestehende Zuordnung wird nie überschrieben).",
     "head_feeder_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann zwischen Feeder und ACE umschalten",
     "head_ace_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann den zugeordneten ACE ändern",
+    "head_feeder_combo_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann den Feeder-Combo-Abgriff ändern",
+    "head_feeder_combo_needs_ace": "[multiACE] Kopf {head} ist nicht ACE-gesteuert - erst mit ACE_SET_HEAD_ACE verdrahten, dann den Feeder-Combo-Abgriff aktivieren",
     "spool_head_not_feeder": "[multiACE] Kopf {head} ist ACE-geführt – seine Spule folgt dem Slot, aus dem er lädt. Binde die Spule an den ACE-Slot; eine Kopf-Bindung ist für Feeder-/Manual-Köpfe."
   }
 }

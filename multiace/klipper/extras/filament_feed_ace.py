@@ -257,7 +257,7 @@ class FeedPort:
         if self.ace is not None:
 
             try:
-                if (not self.ace.head_uses_ace(self.index)
+                if (not self.ace.head_ace_active_for(self.index)
                         and not self.ace.head_is_manual(self.index)):
                     return self._filament_detected
             except Exception:
@@ -273,7 +273,7 @@ class FeedPort:
 
                 try:
                     if (getattr(self.ace, '_ace_mode', 'multi') == 'head'
-                            and self.ace.head_uses_ace(self.index)):
+                            and self.ace.head_ace_active_for(self.index)):
                         ace_idx = self.ace.head_ace_for(self.index)
                 except Exception:
                     ace_idx = None
@@ -576,6 +576,12 @@ class FilamentFeed:
         self._check_init_state_timer = self.reactor.register_timer(self._check_init_state_timer_handler)
 
         self._feed_preload_counts = int(preload_length / FEED_WHEEL_CIRCUMFERENCE * 2)
+        # Fallback only (used when self.ace is unavailable) - the real ceiling
+        # is looked up per channel, per load, from ace.py's feeder_load_length
+        # config (see _load_counts_max_for), since a Y-splitter on a hybrid
+        # combo head adds real tube length on the feeder side and the two
+        # channels of this very module instance can differ once that only
+        # applies to ONE of them.
         self._feed_load_counts_max = int(FEED_LOAD_LENGTH_MAX / FEED_WHEEL_CIRCUMFERENCE * 2)
 
         self.motor_speed_slow_switching = FEED_MOTOR_SPEED_SLOW_SWITCHING
@@ -599,6 +605,22 @@ class FilamentFeed:
         self.exception_manager = self.printer.lookup_object('exception_manager', None)
         self.reactor.update_timer(self._check_init_state_timer,
                                   self.reactor.monotonic() + 2 * FEED_PORT_ADC_REPORT_TIME)
+
+    def _load_counts_max_for(self, ch):
+        """Per-channel native-load wheel-count ceiling, from ace.py's
+        feeder_load_length[_N] config when available, else the module-wide
+        FEED_LOAD_LENGTH_MAX fallback. A Y-splitter on a hybrid combo head
+        adds real tube length on the feeder side only - this must be looked
+        up per channel/head, not precomputed once for the whole module
+        instance (each instance already serves two physical heads)."""
+        if self.ace is None:
+            return self._feed_load_counts_max
+        try:
+            head = self.filament_ch[ch]
+            length = self.ace.feeder_load_length_for(head)
+        except Exception:
+            return self._feed_load_counts_max
+        return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
 
     def _runout_evt_handle(self, extruder, present):
         if present == True:
@@ -1184,12 +1206,13 @@ class FilamentFeed:
                         one_step_cnt = self.wheel[ch].ppr * 2.0 * 10.0 / FEED_WHEEL_CIRCUMFERENCE
 
                         if self.ace is not None\
-                                and not self.ace.head_uses_ace(self.filament_ch[ch])\
+                                and not self.ace.head_ace_active_for(self.filament_ch[ch])\
                                 and not self.ace.head_is_manual(self.filament_ch[ch]):
 
                             logging.info(
                                 "[feed_loading] feeder head %d: native side-feed (no ACE)"
                                 % self.filament_ch[ch])
+                            _load_counts_max = self._load_counts_max_for(ch)
                             while 1:
                                 wheel_cnt_a_1 = self.wheel[ch].get_counts()
                                 wheel_cnt_b_1 = self.wheel_2[ch].get_counts()
@@ -1213,8 +1236,8 @@ class FilamentFeed:
                                     self.channel_error[ch] = FEED_ERR_TIMEOUT
                                     self.exception_code[ch] = 34
                                     break
-                                if (wheel_cnt_a_2 - wheel_cnt_a_0) / self.wheel[ch].ppr > self._feed_load_counts_max or\
-                                        (wheel_cnt_b_2 - wheel_cnt_b_0) / self.wheel_2[ch].ppr > self._feed_load_counts_max:
+                                if (wheel_cnt_a_2 - wheel_cnt_a_0) / self.wheel[ch].ppr > _load_counts_max or\
+                                        (wheel_cnt_b_2 - wheel_cnt_b_0) / self.wheel_2[ch].ppr > _load_counts_max:
                                     self.channel_error[ch] = FEED_ERR_DISTANCE
                                     self.exception_code[ch] = 35
                                     break
@@ -1351,7 +1374,7 @@ class FilamentFeed:
                             self._hang_neutral(ch)
                             raise ValueError('logic error!')
                     if self.ace is not None\
-                            and self.ace.head_uses_ace(self.filament_ch[ch])\
+                            and self.ace.head_ace_active_for(self.filament_ch[ch])\
                             and self.ace._active_device_index not in self.ace._fa_load_disable:
 
                         self.ace.wait_ace_ready()
@@ -1385,7 +1408,7 @@ class FilamentFeed:
                     _seat_pressed = False
                     _press = (int(getattr(self.ace, 'seat_overshoot_length', 0))
                               if self.ace is not None else 0)
-                    if _press > 0 and self.ace.head_uses_ace(self.filament_ch[ch]):
+                    if _press > 0 and self.ace.head_ace_active_for(self.filament_ch[ch]):
                         _p_head = self.filament_ch[ch]
                         _p_slot = self.ace._ace_slot_for_head(_p_head)
                         _p_idx = self.ace._active_device_index
@@ -1498,7 +1521,7 @@ class FilamentFeed:
                         ace_idx_p3 = None
                         slot_p3 = None
 
-                        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
+                        if self.ace is not None and self.ace.head_ace_active_for(self.filament_ch[ch]):
                             head_idx_p3 = self.filament_ch[ch]
                             src_p3 = self.ace._head_source.get(head_idx_p3)
                             if src_p3 is not None:
@@ -1986,7 +2009,7 @@ class FilamentFeed:
                     self.channel_error[ch] = FEED_OK
                     self._set_channel_state(ch, FEED_STA_LOAD_FINISH, True)
 
-                    if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
+                    if self.ace is not None and self.ace.head_ace_active_for(self.filament_ch[ch]):
                         head_idx = self.filament_ch[ch]
 
                         _src = self.ace._head_source.get(head_idx)
@@ -2054,7 +2077,7 @@ class FilamentFeed:
                     self.ace._ensure_active_ace_for_head(self.filament_ch[ch])
 
                 if self.ace is not None\
-                        and self.ace.head_uses_ace(self.filament_ch[ch]):
+                        and self.ace.head_ace_active_for(self.filament_ch[ch]):
                     try:
                         self.ace._v2_arm_fa_for_unload(self.filament_ch[ch])
                     except Exception as fa_e:
@@ -2179,7 +2202,7 @@ class FilamentFeed:
                             raise ValueError('custom gcode error!')
 
                         if self.ace is not None\
-                                and self.ace.head_uses_ace(self.filament_ch[ch]):
+                                and self.ace.head_ace_active_for(self.filament_ch[ch]):
 
                             cool_probe = (getattr(self.ace, 'swap_cool_probe', False)
                                           and getattr(self.ace, '_swap_in_progress', False))
@@ -2392,7 +2415,7 @@ class FilamentFeed:
                         self.channel_error[ch] = FEED_OK
                         self._set_channel_state(ch, FEED_STA_UNLOAD_FINISH, True)
 
-                        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
+                        if self.ace is not None and self.ace.head_ace_active_for(self.filament_ch[ch]):
                             head_idx = self.filament_ch[ch]
 
                             if not getattr(self.ace, '_last_unload_ok', True):
@@ -2482,7 +2505,7 @@ class FilamentFeed:
                             raise ValueError('custom gcode error!')
 
                         if self.ace is not None\
-                                and self.ace.head_uses_ace(self.filament_ch[ch]):
+                                and self.ace.head_ace_active_for(self.filament_ch[ch]):
 
                             cool_probe = (getattr(self.ace, 'swap_cool_probe', False)
                                           and getattr(self.ace, '_swap_in_progress', False))
@@ -2694,7 +2717,7 @@ class FilamentFeed:
                         self.channel_error[ch] = FEED_OK
                         self._set_channel_state(ch, FEED_STA_UNLOAD_FINISH, True)
 
-                        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
+                        if self.ace is not None and self.ace.head_ace_active_for(self.filament_ch[ch]):
                             head_idx = self.filament_ch[ch]
 
                             if not getattr(self.ace, '_last_unload_ok', True):
@@ -2934,7 +2957,7 @@ class FilamentFeed:
         for _ch in (FEED_CHANNEL_1, FEED_CHANNEL_2):
             if _replenish and filament_detected[_ch] and _runout(_ch) is False:
                 try:
-                    if _ace.head_uses_ace(self.filament_ch[_ch]):
+                    if _ace.head_ace_active_for(self.filament_ch[_ch]):
                         filament_detected[_ch] = False
                 except Exception:
                     pass

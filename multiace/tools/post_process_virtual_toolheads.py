@@ -560,7 +560,7 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
 
 def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
                              ace_slots, ace_head_of_ace, fuzzy_max_distance=None,
-                             nozzle_groups=None):
+                             nozzle_groups=None, combo_heads=None):
     """Head-mode layout: K ACE-driven heads each print colours multiplexed via
     slot-swaps on THEIR OWN ACE (each ACE head is wired to exactly one ACE); the
     feeder heads are PINNED to a single fixed colour each (no swap).
@@ -579,11 +579,32 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
       ace_head_of_ace:  {ace_index: head} - which ACE head each ACE feeds. Only
                         slots on a wired ACE are usable; the matched slot's head
                         is looked up here.
+      combo_heads:      [{'head': int, 'material': str, 'color': 'rrggbb'}] -
+                        hybrid per-head mode: the CURRENT identity loaded in a
+                        combo head's stock feeder tap (a Y-splitter joins it to
+                        that head's own ACE). Same shape as pinned_heads, and
+                        matched the same way (material-strict, fixed identity -
+                        it is whatever spool is physically on the stock holder,
+                        never reassigned a different colour), but the matched
+                        entry is 'kind':'ace' with slot='feeder' rather than
+                        'kind':'pin': unlike a plain feeder head, a combo head's
+                        tap DOES swap in and out mid-print, exactly like one
+                        more slot of that head's own ACE
+                        (head_mode_swap_count already keys transitions off
+                        (ace, slot), and (None, 'feeder') != (a, s) falls out
+                        correctly with no change to that function). Matched
+                        BEFORE the ACE-slot pool below, same as pinned_heads -
+                        a deliberate simplification: a combo tap can only ever
+                        win its OWN head's colour, not compete for a better
+                        tier match elsewhere, so running it early costs nothing
+                        a plain feeder head's own priority doesn't already
+                        cost.
 
     Returns dict with:
       'assignment': {t: entry}, entry one of
           {'kind':'pin', 'head':H,        'tier':str}
           {'kind':'ace', 'head':H, 'ace':a, 'slot':s, 'tier':str}
+          {'kind':'ace', 'head':H, 'ace':None, 'slot':'feeder', 'tier':str}
           {'kind':'none','tier':'no_slot'}      (no feeder AND no ACE slot)
       'feasible':   bool (no 'none' assignments)
       'infeasible': [t,...]
@@ -594,6 +615,13 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
     for p in (pinned_heads or []):
         try:
             pins[int(p['head'])] = p
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    combos = {}
+    for p in (combo_heads or []):
+        try:
+            combos[int(p['head'])] = p
         except (KeyError, TypeError, ValueError):
             continue
 
@@ -622,6 +650,24 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
             cands, c, strict_color=False, fuzzy_max_distance=fuzzy_max_distance)
         if match is not None:
             assignment[t] = {'kind': 'pin', 'head': match['head'], 'tier': tier}
+            pinned_t.add(t)
+            continue
+
+        combo_cands = []
+        for head, p in combos.items():
+            pmat = (p.get('material') or '').strip().lower()
+            if mat and pmat and pmat != mat:
+                continue
+            if allowed is not None and head not in allowed:
+                continue
+            combo_cands.append({'head': head,
+                                'color': (p.get('color') or '').strip().lstrip('#').lower()})
+        combo_match, combo_tier = _find_color_match(
+            combo_cands, c, strict_color=False,
+            fuzzy_max_distance=fuzzy_max_distance)
+        if combo_match is not None:
+            assignment[t] = {'kind': 'ace', 'head': combo_match['head'],
+                             'ace': None, 'slot': 'feeder', 'tier': combo_tier}
             pinned_t.add(t)
 
     usable_slots = [s for s in (ace_slots or []) if int(s['ace']) in head_of_ace]
@@ -741,7 +787,16 @@ def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None,
         r_nxt = event_times[nxt_j] if have_t else None
         window = (r_now - r_nxt) if (r_now is not None
                                      and r_nxt is not None) else None
-        if head not in bg_set:
+        # Hybrid per-head mode: a combo head's feeder tap is never
+        # background-eligible. The park-position bg swap preloads an ACE
+        # slot into a ready position on an idle head while another head
+        # prints - it is untested (and not obviously meaningful) starting
+        # from the native feeder's own drive path, so this is a foreground
+        # swap unconditionally, regardless of bg_heads/window.
+        if rel_e.get('slot') == 'feeder':
+            verdict = 'disabled'
+            stats['bg_disabled'] += 1
+        elif head not in bg_set:
             verdict = 'disabled'
             stats['bg_disabled'] += 1
         elif window is None:
@@ -1098,9 +1153,22 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 if a is not None and b is not None:
                     window = a - b
 
+        # Hybrid per-head mode: a transition into or out of a combo head's
+        # feeder tap is never background-eligible (§2.3/§4.1 of the hybrid
+        # per-head mode plan - matches head_mode_bg_stats' exclusion). Keep
+        # the timeline's bg/inline split consistent with what the rewrite
+        # actually emits, or the estimate would show "backgrounded" for a
+        # swap that runs foreground at print time.
+        involves_feeder = (prev_key is not None and prev_key[1] == 'feeder'
+                          ) or key[1] == 'feeder'
+
         if prev_key is None:
             kind = 'first_load'
             note = 'first load of head %s' % head
+        elif involves_feeder:
+            kind = 'feeder_swap'
+            note = ('feeder tap -> ACE slot' if prev_key[1] == 'feeder'
+                    else 'ACE slot -> feeder tap')
         else:
             need = _model_bg_window(cost_model, e.get('ace'), e.get('slot'))
             if head in bg_set and window is not None and window >= need:
@@ -1550,17 +1618,33 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         rel_tool = body_tools[bt_idx - 1]
                         ae_rel = ace_entry_of(rel_tool)
                         if (ae_rel is not None and rel_tool != n
-                                and ae_rel[0] != head_of(n)):
+                                and ae_rel[0] != head_of(n)
+                                and ae_rel[2] != 'feeder'):
+                            # Hybrid per-head mode: never background a
+                            # transition into or out of a combo head's
+                            # feeder tap (§2.3/§4.1 of the hybrid per-head
+                            # mode plan - matches head_mode_bg_stats'
+                            # exclusion). ae_rel[2] == 'feeder' (FROM the
+                            # tap) is excluded by the condition above; nxt[1]
+                            # == 'feeder' (TO the tap) is checked below,
+                            # once nxt is known.
                             loaded_now = (ae_rel[1], ae_rel[2])
                             nxt = None
                             nxt_j = None
                             for j in range(bt_idx + 1, len(body_tools)):
                                 e2 = ace_entry_of(body_tools[j])
                                 if e2 is not None and e2[0] == ae_rel[0]:
+                                    # First match wins even if it IS the
+                                    # feeder tap (nxt stays a feeder tuple,
+                                    # excluded just below) - stopping the
+                                    # search here, not skipping past it, or
+                                    # this would mis-target a LATER slot as
+                                    # the "next" one.
                                     nxt = (e2[1], e2[2])
                                     nxt_j = j
                                     break
-                            if nxt is not None and nxt != loaded_now:
+                            if (nxt is not None and nxt != loaded_now
+                                    and nxt[1] != 'feeder'):
 
                                 r_now = body_times[bt_idx]
                                 r_nxt = body_times[nxt_j]
@@ -1600,10 +1684,21 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         primed_ace.add(ae[0])
                 elif ae is not None:
                     head, a, s = ae
+                    # Hybrid per-head mode: a combo head's feeder tap has no
+                    # ACE index or int slot - address it with SOURCE=FEEDER
+                    # instead of ACE=/SLOT= (§2.2 of the hybrid per-head mode
+                    # plan). ACE_SWAP_HEAD retracts whatever the head is
+                    # currently on (ACE slot or feeder tap) and loads the
+                    # feeder tap, same swap ceremony either way.
+                    is_feeder_target = (s == 'feeder')
                     if cur.get(head) == (a, s):
-                        fout.write('; ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
-                                   '  ; skipped (already loaded)\n'
-                                   % (head, a, s))
+                        if is_feeder_target:
+                            fout.write('; ACE_SWAP_HEAD HEAD=%d SOURCE=FEEDER'
+                                       '  ; skipped (already loaded)\n' % head)
+                        else:
+                            fout.write('; ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
+                                       '  ; skipped (already loaded)\n'
+                                       % (head, a, s))
                         skipped += 1
                         cur_t[head] = n
 
@@ -1620,7 +1715,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         # against THIS machine's purge bin, because the file
                         # may have been sliced against a different one.
                         purge_kv = ''
-                        if purge_mm_for is not None:
+                        if purge_mm_for is not None and not is_feeder_target:
                             try:
                                 pm = purge_mm_for(head, a, s,
                                                   cur_t.get(head), n)
@@ -1628,10 +1723,15 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                 pm = None
                             if pm:
                                 purge_kv = ' PURGE=%d' % int(round(pm))
-                        fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
-                                   ' ANTI_OOZE=%s%s\n'
-                                   % (head, a, s, _fmt_anti_ooze(v),
-                                      purge_kv))
+                        if is_feeder_target:
+                            fout.write('ACE_SWAP_HEAD HEAD=%d SOURCE=FEEDER'
+                                       ' ANTI_OOZE=%s%s\n'
+                                       % (head, _fmt_anti_ooze(v), purge_kv))
+                        else:
+                            fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
+                                       ' ANTI_OOZE=%s%s\n'
+                                       % (head, a, s, _fmt_anti_ooze(v),
+                                          purge_kv))
                         cur[head] = (a, s)
                         cur_t[head] = n
                         active += 1

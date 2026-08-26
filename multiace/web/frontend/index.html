@@ -255,6 +255,13 @@
          the colour of the filament actually moving, so navigation doubles
          as a state signal. See .rail-seg / railSegColor. -->
     <aside class="rail" :aria-label="t('ui.sidebar.title')">
+      <div class="rail-brand" :title="'mUlt1ACE ' + version + (printerName ? (' · ' + printerName + ' · Firmware ' + printerFw) : '')">
+        <span class="rail-brand-mark" aria-hidden="true">m<span class="hl">U</span>lt<span class="hl">1</span>ACE</span>
+        <span class="rail-brand-sub">
+          <small>{{ version }}</small>
+          <small v-if="printerName" class="printer-tag">· {{ printerName }}</small>
+        </span>
+      </div>
       <nav class="rail-nav" :style="railSegStyle">
         <span class="rail-seg" aria-hidden="true"></span>
         <button v-for="it in railItems" :key="it.key" class="rail-item"
@@ -267,6 +274,10 @@
         </button>
       </nav>
       <div class="rail-foot">
+        <select class="lang-select rail-lang" :value="language" @change="setLanguage($event.target.value)"
+                :title="t('ui.common.language')">
+          <option v-for="l in languages" :key="l.code" :value="l.code">{{ l.name }}</option>
+        </select>
         <!-- Colour alone must not carry connection state, so the dot is
              always accompanied by its text - visually hidden, never
              removed, when the rail is collapsed. -->
@@ -282,36 +293,6 @@
         </button>
       </div>
     </aside>
-  <header>
-    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE
-      <small>{{ version }}</small>
-      <small v-if="printerName" class="printer-tag"
-             :title="'Firmware ' + printerFw">· {{ printerName }}</small>
-    </h1>
-    <!-- The rail (above) covers dashboard/history/config/plugin navigation,
-         but not "spools" - kept here as the only surviving path to that
-         tab after the rail redesign. -->
-    <nav>
-      <button v-if="state.mode !== 'normal'"
-              :class="{active: tab==='dashboard'}" @click="tab='dashboard'">{{ t('ui.tabs.dashboard') }}</button>
-      <button :class="{active: tab==='spools'}" @click="tab='spools'">{{ t('ui.tabs.spools') }}</button>
-      <button :class="{active: tab==='config'}" @click="tab='config'">{{ t('ui.tabs.config') }}</button>
-      <button v-for="p in plugins.items" :key="p.name"
-              :class="{active: tab===('plugin:'+p.name)}"
-              @click="tab='plugin:'+p.name">{{ p.label }}</button>
-    </nav>
-    <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
-           class="upload-input" @change="onUploadGcode($event.target.files)">
-    <button class="upload-btn" @click="triggerUpload()"
-            :disabled="uploading"
-            :title="t('ui.upload.tooltip')">
-      <span v-if="!uploading">⬆ {{ t('ui.upload.button') }}</span>
-      <span v-else>{{ t('ui.upload.in_progress') }}</span>
-    </button>
-    <select class="lang-select" :value="language" @change="setLanguage($event.target.value)">
-      <option v-for="l in languages" :key="l.code" :value="l.code">{{ l.name }}</option>
-    </select>
-  </header>
   <div v-if="rebootNeeded" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
   <div v-if="state.preflight_inbox?.pending" class="inbox-banner">
     <span>{{ t('ui.inbox.banner', {name: state.preflight_inbox?.name}) }}</span>
@@ -354,6 +335,37 @@
   </div>
   <main>
    <div class="main-col">
+    <!-- The monitoring/launch surface: webcam + starting a print. Split out
+         of the old ACE/toolhead tab (now "Loadout") so watching the print
+         and driving a swap are not fighting for the same screen. -->
+    <section v-show="tab==='monitor'" class="monitor-panel">
+      <h2>{{ t('ui.tabs.monitor') }}</h2>
+      <div class="monitor-webcam side-webcam">
+        <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
+             :alt="webcam.name || t('ui.sidebar.webcam')">
+        <div v-else class="webcam-none">
+          <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
+                              : t('ui.sidebar.webcam_loading') }}</p>
+          <p class="muted small" v-if="webcam.reason">{{ webcam.reason }}</p>
+          <p class="muted small">{{ t('ui.sidebar.webcam_hint') }}</p>
+          <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
+        </div>
+        <div class="side-foot" v-if="webcam.available">
+          <span class="muted small">{{ webcam.name }}</span>
+          <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+        </div>
+      </div>
+      <div class="monitor-start">
+        <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
+               class="upload-input" @change="onUploadGcode($event.target.files)">
+        <button class="upload-btn primary start-print-btn" @click="triggerUpload()"
+                :disabled="uploading"
+                :title="t('ui.upload.tooltip')">
+          <span v-if="!uploading">⬆ {{ t('ui.upload.button') }}</span>
+          <span v-else>{{ t('ui.upload.in_progress') }}</span>
+        </button>
+      </div>
+    </section>
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
       <div class="status-row">
@@ -678,6 +690,16 @@
                   <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
               </label>
+              <label class="th-manual th-combo"
+                     :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
+                     :title="(t_.head_source_known || t_.filament_at_extruder)
+                       ? t('ui.dashboard.feeder_unload_first')
+                       : t('ui.dashboard.feeder_combo_hint')">
+                <input type="checkbox" :checked="headFeederComboOf(t_.idx)"
+                       :disabled="t_.head_source_known || t_.filament_at_extruder"
+                       @change="headToggle($event, headFeederComboOf(t_.idx), v => setHeadFeederCombo(t_.idx, v))">
+                <span>{{ t('ui.dashboard.feeder_combo') }}</span>
+              </label>
               <label class="th-manual th-bg" v-if="state.bg_swap?.available"
                      :title="t('ui.dashboard.bg_hint')">
                 <input type="checkbox" :checked="bgEnabledFor(t_.idx)"
@@ -900,6 +922,10 @@
             <option value="500"></option><option value="250"></option>
           </datalist>
         </label>
+        <label>{{ t('ui.spools.price_per_kg') }}
+          <input v-model="spoolForm.price" type="number" min="0" max="1000"
+                 step="0.5" size="5">
+        </label>
         <!-- RFID tag: the SKU written on the spool's tag. Whatever a writer
              app can put there is enough - it only has to be unique; material,
              sub-type and vendor come from THIS row. A leading '#' is fine
@@ -1009,7 +1035,8 @@
                need when writing or re-writing tags. -->
           <td class="spool-sku-cell"><span class="spool-sku" v-if="sp.sku"
                 :title="t('ui.spools.sku')">{{ sp.sku }}</span></td>
-          <td>{{ spoolWeightLabel(sp) || '–' }}</td>
+          <td>{{ spoolWeightLabel(sp) || '–' }}
+            <span class="muted small" v-if="sp.price_per_kg != null">· €{{ sp.price_per_kg }}/kg</span></td>
           <td>
             <select class="spool-slot-sel" :value="spoolSlotKey(sp)"
                     @change="spoolAssignTo(sp, $event.target.value)"
@@ -1745,27 +1772,10 @@ reboot</pre>
         subscription. -->
    <aside class="side-pane">
      <div class="side-tabs">
-       <button :class="{active: sidebar.pane==='webcam'}"
-               @click="setSidebarPane('webcam')">{{ t('ui.sidebar.webcam') }}</button>
        <button :class="{active: sidebar.pane==='console'}"
                @click="setSidebarPane('console')">{{ t('ui.sidebar.console') }}</button>
        <button :class="{active: sidebar.pane==='print'}"
                @click="setSidebarPane('print')">{{ t('ui.sidebar.print') }}</button>
-     </div>
-     <div v-show="sidebar.pane==='webcam'" class="side-body side-webcam">
-       <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
-            :alt="webcam.name || t('ui.sidebar.webcam')">
-       <div v-else class="webcam-none">
-         <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
-                             : t('ui.sidebar.webcam_loading') }}</p>
-         <p class="muted small" v-if="webcam.reason">{{ webcam.reason }}</p>
-         <p class="muted small">{{ t('ui.sidebar.webcam_hint') }}</p>
-         <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
-       </div>
-       <div class="side-foot" v-if="webcam.available">
-         <span class="muted small">{{ webcam.name }}</span>
-         <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
-       </div>
      </div>
      <!-- Live print control. A pane rather than a tab: while a print runs
           you want it one click from the dashboard, not on another page.
@@ -2170,804 +2180,552 @@ reboot</pre>
          class="virtual-banner">
         {{ t('ui.virtual.report_banner') }}
       </p>
-      <template v-if="preflight.report">
-        <div class="preflight-prefs">
-          <label><input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}</label>
-          <label><input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}</label>
-        </div>
-        <!-- FOrca banner: shown for every FOrcaSlicer file, also uniform ones -->
-        <div v-if="preflight.report.forca" class="forca-banner"
-             :class="{mixed: preflight.report.nozzles_mixed}">
-          <div class="row">
-            <strong>{{ t('ui.preflight.forca_detected') }}</strong>
-            <span class="muted small">{{ preflight.report.slicer }}</span>
-          </div>
-          <div class="forca-nozzles">
-            <span v-for="n in forcaNozzleList()" :key="'nz-'+n.head"
-                  class="forca-nozzle">
-              {{ t('ui.preflight.head') }} {{ dispIdx(n.head) }}
-              <b>{{ n.dia }} mm</b>
-            </span>
-          </div>
-          <p v-if="preflight.report.nozzles_mixed" class="muted small">
-            {{ t('ui.preflight.forca_mixed_hint') }}
-          </p>
-        </div>
 
-        <!-- Mixed nozzles: REPLACES the normal assignment table entirely.
-             There is no free assignment left across diameters, so this is a
-             loading instruction per nozzle size, not a matcher table. -->
-        <template v-if="forcaMixed()">
-          <!-- The whole-material miss lives in the multi branch, which this
-               block replaces - without repeating it here an ABS file on a
-               PLA-only printer shows four rows of "no matching spool" and
-               never says the obvious: there is no ABS at all. -->
-          <div v-if="preflight.report.missing_materials
-                     && preflight.report.missing_materials.length"
-               class="preflight-warn">
-            <strong>{{ t('ui.preflight.missing_mat_title') }}</strong>
-            <p>{{ t('ui.preflight.missing_mat_msg') }}</p>
-            <ul>
-              <li v-for="m in preflight.report.missing_materials" :key="'fm-'+m">
-                {{ m.toUpperCase() }}
-                <span v-if="forcaHeadsForMaterial(m) && forcaHeadsForMaterial(m).length"
-                      class="muted small">
-                  &middot; {{ t('ui.preflight.head') }}
-                  {{ forcaHeadsForMaterial(m).map(h => dispIdx(h)).join(', ') }}
+      <div class="preflight-body">
+        <!-- G-CODE PREVIEW (redesign plan section 3): parsed and rendered
+             entirely in the browser from the file already selected, START-
+             ING WITH THE DIALOG rather than behind a button - it answers
+             "is this even the right file" before anything else does. Runs
+             in its own worker, in parallel with the Pyodide analysis; never
+             awaited, so it can never delay or fail the preflight. The stage
+             box keeps a fixed height in every phase so the colour map below
+             never jumps when the parse finishes. -->
+        <div class="gpreview-pane"
+             :class="{maximized: gpreview.maximized, collapsed: gpreview.collapsed}">
+          <div class="gpreview-head">
+            <button type="button" class="gpreview-collapse"
+                    @click="gpreviewToggleCollapse"
+                    :title="gpreview.collapsed ? t('ui.gpreview.expand') : t('ui.gpreview.collapse')">
+              {{ gpreview.collapsed ? '▸' : '▾' }}
+            </button>
+            <h4>{{ t('ui.gpreview.title') }}</h4>
+            <span v-if="gpreview.phase === 'parsing'" class="muted small">{{ gpreview.progress }}%</span>
+            <span class="spacer"></span>
+            <label class="gpreview-toggle" v-if="!gpreview.collapsed">
+              <input type="checkbox" :checked="gpreviewAutoEnabled"
+                     @change="gpreviewSetAutoStart($event.target.checked)">
+              {{ t('ui.gpreview.auto_load') }}
+            </label>
+            <template v-if="!gpreview.collapsed && gpreview.phase === 'ready'">
+              <button @click="gpreviewPreset('iso')" :title="t('ui.gpreview.view_iso')">◨</button>
+              <button @click="gpreviewPreset('top')" :title="t('ui.gpreview.view_top')">▣</button>
+              <button @click="gpreviewPreset('front')" :title="t('ui.gpreview.view_front')">▤</button>
+              <button @click="gpreviewToggleMax"
+                      :title="gpreview.maximized ? t('ui.gpreview.restore') : t('ui.gpreview.maximize')">
+                {{ gpreview.maximized ? '⤡' : '⤢' }}
+              </button>
+            </template>
+          </div>
+
+          <div class="gpreview-stage">
+            <canvas ref="gpreviewCanvasEl" class="gpreview-canvas"></canvas>
+            <template v-if="gpreview.phase === 'ready'">
+              <div class="gpreview-layers">
+                <span class="gpreview-layer-label num">
+                  {{ gpreview.layerLo + 1 }}–{{ gpreview.layerHi + 1 }}
+                  / {{ gpreview.totalLayers }}
                 </span>
-              </li>
-            </ul>
+                <div class="gpreview-layer-sliders">
+                  <input type="range" class="gpreview-vrange" orient="vertical"
+                         :aria-label="t('ui.gpreview.layer_top')"
+                         min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
+                         :value="gpreview.layerHi"
+                         @input="gpreviewSetLayerHi($event.target.value)">
+                  <input type="range" class="gpreview-vrange" orient="vertical"
+                         :aria-label="t('ui.gpreview.layer_bottom')"
+                         min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
+                         :value="gpreview.layerLo"
+                         @input="gpreviewSetLayerLo($event.target.value)">
+                </div>
+              </div>
+            </template>
+            <div class="gpreview-phase" v-if="gpreview.phase === 'idle' || gpreview.phase === 'parsing'">
+              <span class="muted small">{{ t('ui.gpreview.parsing') }}</span>
+              <div class="gpreview-phase-bar">
+                <div class="gpreview-phase-fill" :style="{width: gpreview.progress + '%'}"></div>
+              </div>
+            </div>
+            <div class="gpreview-phase" v-else-if="gpreview.phase === 'error'">
+              <span class="error small">{{ gpreview.error }}</span>
+              <button @click="startGcodePreview(null, {manual: true})">
+                {{ t('ui.gpreview.retry') }}
+              </button>
+            </div>
+            <div class="gpreview-phase" v-else-if="gpreview.phase === 'skipped'">
+              <span class="muted small">{{ t('ui.gpreview.auto_skipped') }}</span>
+              <button @click="startGcodePreview(null, {manual: true})">
+                {{ t('ui.gpreview.load_manual') }}
+              </button>
+            </div>
           </div>
-          <!-- The swap count belongs here: this view replaces the plan
-               tables that normally carry it. -->
-          <div class="preflight-plan-head">
-            <h4>{{ t('ui.preflight.forca_mixed_title') }}</h4>
-            <span v-if="forcaSwapsDisplay() !== null" class="muted small">
-              {{ forcaSwapsDisplay() }} {{ t('ui.preflight.swaps_label') }}
-              <span v-if="forcaBgLabel()">· {{ forcaBgLabel() }}</span>
-              <span v-if="forcaFlushG() !== null">· {{ forcaFlushG() }} {{ t('ui.preflight.flush_g_label') }}</span>
-            </span>
-          </div>
-          <div v-for="g in forcaGroups()" :key="'g-'+g.head"
-               class="forca-group">
-            <div class="forca-group-head">
-              <!-- Head(s) first, nozzle size as the detail: the head is what
-                   the user acts on, the diameter only explains the
-                   constraint. Two heads sharing a size stay ONE section
-                   ("Head 1 + 2") - that pool is a real choice, not a fact
-                   to hide behind a picked head. -->
-              <b v-if="g.heads.length">{{ t('ui.preflight.head') }}
-                {{ g.heads.map(h => dispIdx(h)).join(' + ') }}</b>
-              <b v-else class="warn">{{ t('ui.preflight.forca_no_head') }}</b>
-              <span v-if="forcaGroupAces(g)" class="muted small">
-                &middot; ACE {{ forcaGroupAces(g).join(' + ') }}</span>
-              <span v-if="g.dia" class="muted small">{{ g.dia }} mm</span>
-              <span v-else class="muted small">
-                {{ t('ui.preflight.forca_no_head_hint') }}
+
+          <template v-if="!gpreview.collapsed">
+            <!-- Sequential-move scrub within the top visible layer. Play
+                 drives it; 2x/4x only show up while playing (plan section
+                 4), so a paused viewer keeps an uncluttered control row. -->
+            <div class="gpreview-controls">
+              <button @click="gpreviewTogglePlay" :disabled="gpreview.phase !== 'ready'"
+                      :aria-pressed="gpreview.playing">
+                {{ gpreview.playing ? t('ui.gpreview.pause') : t('ui.gpreview.play') }}
+              </button>
+              <span class="gpv-speed" v-if="gpreview.playing" role="group"
+                    :aria-label="t('ui.gpreview.speed')">
+                <button v-for="s in [1, 2, 4]" :key="'sp-'+s"
+                        :class="{sel: gpreview.speed === s}"
+                        :aria-pressed="gpreview.speed === s"
+                        @click="gpreviewSetSpeed(s)">{{ s }}x</button>
+              </span>
+              <input type="range" min="0" :max="gpreview.moveMax"
+                     v-model.number="gpreview.move" class="gpreview-slider"
+                     :disabled="gpreview.phase !== 'ready'"
+                     :aria-label="t('ui.gpreview.move')">
+              <span class="gpreview-layer-label num">
+                {{ t('ui.gpreview.move') }} {{ gpreview.move }} / {{ gpreview.moveMax }}
+              </span>
+              <select v-model="gpreview.viewType" class="gpreview-view">
+                <option value="filament">{{ t('ui.gpreview.view_filament') }}</option>
+                <option value="feature">{{ t('ui.gpreview.view_feature') }}</option>
+                <option value="speed">{{ t('ui.gpreview.view_speed') }}</option>
+                <option value="width">{{ t('ui.gpreview.view_width') }}</option>
+                <option value="height">{{ t('ui.gpreview.view_height') }}</option>
+              </select>
+              <select v-model="gpreview.lod" class="gpreview-view"
+                      :title="t('ui.gpreview.lod_hint')">
+                <option value="auto">{{ t('ui.gpreview.lod_auto') }} ({{ gpreviewLod }})</option>
+                <option value="ribbon">{{ t('ui.gpreview.lod_ribbon') }}</option>
+                <option value="solid">{{ t('ui.gpreview.lod_solid') }}</option>
+              </select>
+              <label class="gpreview-toggle">
+                <input type="checkbox" v-model="gpreview.showTravel">
+                {{ t('ui.gpreview.show_travel') }}
+              </label>
+              <label class="gpreview-toggle">
+                <input type="checkbox" v-model="gpreview.showToolchanges">
+                {{ t('ui.gpreview.show_toolchanges') }}
+              </label>
+              <label class="gpreview-toggle">
+                <input type="checkbox" v-model="gpreview.showPlate">
+                {{ t('ui.gpreview.show_plate') }}
+              </label>
+            </div>
+            <!-- LEGEND ROWS NAME THE HARDWARE. Not "Tool 2" but
+                 "T2 · ACE 1 / slot 3 · PLA Silver" - the preview answers a
+                 question the slicer cannot: which spool, in which bay,
+                 prints this part. Hovering a row isolates that filament. -->
+            <div class="gpreview-legend" v-if="gpreview.phase === 'ready' && gpreview.viewType === 'filament'">
+              <span v-for="row in gpreviewLegend" :key="'gpl-'+row.t"
+                    class="gpreview-legend-item"
+                    :class="{infeasible: !row.feasible, dim: gpreview.isolate !== null && gpreview.isolate !== row.t}"
+                    @mouseenter="gpreviewIsolate(row.t)"
+                    @mouseleave="gpreviewIsolate(null)"
+                    :title="row.feasible ? '' : t('ui.gpreview.infeasible_hint')">
+                <i class="swatch" :style="{background: row.color}"></i>
+                {{ row.label }}
+                <b v-if="!row.feasible" class="gpreview-warn">!</b>
               </span>
             </div>
-            <table class="preflight-mapping">
-              <thead>
-                <tr>
-                  <th>{{ t('ui.preflight.slicer') }}</th>
-                  <th>{{ t('ui.preflight.forca_col_target') }}</th>
-                  <th>{{ t('ui.preflight.forca_col_actual') }}</th>
-                  <th>{{ t('ui.preflight.match_tier') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in g.colors" :key="'gc-'+c.t">
-                  <td>
-                    <span class="preflight-dot"
-                          :style="{background: c.hex || '#444'}"></span>
-                    <span class="muted small">{{ c.name || c.hex }}
-                      &middot; {{ c.material || '?' }}</span>
-                  </td>
-                  <td>{{ forcaTargetHint(g, c) }}</td>
-                  <td>
-                    <!-- Same free choice as the normal workflow, only the
-                         option list is restricted to slots feeding a head of
-                         the right nozzle size. Picking another spool is
-                         legitimate; the auto-load block loads it.
-                         Rendered with the head-mode chip dropdown (hm-dd):
-                         a native select element cannot show a colour chip
-                         next to the label, and this block used one - which
-                         is why the FOrca view showed no colours while every
-                         other mode did. -->
-                    <div v-if="preflight.report.head_mode
-                               && headTargetOptions(c.t).length" class="hm-dd">
+            <div class="gpreview-legend" v-else-if="gpreview.phase === 'ready' && gpreview.viewType === 'feature'">
+              <span v-for="row in gpreviewFeatureLegend" :key="'gpf-'+row.r"
+                    class="gpreview-legend-item">
+                <i class="swatch" :style="{background: row.color}"></i>{{ row.label }}
+              </span>
+            </div>
+            <div class="gpreview-legend" v-else-if="gpreview.phase === 'ready'">
+              <span class="gpreview-legend-item">
+                <i class="gpreview-ramp"></i>
+                {{ t('ui.gpreview.ramp_hint') }}
+              </span>
+            </div>
+            <p class="gpreview-note muted small" v-if="gpreview.phase === 'ready'">
+              <span class="num">{{ gpreview.segments }}</span>
+              {{ t('ui.gpreview.segments_shown') }}
+              <template v-if="gpreview.mode === '2d'">
+                · {{ t('ui.gpreview.no_webgl') }}
+              </template>
+              <template v-if="gpreview.decimated">
+                · <span class="gpreview-warn">{{ t('ui.gpreview.decimated', {
+                      dropped: gpreview.decimated.dropped }) }}</span>
+              </template>
+            </p>
+          </template>
+        </div>
+
+        <template v-if="preflight.report">
+          <!-- FOrca banner: shown for every FOrcaSlicer file, also uniform
+               ones. States a fact about the file, not a choice - it does
+               not belong inside the colour map. -->
+          <div v-if="preflight.report.forca" class="forca-banner"
+               :class="{mixed: preflight.report.nozzles_mixed}">
+            <div class="row">
+              <strong>{{ t('ui.preflight.forca_detected') }}</strong>
+              <span class="muted small">{{ preflight.report.slicer }}</span>
+            </div>
+            <div class="forca-nozzles">
+              <span v-for="n in forcaNozzleList()" :key="'nz-'+n.head"
+                    class="forca-nozzle">
+                {{ t('ui.preflight.head') }} {{ dispIdx(n.head) }}
+                <b>{{ n.dia }} mm</b>
+              </span>
+            </div>
+            <p v-if="preflight.report.nozzles_mixed" class="muted small">
+              {{ t('ui.preflight.forca_mixed_hint') }}
+            </p>
+          </div>
+
+          <!-- COLOUR MAP (redesign plan section 5): one row model for every
+               mode. Automatic mapping is exactly what the backend/pyodide
+               matcher already computed - this only changes how it is
+               SHOWN, and makes the override affordance identical
+               everywhere (the hm-dd chip dropdown, in place of the old
+               native <select> that could not render a colour chip). -->
+          <div class="cmap">
+            <div class="cmap-head">
+              <h4>{{ t('ui.preflight.cmap_title') }}</h4>
+              <span class="cmap-summary">{{ cmapSummary() }}</span>
+              <button type="button" :disabled="!cmapEdited()"
+                      @click="cmapResetAuto()">
+                {{ t('ui.preflight.cmap_auto') }}
+              </button>
+              <button type="button" @click="cmapDetails = !cmapDetails">
+                {{ t('ui.preflight.cmap_details') }}
+              </button>
+            </div>
+            <p v-if="strategy && strategy !== 'whatif'
+                     && strategy !== (preflight.report.head_mode ? 'loadout' : 'slicer')"
+               class="cmap-proposal-hint muted small">
+              {{ t('ui.preflight.cmap_proposal_hint') }}
+            </p>
+
+            <template v-for="band in cmapBands()" :key="'band-'+band.key">
+              <div v-if="band.label" class="cmap-band-head">
+                <b>{{ band.label }}</b><span class="muted small">{{ band.hint }}</span>
+              </div>
+              <div class="cmap-strip">
+                <div v-for="row in band.rows" :key="'cm-'+row.t"
+                     class="cmap-pair"
+                     :class="{warn: tierWarn(row.tier), bad: !row.dst, changed: row.changed,
+                              dim: gpreview.isolate !== null && gpreview.isolate !== row.t}"
+                     @mouseenter="gpreviewIsolate(row.t)"
+                     @mouseleave="gpreviewIsolate(null)">
+                  <div class="cmap-src" :style="{background: row.src.hex || '#444',
+                                                 color: textOn(row.src.hex)}">
+                    <b>T{{ dispIdx(row.t) }}</b>
+                    <span class="small">{{ row.src.material || '?' }}</span>
+                    <span class="tiny">{{ row.src.name || row.src.hex }}</span>
+                  </div>
+                  <div class="cmap-arrow" aria-hidden="true">↓</div>
+                  <!-- ONE picker for every mode: the hm-dd chip dropdown -->
+                  <div class="cmap-dst">
+                    <div class="hm-dd" v-if="row.editable">
                       <button type="button" class="hm-dd-btn"
-                              @click="hmDdToggle(c.t)"
+                              @click="hmDdToggle(row.t)"
                               @keydown.esc="hmDdClose()"
                               @blur="hmDdClose()">
                         <span class="hm-dd-chip"
-                              :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
-                        <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
+                              :style="{background: (row.dst && row.dst.color) || '#444'}"></span>
+                        <span class="hm-dd-label">{{ (row.dst && row.dst.label)
                               || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
                         <span class="hm-dd-caret">▾</span>
                       </button>
-                      <div class="hm-dd-list" v-if="hmDropOpen === c.t">
+                      <div class="hm-dd-list" v-if="hmDropOpen === row.t">
                         <div class="hm-dd-item"
-                             @mousedown.prevent="hmDdPick(c.t, '')">
+                             @mousedown.prevent="cmapPick(row, '')">
                           <span class="hm-dd-chip" style="background:#444"></span>
                           <span>— {{ t('ui.preflight.not_feasible') }} —</span>
                         </div>
                         <div class="hm-dd-item"
-                             v-for="tg in headTargetOptions(c.t)"
-                             :key="'fho-'+c.t+'-'+tg.id"
-                             :class="{sel: tg.id === headEffectiveTargetId(c.t)}"
-                             @mousedown.prevent="hmDdPick(c.t, tg.id)">
+                             v-for="opt in row.options"
+                             :key="'cmo-'+row.t+'-'+opt.id"
+                             :class="{sel: row.dst && row.dst.id === opt.id}"
+                             @mousedown.prevent="cmapPick(row, opt.id)">
                           <span class="hm-dd-chip"
-                                :style="{background: tg.color || '#444'}"></span>
-                          <span>{{ headTargetLabel(tg) }}</span>
+                                :style="{background: opt.color || '#444'}"></span>
+                          <span>{{ opt.label }}</span>
                         </div>
                         <div class="hm-dd-item off"
-                             v-for="u in unsetSlotsForT(c.t)"
-                             :key="'fhu-'+c.t+'-'+u.ace+'-'+u.slot">
+                             v-for="u in row.unset"
+                             :key="'cmu-'+row.t+'-'+u.ace+'-'+u.slot">
                           <span class="hm-dd-chip" style="background:#444"></span>
                           <span>ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
                             &middot; {{ t('ui.preflight.slot_not_set') }}</span>
                         </div>
                       </div>
                     </div>
-                    <select v-else-if="!preflight.report.head_mode
-                                       && slicerSlotOptions(c.t).length"
-                            class="preflight-slot-select"
-                            :style="{background: (slicerEffectiveSlot(c.t) && slicerEffectiveSlot(c.t).color) || '#444',
-                                     color: textOn(slicerEffectiveSlot(c.t) && slicerEffectiveSlot(c.t).color)}"
-                            :value="slotKey(slicerEffectiveSlot(c.t))"
-                            @change="onSlicerSlotChange(c.t, $event.target.value)">
-                      <option v-for="opt in slicerSlotOptions(c.t)"
-                              :key="'fo-'+c.t+'-'+slotKey(opt)"
-                              :value="slotKey(opt)">
-                        ACE {{ dispIdx(opt.ace) }} / {{ dispIdx(opt.slot) }}
-                        - {{ opt.name || opt.color }}
-                      </option>
-                      <option v-for="u in unsetSlotsForT(c.t)" disabled
-                              :key="'fu-'+c.t+'-'+u.ace+'-'+u.slot">
-                        ACE {{ dispIdx(u.ace) }} / {{ dispIdx(u.slot) }}
-                        - {{ t('ui.preflight.slot_not_set') }}
-                      </option>
-                    </select>
-                    <span v-else class="muted small">
-                      {{ t('ui.preflight.forca_missing', {mat: (c.material || '?').toUpperCase()}) }}
-                    </span>
-                  </td>
-                  <td :class="{warn: tierWarn(c.tier)}">
-                    <span class="muted small">{{ tierLabel(c.tier) }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="row">
-            <button class="primary"
-                    :disabled="preflight.sending !== '' || !forcaFeasible()"
-                    @click="preflight.report.head_mode
-                              ? startPreflightPrint('head', 'loadout')
-                              : startPreflightPrint('slicer')">
-              {{ preflight.sending !== ''
-                   ? t('ui.preflight.sending')
-                   : t('ui.preflight.go_slicer') }}
-            </button>
-            <span v-if="!forcaFeasible()" class="muted small">
-              {{ t('ui.preflight.forca_blocked') }}
-            </span>
-          </div>
-        </template>
-
-        <template v-else-if="!preflight.report.head_mode">
-        <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
-        <div class="preflight-grid">
-          <div v-for="s in preflight.report.live_slots"
-               :key="'ls-' + s.ace + '-' + s.slot"
-               class="preflight-card">
-            <div class="preflight-swatch"
-                 :style="{background: s.color || '#444'}"></div>
-            <div class="preflight-meta">
-              <div><strong>ACE {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
-              <div class="muted small">{{ s.material || '?' }}</div>
-              <div class="small">{{ s.name }}</div>
-              <div class="muted small">{{ s.color || '?' }}<br>RGB({{ rgbDec(s.color) }})</div>
-            </div>
-          </div>
-        </div>
-        <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
-        <div class="preflight-grid">
-          <div v-for="c in slicerColorsInPrintOrder()"
-               :key="'sc-' + c.t"
-               class="preflight-card">
-            <div class="preflight-swatch"
-                 :style="{background: c.hex || '#444'}"></div>
-            <div class="preflight-meta">
-              <div><strong>T{{ dispIdx(c.t) }}</strong></div>
-              <div class="muted small">{{ c.material || '?' }}</div>
-              <div class="small">{{ c.name }}</div>
-              <div class="muted small">{{ c.hex }}<br>RGB({{ rgbDec(c.hex) }})</div>
-            </div>
-          </div>
-        </div>
-        <div v-if="preflight.report.missing_materials.length"
-             class="preflight-warn">
-          <strong>{{ t('ui.preflight.missing_mat_title') }}</strong>
-          <p>{{ t('ui.preflight.missing_mat_msg') }}</p>
-          <ul>
-            <li v-for="m in preflight.report.missing_materials" :key="m">
-              {{ m.toUpperCase() }}
-            </li>
-          </ul>
-        </div>
-        <template v-for="mode in ['slicer', 'optimize', 'layer']"
-                  :key="'plan-' + mode">
-          <div v-if="preflight.report.plans[mode]" class="preflight-plan">
-            <div class="preflight-plan-head">
-              <h4>{{ t('ui.preflight.plan_' + mode) }}</h4>
-              <span v-if="preflight.report.plans[mode].feasible"
-                    class="muted small">
-                {{ mode === 'slicer' ? slicerSwapsDisplay() : preflight.report.plans[mode].swaps }}
-                {{ t('ui.preflight.swaps_label') }}
-              </span>
-              <span v-else class="preflight-infeasible">
-                {{ t('ui.preflight.not_feasible') }}
-                <span v-if="preflight.report.plans[mode].reason"
-                      class="muted small">- {{ preflight.report.plans[mode].reason }}</span>
-              </span>
-            </div>
-            <!-- Time & filament estimate. Deliberately says "estimated",
-                 and shows the assumptions: the numbers are MODELLED from
-                 ace.cfg until print history calibrates them (plan 1.2). -->
-            <div v-if="preflight.report.plans[mode].estimate"
-                 class="estimate-card">
-              <div class="estimate-row">
-                <span class="estimate-big">{{ fmtDuration(preflight.report.plans[mode].estimate.total_s) }}</span>
-                <span class="estimate-delta"
-                      v-if="estimateDelta(preflight.report.plans[mode].estimate)">
-                  {{ estimateDelta(preflight.report.plans[mode].estimate) }}
-                </span>
-                <span class="pill estimate-conf"
-                      :class="'conf-' + preflight.report.plans[mode].estimate.confidence"
-                      :title="t('ui.preflight.est_confidence_hint')">
-                  {{ t('ui.preflight.est_conf_' + preflight.report.plans[mode].estimate.confidence) }}
-                </span>
-              </div>
-              <div class="estimate-row muted small">
-                {{ t('ui.preflight.est_filament', {
-                     m: preflight.report.plans[mode].estimate.totals.m,
-                     g: preflight.report.plans[mode].estimate.totals.g }) }}
-                <span v-if="preflight.report.plans[mode].estimate.purge.g">
-                  · {{ t('ui.preflight.est_waste', {
-                         g: preflight.report.plans[mode].estimate.purge.g,
-                         pct: wastePercent(preflight.report.plans[mode].estimate) }) }}
-                  <span v-if="!preflight.report.plans[mode].estimate.purge.counted_in_total">
-                    ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
-                </span>
-                · {{ t('ui.preflight.est_swaps', {
-                       inline: preflight.report.plans[mode].estimate.inline_swaps,
-                       bg: preflight.report.plans[mode].estimate.bg_swaps }) }}
-              </div>
-              <details v-if="preflight.report.plans[mode].estimate.per_color.length">
-                <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
-                <table class="estimate-per-color">
-                  <tr v-for="row in preflight.report.plans[mode].estimate.per_color"
-                      :key="'ec-mode-' + row.t">
-                    <td><span class="swatch"
-                              :style="{background: (preflight.report.slicer_colors.find(c => c.t === row.t) || {}).hex || '#444'}"></span>
-                        T{{ row.t }}</td>
-                    <td>{{ row.total_m }} m</td>
-                    <td>{{ row.print_g }} g</td>
-                    <td v-if="row.purge_g">+{{ row.purge_g }} g {{ t('ui.preflight.est_purge') }}</td>
-                  </tr>
-                </table>
-              </details>
-              <ul class="estimate-assumptions muted small">
-                <li v-for="(a, i) in preflight.report.plans[mode].estimate.assumptions"
-                    :key="'ea-mode-' + i">{{ a }}</li>
-              </ul>
-              <!-- Swim lane per head, one block per toolchange along the
-                   print. Inline swaps are a red stall block (the print is
-                   waiting); background swaps are hatched on the idle head
-                   (the print is not). That difference IS the plan. -->
-              <details v-if="(preflight.report.plans[mode].timeline || []).length">
-                <summary class="muted small">{{ t('ui.preflight.timeline') }}</summary>
-                <div class="swimlanes">
-                  <div v-for="lane in swimLanes(preflight.report.plans[mode])"
-                       :key="'sl-mode-' + lane.head" class="swimlane">
-                    <span class="swimlane-head">T{{ dispIdx(lane.head) }}</span>
-                    <span class="swimlane-track">
-                      <i v-for="(ev, i) in lane.events" :key="'sle-'+i"
-                         class="swim-block" :class="'swim-' + ev.kind"
-                         :style="{background: swapColor(ev)}"
-                         :title="swapTitle(ev)"></i>
-                    </span>
+                    <div class="cmap-dst-ro" v-else>
+                      <span class="hm-dd-chip"
+                            :style="{background: (row.dst && row.dst.color) || '#444'}"></span>
+                      <span>{{ (row.dst && row.dst.label) || t('ui.preflight.cmap_unassigned') }}</span>
+                    </div>
+                  </div>
+                  <div class="cmap-tier">
+                    {{ tierLabel(row.tier) }}
+                    <span v-if="row.changed"> · {{ t('ui.preflight.cmap_changed') }}</span>
                   </div>
                 </div>
-              </details>
-            </div>
-            <table class="preflight-mapping" v-if="preflight.report.plans[mode].mapping.length">
-              <thead>
-                <tr>
-                  <th>{{ t('ui.preflight.printer') }}</th>
-                  <th>T</th>
-                  <th>←</th>
-                  <th>{{ t('ui.preflight.slicer') }}</th>
-                  <th>{{ t('ui.preflight.match_tier') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="m in sortedMapping(preflight.report.plans[mode])" :key="'r-'+mode+'-'+m.t"
-                    :class="{warn: tierWarn(m.tier)}">
-                  <td v-if="m.slot">
-                    <template v-if="mode === 'slicer'">
-                      <select class="preflight-slot-select"
-                              :style="{background: (slicerEffectiveSlot(m.t) && slicerEffectiveSlot(m.t).color) || '#444',
-                                       color: textOn(slicerEffectiveSlot(m.t) && slicerEffectiveSlot(m.t).color)}"
-                              :value="slotKey(slicerEffectiveSlot(m.t))"
-                              @change="onSlicerSlotChange(m.t, $event.target.value)">
-                        <option v-for="opt in slicerSlotOptions(m.t)"
-                                :key="'opt-'+m.t+'-'+slotKey(opt)"
-                                :value="slotKey(opt)"
-                                :style="{background: opt.color || '#444', color: textOn(opt.color)}">
-                          ACE {{ dispIdx(opt.ace) }} Slot {{ dispIdx(opt.slot) }} · {{ opt.material || '?' }}
-                        </option>
-                        <option v-for="u in unsetSlotsForT(m.t)" disabled
-                                :key="'optu-'+m.t+'-'+u.ace+'-'+u.slot">
-                          ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }} · {{ t('ui.preflight.slot_not_set') }}
-                        </option>
-                      </select>
-                    </template>
-                    <template v-else>
-                      <span class="preflight-dot"
-                            :style="{background: m.slot.color || '#444'}"></span>
-                      ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
-                      <span class="muted small">· {{ m.slot.material || '?' }}</span>
-                    </template>
-                  </td>
-                  <td v-else class="muted">-</td>
-                  <td>T{{ dispIdx(m.t) }}</td>
-                  <td>←</td>
-                  <td>
-                    <span class="preflight-dot"
-                          :style="{background: preflight.report.slicer_colors.find(c => c.t === m.t)?.hex || '#444'}"></span>
-                    <span class="muted small">{{ preflight.report.slicer_colors.find(c => c.t === m.t)?.material || '?' }}</span>
-                  </td>
-                  <td class="small">{{ tierLabel(m.tier) }}</td>
-                </tr>
-              </tbody>
-            </table>
-            <div class="row" v-if="!preflight.report.missing_materials.length
-                                   && preflight.report.plans[mode].feasible">
-              <button v-if="mode !== 'slicer'"
-                      :disabled="preflight.sending !== '' || preflight.applying !== ''"
-                      @click="applyLoadout(mode)">
-                {{ preflight.applying === mode
-                     ? t('ui.preflight.applying')
-                     : t('ui.preflight.apply_loadout') }}
-              </button>
-              <button class="primary"
-                      :disabled="preflight.sending !== ''"
-                      @click="startPreflightPrint(mode)">
-                {{ preflight.sending === mode
-                     ? t('ui.preflight.sending')
-                     : t('ui.preflight.go_' + mode) }}
-              </button>
-              <!-- Offline (mock mode has no printer to print on) and for
-                   slicer-side workflows on a real one. -->
-              <button v-if="preflight.report.local"
-                      :disabled="preflight.sending !== ''"
-                      :title="t('ui.preflight.download_hint')"
-                      @click="downloadRewrittenGcode(mode)">
-                {{ preflight.sending === 'download'
-                     ? t('ui.preflight.sending')
-                     : t('ui.preflight.download') }}
-              </button>
-            </div>
-          </div>
-        </template>
-        </template>
-
-        <template v-else>
-          <h4>
-            {{ t('ui.preflight.head_mode_title') }}
-            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
-          </h4>
-
-          <h4>{{ t('ui.preflight.head_targets') }}</h4>
-          <div class="preflight-grid">
-            <div v-for="tg in preflight.report.targets" :key="'ht-'+tg.id"
-                 class="preflight-card">
-              <div class="preflight-swatch"
-                   :style="{background: tg.color || '#444'}"></div>
-              <div class="preflight-meta">
-                <div><strong>{{ headTargetLabel(tg) }}</strong></div>
-                <div class="small">{{ tg.name }}</div>
-                <div class="muted small">{{ tg.color || '?' }}</div>
               </div>
-            </div>
-          </div>
-          <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
-          <div class="preflight-grid">
-            <div v-for="c in slicerColorsInPrintOrder()" :key="'hsc-'+c.t"
-                 class="preflight-card">
-              <div class="preflight-swatch"
-                   :style="{background: c.hex || '#444'}"></div>
-              <div class="preflight-meta">
-                <div><strong>T{{ dispIdx(c.t) }}</strong></div>
-                <div class="muted small">{{ c.material || '?' }}</div>
-                <div class="small">{{ c.name }}</div>
-                <div class="muted small">{{ c.hex }}</div>
-              </div>
-            </div>
-          </div>
+            </template>
 
-          <template v-for="hp in ['loadout', 'optimize', 'layer', 'color']"
-                    :key="'hplan-'+hp">
-            <div v-if="preflight.report.plans[hp]" class="preflight-plan">
-              <div class="preflight-plan-head">
-                <h4>{{ t('ui.preflight.head_plan_' + hp) }}</h4>
-                <span v-if="headPlanFeasible(hp)" class="muted small">
-                  {{ headPlanSwaps(hp) }} {{ t('ui.preflight.swaps_label') }}
-                  <span v-if="headPlanBg(hp)">· {{ headPlanBgLabel(hp) }}</span>
-                  <span v-if="headPlanFlushG(hp) !== null">· {{ headPlanFlushG(hp) }} {{ t('ui.preflight.flush_g_label') }}</span>
-                </span>
-                <span v-else class="preflight-infeasible">
-                  {{ t('ui.preflight.not_feasible') }}
-                  <span v-if="preflight.report.plans[hp].reason"
-                        class="muted small">- {{ preflight.report.plans[hp].reason }}</span>
-                </span>
-              </div>
-
-              <table v-if="hp === 'loadout'" class="preflight-mapping">
-                <thead>
-                  <tr>
-                    <th>{{ t('ui.preflight.printer') }}</th>
-                    <th>←</th>
-                    <th>{{ t('ui.preflight.slicer') }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="c in preflight.report.slicer_colors" :key="'hm-'+c.t"
-                      :class="{warn: !headEffectiveTargetId(c.t)}">
-                    <td>
-                      <!-- Custom dropdown: uniform background for every
-                           target (ACE + feeder alike), the filament colour
-                           as a chip NEXT to the label - in the closed button
-                           AND in the open list (native options can't render
-                           a partial-colour chip; Dirk 2026-07-10). Items
-                           pick on mousedown so the button's blur-close
-                           cannot swallow the click. -->
-                      <div class="hm-dd">
-                        <button type="button" class="hm-dd-btn"
-                                @click="hmDdToggle(c.t)"
-                                @keydown.esc="hmDdClose()"
-                                @blur="hmDdClose()">
-                          <span class="hm-dd-chip"
-                                :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
-                          <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
-                                || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
-                          <span class="hm-dd-caret">▾</span>
-                        </button>
-                        <div class="hm-dd-list" v-if="hmDropOpen === c.t">
-                          <div class="hm-dd-item"
-                               @mousedown.prevent="hmDdPick(c.t, '')">
-                            <span class="hm-dd-chip" style="background:#444"></span>
-                            <span>— {{ t('ui.preflight.not_feasible') }} —</span>
-                          </div>
-                          <div class="hm-dd-item"
-                               v-for="tg in headTargetOptions(c.t)"
-                               :key="'hmo-'+c.t+'-'+tg.id"
-                               :class="{sel: tg.id === headEffectiveTargetId(c.t)}"
-                               @mousedown.prevent="hmDdPick(c.t, tg.id)">
-                            <span class="hm-dd-chip"
-                                  :style="{background: tg.color || '#444'}"></span>
-                            <span>{{ headTargetLabel(tg) }}</span>
-                          </div>
-                          <div class="hm-dd-item off"
-                               v-for="u in unsetSlotsForT(c.t)"
-                               :key="'hmu-'+c.t+'-'+u.ace+'-'+u.slot">
-                            <span class="hm-dd-chip" style="background:#444"></span>
-                            <span>ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
-                              &middot; {{ t('ui.preflight.slot_not_set') }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>←</td>
-                    <td>
-                      <span class="preflight-dot" :style="{background: c.hex || '#444'}"></span>
-                      T{{ dispIdx(c.t) }}
-                      <span class="muted small">· {{ c.material || '?' }}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-
-            <!-- Time & filament estimate. Deliberately says "estimated",
-                 and shows the assumptions: the numbers are MODELLED from
-                 ace.cfg until print history calibrates them (plan 1.2). -->
-            <div v-if="preflight.report.plans[hp].estimate"
-                 class="estimate-card">
-              <div class="estimate-row">
-                <span class="estimate-big">{{ fmtDuration(preflight.report.plans[hp].estimate.total_s) }}</span>
-                <span class="estimate-delta"
-                      v-if="estimateDelta(preflight.report.plans[hp].estimate)">
-                  {{ estimateDelta(preflight.report.plans[hp].estimate) }}
-                </span>
-                <span class="pill estimate-conf"
-                      :class="'conf-' + preflight.report.plans[hp].estimate.confidence"
-                      :title="t('ui.preflight.est_confidence_hint')">
-                  {{ t('ui.preflight.est_conf_' + preflight.report.plans[hp].estimate.confidence) }}
-                </span>
-              </div>
-              <div class="estimate-row muted small">
-                {{ t('ui.preflight.est_filament', {
-                     m: preflight.report.plans[hp].estimate.totals.m,
-                     g: preflight.report.plans[hp].estimate.totals.g }) }}
-                <span v-if="preflight.report.plans[hp].estimate.purge.g">
-                  · {{ t('ui.preflight.est_waste', {
-                         g: preflight.report.plans[hp].estimate.purge.g,
-                         pct: wastePercent(preflight.report.plans[hp].estimate) }) }}
-                  <span v-if="!preflight.report.plans[hp].estimate.purge.counted_in_total">
-                    ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
-                </span>
-                · {{ t('ui.preflight.est_swaps', {
-                       inline: preflight.report.plans[hp].estimate.inline_swaps,
-                       bg: preflight.report.plans[hp].estimate.bg_swaps }) }}
-              </div>
-              <details v-if="preflight.report.plans[hp].estimate.per_color.length">
-                <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
-                <table class="estimate-per-color">
-                  <tr v-for="row in preflight.report.plans[hp].estimate.per_color"
-                      :key="'ec-hp-' + row.t">
-                    <td><span class="swatch"
-                              :style="{background: (preflight.report.slicer_colors.find(c => c.t === row.t) || {}).hex || '#444'}"></span>
-                        T{{ row.t }}</td>
-                    <td>{{ row.total_m }} m</td>
-                    <td>{{ row.print_g }} g</td>
-                    <td v-if="row.purge_g">+{{ row.purge_g }} g {{ t('ui.preflight.est_purge') }}</td>
-                  </tr>
-                </table>
-              </details>
-              <ul class="estimate-assumptions muted small">
-                <li v-for="(a, i) in preflight.report.plans[hp].estimate.assumptions"
-                    :key="'ea-hp-' + i">{{ a }}</li>
+            <div v-if="preflight.report.missing_materials && preflight.report.missing_materials.length"
+                 class="preflight-warn">
+              <strong>{{ t('ui.preflight.missing_mat_title') }}</strong>
+              <p>{{ t('ui.preflight.missing_mat_msg') }}</p>
+              <ul>
+                <li v-for="m in preflight.report.missing_materials" :key="'mm-'+m">
+                  {{ m.toUpperCase() }}
+                  <span v-if="forcaHeadsForMaterial(m) && forcaHeadsForMaterial(m).length"
+                        class="muted small">
+                    &middot; {{ t('ui.preflight.head') }}
+                    {{ forcaHeadsForMaterial(m).map(h => dispIdx(h)).join(', ') }}
+                  </span>
+                </li>
               </ul>
-              <details v-if="(preflight.report.plans[hp].timeline || []).length">
-                <summary class="muted small">{{ t('ui.preflight.timeline') }}</summary>
-                <div class="swimlanes">
-                  <div v-for="lane in swimLanes(preflight.report.plans[hp])"
-                       :key="'sl-hp-' + lane.head" class="swimlane">
-                    <span class="swimlane-head">T{{ dispIdx(lane.head) }}</span>
-                    <span class="swimlane-track">
-                      <i v-for="(ev, i) in lane.events" :key="'sleh-'+i"
-                         class="swim-block" :class="'swim-' + ev.kind"
-                         :style="{background: swapColor(ev)}"
-                         :title="swapTitle(ev)"></i>
-                    </span>
+            </div>
+
+            <!-- Nothing is lost: the old two grids, unchanged, live here. -->
+            <div v-if="cmapDetails" class="cmap-details">
+              <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
+              <div class="preflight-grid">
+                <div v-for="s in preflight.report.live_slots"
+                     :key="'ls-' + s.ace + '-' + s.slot"
+                     class="preflight-card">
+                  <div class="preflight-swatch"
+                       :style="{background: s.color || '#444'}"></div>
+                  <div class="preflight-meta">
+                    <div><strong>ACE {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
+                    <div class="muted small">{{ s.material || '?' }}</div>
+                    <div class="small">{{ s.name }}</div>
+                    <div class="muted small">{{ s.color || '?' }}<br>RGB({{ rgbDec(s.color) }})</div>
                   </div>
                 </div>
+              </div>
+              <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
+              <div class="preflight-grid">
+                <div v-for="c in slicerColorsInPrintOrder()"
+                     :key="'sc-' + c.t"
+                     class="preflight-card">
+                  <div class="preflight-swatch"
+                       :style="{background: c.hex || '#444'}"></div>
+                  <div class="preflight-meta">
+                    <div><strong>T{{ dispIdx(c.t) }}</strong></div>
+                    <div class="muted small">{{ c.material || '?' }}</div>
+                    <div class="small">{{ c.name }}</div>
+                    <div class="muted small">{{ c.hex }}<br>RGB({{ rgbDec(c.hex) }})</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- LOADOUT STRATEGIES (redesign plan section 6): one tab strip +
+               one panel replaces three/four stacked plan blocks. Plan KEYS
+               are untouched - only how they are presented changes. -->
+          <div class="strat">
+            <h4>{{ t('ui.preflight.strat_title') }}</h4>
+            <div class="strat-tabs" role="tablist">
+              <button v-for="tab in strategyTabs()" :key="'st-'+tab.key"
+                      type="button" class="strat-tab" role="tab"
+                      :class="{sel: strategy === tab.key}"
+                      :aria-selected="strategy === tab.key"
+                      :disabled="!tab.feasible"
+                      :title="!tab.feasible ? t('ui.preflight.strat_infeasible_hint', {reason: tab.reason}) : ''"
+                      @click="strategy = tab.key">
+                <span class="strat-tab-label">{{ tab.label }}</span>
+                <span class="strat-chip" v-if="tab.swaps !== null && tab.swaps !== undefined">
+                  {{ tab.swaps }} {{ t('ui.preflight.swaps_label') }}
+                  <template v-if="tab.delta">
+                    · {{ tab.delta }} {{ t('ui.preflight.strat_delta_vs_loaded') }}
+                  </template>
+                </span>
+              </button>
+            </div>
+
+            <div class="strat-panel" v-if="strategy && strategy !== 'whatif' && selectedPlan()">
+              <!-- Time & filament estimate. Deliberately says "estimated",
+                   and shows the assumptions: the numbers are MODELLED from
+                   ace.cfg until print history calibrates them. -->
+              <div v-if="selectedPlan().estimate" class="estimate-card">
+                <div class="estimate-row">
+                  <span class="estimate-big">{{ fmtDuration(selectedPlan().estimate.total_s) }}</span>
+                  <span class="estimate-delta" v-if="estimateDelta(selectedPlan().estimate)">
+                    {{ estimateDelta(selectedPlan().estimate) }}
+                  </span>
+                  <span class="pill estimate-conf"
+                        :class="'conf-' + selectedPlan().estimate.confidence"
+                        :title="t('ui.preflight.est_confidence_hint')">
+                    {{ t('ui.preflight.est_conf_' + selectedPlan().estimate.confidence) }}
+                  </span>
+                </div>
+                <div class="estimate-row muted small">
+                  {{ t('ui.preflight.est_filament', {
+                       m: selectedPlan().estimate.totals.m,
+                       g: selectedPlan().estimate.totals.g }) }}
+                  <span v-if="selectedPlan().estimate.purge.g">
+                    · {{ t('ui.preflight.est_waste', {
+                           g: selectedPlan().estimate.purge.g,
+                           pct: wastePercent(selectedPlan().estimate) }) }}
+                    <span v-if="!selectedPlan().estimate.purge.counted_in_total">
+                      ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
+                  </span>
+                  · {{ t('ui.preflight.est_swaps', {
+                         inline: selectedPlan().estimate.inline_swaps,
+                         bg: selectedPlan().estimate.bg_swaps }) }}
+                  <span v-if="selectedPlan().estimate.totals.price_eur != null">
+                    · {{ t('ui.preflight.est_price', {
+                           price: selectedPlan().estimate.totals.price_eur.toFixed(2) }) }}
+                  </span>
+                </div>
+                <details v-if="selectedPlan().estimate.per_color.length">
+                  <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
+                  <table class="estimate-per-color">
+                    <tr v-for="row in selectedPlan().estimate.per_color"
+                        :key="'ec-strat-' + row.t">
+                      <td><span class="swatch"
+                                :style="{background: (preflight.report.slicer_colors.find(c => c.t === row.t) || {}).hex || '#444'}"></span>
+                          T{{ row.t }}</td>
+                      <td>{{ row.total_m }} m</td>
+                      <td>{{ row.print_g }} g</td>
+                      <td v-if="row.purge_g">+{{ row.purge_g }} g {{ t('ui.preflight.est_purge') }}</td>
+                      <td v-if="row.price_eur != null">≈ €{{ row.price_eur.toFixed(2) }}</td>
+                    </tr>
+                  </table>
+                </details>
+                <ul class="estimate-assumptions muted small">
+                  <li v-for="(a, i) in selectedPlan().estimate.assumptions"
+                      :key="'ea-strat-' + i">{{ a }}</li>
+                </ul>
+                <!-- Swim lane per head, one block per toolchange along the
+                     print. Inline swaps are a red stall block (the print is
+                     waiting); background swaps are hatched on the idle head
+                     (the print is not). -->
+                <details v-if="(selectedPlan().timeline || []).length">
+                  <summary class="muted small">{{ t('ui.preflight.timeline') }}</summary>
+                  <div class="swimlanes">
+                    <div v-for="lane in swimLanes(selectedPlan())"
+                         :key="'sl-strat-' + lane.head" class="swimlane">
+                      <span class="swimlane-head">T{{ dispIdx(lane.head) }}</span>
+                      <span class="swimlane-track">
+                        <i v-for="(ev, i) in lane.events" :key="'sles-'+i"
+                           class="swim-block" :class="'swim-' + ev.kind"
+                           :style="{background: swapColor(ev)}"
+                           :title="swapTitle(ev)"></i>
+                      </span>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- The physical instruction the mapping table only implied
+                   today: what the user actually has to move to reach this
+                   layout. -->
+              <div class="loadout-moves" v-if="loadoutMoves().length">
+                <b>{{ t('ui.preflight.moves_title') }}:</b>
+                <ul>
+                  <li v-for="mv in loadoutMoves()" :key="'mv-'+mv.ace+'-'+mv.slot">
+                    {{ t('ui.preflight.moves_row', {
+                          ace: dispIdx(mv.ace), slot: dispIdx(mv.slot),
+                          from: mv.from, to: mv.to }) }}
+                  </li>
+                </ul>
+              </div>
+
+              <details v-if="selectedPlan().mapping && selectedPlan().mapping.length">
+                <summary class="muted small">{{ t('ui.preflight.mapping_details') }}</summary>
+                <table class="preflight-mapping">
+                  <thead>
+                    <tr>
+                      <th>{{ t('ui.preflight.printer') }}</th>
+                      <th>←</th>
+                      <th>{{ t('ui.preflight.slicer') }}</th>
+                      <th>{{ t('ui.preflight.match_tier') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in colorMapRows" :key="'strm-'+row.t"
+                        :class="{warn: tierWarn(row.tier)}">
+                      <td v-if="row.dst">
+                        <span class="preflight-dot" :style="{background: row.dst.color || '#444'}"></span>
+                        {{ row.dst.label }}
+                      </td>
+                      <td v-else class="muted">-</td>
+                      <td>←</td>
+                      <td>
+                        <span class="preflight-dot" :style="{background: row.src.hex || '#444'}"></span>
+                        T{{ dispIdx(row.t) }}
+                        <span class="muted small">· {{ row.src.material || '?' }}</span>
+                      </td>
+                      <td class="small">{{ tierLabel(row.tier) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </details>
             </div>
-              <table v-else-if="preflight.report.plans[hp].mapping.length"
-                     class="preflight-mapping">
-                <thead>
-                  <tr>
-                    <th>{{ t('ui.preflight.printer') }}</th>
-                    <th>←</th>
-                    <th>{{ t('ui.preflight.slicer') }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="m in preflight.report.plans[hp].mapping"
-                      :key="'hpm-'+hp+'-'+m.t" :class="{warn: m.kind === 'none'}">
-                    <td v-if="m.kind !== 'none'">
-                      <span class="preflight-dot"
-                            :style="{background: headSlicerHex(m.t) || '#444'}"></span>
-                      {{ headProposalLabel(m) }}
-                    </td>
-                    <td v-else class="muted">-</td>
-                    <td>←</td>
-                    <td>
-                      <span class="preflight-dot"
-                            :style="{background: headSlicerHex(m.t) || '#444'}"></span>
-                      T{{ dispIdx(m.t) }}
-                      <span class="muted small">· {{ headSlicerMat(m.t) }}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
 
+            <!-- WHAT-IF (plan section 2.2 / redesign section 6.3): a
+                 read-only overlay - "would 2 ACEs beat 1?". It NEVER writes
+                 slot state and never reaches the rewrite; Print/Apply are
+                 hidden on this tab by the sticky bar below, enforced by the
+                 UI shape rather than by the user not scrolling somewhere. -->
+            <div class="strat-panel" v-else-if="strategy === 'whatif'">
               <div class="row">
-                <button v-if="hp !== 'loadout' && headPlanFeasible(hp)"
-                        :disabled="preflight.sending !== '' || preflight.applying !== ''"
-                        @click="applyLoadout('head', hp)">
-                  {{ preflight.applying === hp
-                       ? t('ui.preflight.applying')
-                       : t('ui.preflight.apply_loadout') }}
+                <label>
+                  <input type="checkbox" v-model="virtualLoadout.enabled">
+                  {{ t('ui.virtual.enable') }}
+                </label>
+                <button @click="virtualSeed(1)">{{ t('ui.virtual.seed_1') }}</button>
+                <button @click="virtualSeed(2)">{{ t('ui.virtual.seed_2') }}</button>
+                <button @click="virtualSeed(3)">{{ t('ui.virtual.seed_3') }}</button>
+                <button @click="virtualExport"
+                        :disabled="!virtualLoadout.slots.length">{{ t('ui.virtual.export') }}</button>
+              </div>
+              <p class="muted small">{{ t('ui.virtual.hint') }}</p>
+              <table class="virtual-table" v-if="virtualLoadout.slots.length">
+                <tr v-for="(row, i) in virtualLoadout.slots" :key="'vs-'+i">
+                  <td>ACE {{ dispIdx(row.ace) }} / {{ t('ui.virtual.slot') }} {{ dispIdx(row.slot) }}</td>
+                  <td><input v-model="row.material" class="virtual-mat"
+                             :placeholder="t('ui.virtual.material')"></td>
+                  <td><input type="color" v-model="row.color"></td>
+                </tr>
+              </table>
+              <p v-if="virtualLoadout.enabled && virtualLoadout.slots.length"
+                 class="warn small">
+                {{ t('ui.virtual.active_warning', {aces: virtualAceCount()}) }}
+              </p>
+              <div class="row">
+                <button class="primary" :disabled="preflight.busy"
+                        @click="whatifRerun">
+                  {{ t('ui.preflight.whatif_rerun') }}
                 </button>
-                <button class="primary"
-                        :disabled="preflight.sending !== ''
-                                   || !headPlanFeasible(hp)"
-                        @click="startPreflightPrint('head', hp)">
-                  {{ preflight.sending === hp
-                       ? t('ui.preflight.sending')
-                       : t('ui.preflight.head_go_' + hp) }}
-                </button>
-                <button v-if="preflight.report.local"
-                        :disabled="preflight.sending !== ''"
-                        :title="t('ui.preflight.download_hint')"
-                        @click="downloadRewrittenGcode('head', hp)">
-                  {{ preflight.sending === 'download'
-                       ? t('ui.preflight.sending')
-                       : t('ui.preflight.download') }}
-                </button>
+                <span class="muted small">{{ t('ui.preflight.whatif_no_print') }}</span>
               </div>
             </div>
-          </template>
+          </div>
         </template>
-      </template>
-      <!-- VIRTUAL LOADOUT (plan section 2.2): a what-if overlay - "would 2
-           ACEs beat 1?". It NEVER writes slot state and never reaches the
-           rewrite, which reads the live loadout and only the live loadout.
-           A plan computed against spools that are not in the machine is
-           labelled as such wherever it appears. -->
-      <details class="virtual-loadout">
-        <summary class="muted small">{{ t('ui.virtual.title') }}</summary>
-        <div class="row">
-          <label>
-            <input type="checkbox" v-model="virtualLoadout.enabled">
-            {{ t('ui.virtual.enable') }}
-          </label>
-          <button @click="virtualSeed(1)">{{ t('ui.virtual.seed_1') }}</button>
-          <button @click="virtualSeed(2)">{{ t('ui.virtual.seed_2') }}</button>
-          <button @click="virtualSeed(3)">{{ t('ui.virtual.seed_3') }}</button>
-          <button @click="virtualExport"
-                  :disabled="!virtualLoadout.slots.length">{{ t('ui.virtual.export') }}</button>
-        </div>
-        <p class="muted small">{{ t('ui.virtual.hint') }}</p>
-        <table class="virtual-table" v-if="virtualLoadout.slots.length">
-          <tr v-for="(row, i) in virtualLoadout.slots" :key="'vs-'+i">
-            <td>ACE {{ dispIdx(row.ace) }} / {{ t('ui.virtual.slot') }} {{ dispIdx(row.slot) }}</td>
-            <td><input v-model="row.material" class="virtual-mat"
-                       :placeholder="t('ui.virtual.material')"></td>
-            <td><input type="color" v-model="row.color"></td>
-          </tr>
-        </table>
-        <p v-if="virtualLoadout.enabled && virtualLoadout.slots.length"
-           class="warn small">
-          {{ t('ui.virtual.active_warning', {aces: virtualAceCount()}) }}
-        </p>
-      </details>
+      </div>
 
-      <!-- G-CODE PREVIEW (plan section 9): parsed and rendered entirely in
-           the browser, from the file already selected - no upload, no
-           Moonraker, no printer required. Colours by the SLICER's tool
-           index (the file's own colours), so it answers "does this file
-           look right at all", not "what will multiACE's plan actually
-           print" - the swim-lane timeline above answers that one. -->
-      <div class="row" v-if="preflight.report">
-        <button @click="gpreview.open ? closeGcodePreview() : openGcodePreview()"
-                :disabled="gpreview.busy">
-          {{ gpreview.busy ? t('ui.common.saving')
-             : (gpreview.open ? t('ui.gpreview.hide') : t('ui.gpreview.show')) }}
-        </button>
-        <span v-if="gpreview.busy" class="muted small">{{ gpreview.progress }}%</span>
-        <span v-if="gpreview.error" class="error small">{{ gpreview.error }}</span>
-      </div>
-      <div v-if="gpreview.open" class="gpreview-pane"
-           :class="{maximized: gpreview.maximized}">
-        <!-- The viewer proper. Orbit / pan / zoom live on the canvas
-             itself (pointer events, mouse and touch alike); the vertical
-             dual slider on the right is the layer RANGE. -->
-        <div class="gpreview-stage">
-          <canvas ref="gpreviewCanvasEl" class="gpreview-canvas"></canvas>
-          <div class="gpreview-layers">
-            <span class="gpreview-layer-label num">
-              {{ gpreview.layerLo + 1 }}–{{ gpreview.layerHi + 1 }}
-              / {{ gpreview.totalLayers }}
-            </span>
-            <div class="gpreview-layer-sliders">
-              <input type="range" class="gpreview-vrange" orient="vertical"
-                     :aria-label="t('ui.gpreview.layer_top')"
-                     min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
-                     :value="gpreview.layerHi"
-                     @input="gpreviewSetLayerHi($event.target.value)">
-              <input type="range" class="gpreview-vrange" orient="vertical"
-                     :aria-label="t('ui.gpreview.layer_bottom')"
-                     min="0" :max="Math.max(0, gpreview.totalLayers - 1)"
-                     :value="gpreview.layerLo"
-                     @input="gpreviewSetLayerLo($event.target.value)">
-            </div>
-          </div>
-          <div class="gpreview-presets">
-            <button @click="gpreviewPreset('iso')" :title="t('ui.gpreview.view_iso')">◨</button>
-            <button @click="gpreviewPreset('top')" :title="t('ui.gpreview.view_top')">▣</button>
-            <button @click="gpreviewPreset('front')" :title="t('ui.gpreview.view_front')">▤</button>
-            <button @click="gpreviewToggleMax"
-                    :title="gpreview.maximized ? t('ui.gpreview.restore') : t('ui.gpreview.maximize')">
-              {{ gpreview.maximized ? '⤡' : '⤢' }}
-            </button>
-          </div>
-        </div>
-        <!-- Sequential-move scrub within the top visible layer. -->
-        <div class="gpreview-controls">
-          <button @click="gpreviewTogglePlay">
-            {{ gpreview.playing ? t('ui.gpreview.pause') : t('ui.gpreview.play') }}
-          </button>
-          <input type="range" min="0" :max="gpreview.moveMax"
-                 v-model.number="gpreview.move" class="gpreview-slider"
-                 :aria-label="t('ui.gpreview.move')">
-          <span class="gpreview-layer-label num">
-            {{ t('ui.gpreview.move') }} {{ gpreview.move }} / {{ gpreview.moveMax }}
-          </span>
-          <select v-model="gpreview.viewType" class="gpreview-view">
-            <option value="filament">{{ t('ui.gpreview.view_filament') }}</option>
-            <option value="feature">{{ t('ui.gpreview.view_feature') }}</option>
-            <option value="speed">{{ t('ui.gpreview.view_speed') }}</option>
-            <option value="width">{{ t('ui.gpreview.view_width') }}</option>
-            <option value="height">{{ t('ui.gpreview.view_height') }}</option>
-          </select>
-          <select v-model="gpreview.lod" class="gpreview-view"
-                  :title="t('ui.gpreview.lod_hint')">
-            <option value="auto">{{ t('ui.gpreview.lod_auto') }} ({{ gpreviewLod }})</option>
-            <option value="ribbon">{{ t('ui.gpreview.lod_ribbon') }}</option>
-            <option value="solid">{{ t('ui.gpreview.lod_solid') }}</option>
-          </select>
-          <label class="gpreview-toggle">
-            <input type="checkbox" v-model="gpreview.showTravel">
-            {{ t('ui.gpreview.show_travel') }}
-          </label>
-          <label class="gpreview-toggle">
-            <input type="checkbox" v-model="gpreview.showToolchanges">
-            {{ t('ui.gpreview.show_toolchanges') }}
-          </label>
-          <label class="gpreview-toggle">
-            <input type="checkbox" v-model="gpreview.showPlate">
-            {{ t('ui.gpreview.show_plate') }}
-          </label>
-        </div>
-        <!-- LEGEND ROWS NAME THE HARDWARE. Not "Tool 2" but
-             "T2 · ACE 1 / slot 3 · PLA Silver" - the preview answers a
-             question the slicer cannot: which spool, in which bay, prints
-             this part. Hovering a row isolates that filament in the view. -->
-        <div class="gpreview-legend" v-if="gpreview.viewType === 'filament'">
-          <span v-for="row in gpreviewLegend" :key="'gpl-'+row.t"
-                class="gpreview-legend-item"
-                :class="{infeasible: !row.feasible, dim: gpreview.isolate !== null && gpreview.isolate !== row.t}"
-                @mouseenter="gpreviewIsolate(row.t)"
-                @mouseleave="gpreviewIsolate(null)"
-                :title="row.feasible ? '' : t('ui.gpreview.infeasible_hint')">
-            <i class="swatch" :style="{background: row.color}"></i>
-            {{ row.label }}
-            <b v-if="!row.feasible" class="gpreview-warn">!</b>
-          </span>
-        </div>
-        <div class="gpreview-legend" v-else-if="gpreview.viewType === 'feature'">
-          <span v-for="row in gpreviewFeatureLegend" :key="'gpf-'+row.r"
-                class="gpreview-legend-item">
-            <i class="swatch" :style="{background: row.color}"></i>{{ row.label }}
-          </span>
-        </div>
-        <div class="gpreview-legend" v-else>
-          <span class="gpreview-legend-item">
-            <i class="gpreview-ramp"></i>
-            {{ t('ui.gpreview.ramp_hint') }}
-          </span>
-        </div>
-        <p class="gpreview-note muted small">
-          <span class="num">{{ gpreview.segments }}</span>
-          {{ t('ui.gpreview.segments_shown') }}
-          <template v-if="gpreview.mode === '2d'">
-            · {{ t('ui.gpreview.no_webgl') }}
-          </template>
-          <template v-if="gpreview.decimated">
-            · <span class="gpreview-warn">{{ t('ui.gpreview.decimated', {
-                  dropped: gpreview.decimated.dropped }) }}</span>
-          </template>
-        </p>
-      </div>
-      <div class="row">
+      <div class="preflight-actions">
+        <label>
+          <input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}
+        </label>
+        <label>
+          <input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}
+        </label>
+        <span class="spacer"></span>
         <button @click="closePreflight"
                 :disabled="preflight.sending !== ''">{{ t('ui.common.cancel') }}</button>
+        <button v-if="preflight.report && canApplyLoadout()"
+                :disabled="preflight.applying !== '' || preflight.sending !== ''"
+                @click="applySelected">
+          {{ preflight.applying !== '' ? t('ui.preflight.applying') : t('ui.preflight.apply_loadout') }}
+        </button>
+        <button v-if="preflight.report && preflight.report.local && strategy !== 'whatif'"
+                :disabled="preflight.sending !== ''"
+                :title="t('ui.preflight.download_hint')"
+                @click="downloadSelected">
+          {{ preflight.sending === 'download' ? t('ui.preflight.sending') : t('ui.preflight.download') }}
+        </button>
+        <button class="primary" :disabled="!canPrint()" @click="printSelected">
+          {{ preflight.sending !== '' ? t('ui.preflight.sending') : t('ui.preflight.strat_print') }}
+        </button>
       </div>
     </div>
   </div>
