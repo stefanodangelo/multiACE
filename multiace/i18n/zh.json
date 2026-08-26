@@ -42,6 +42,8 @@
       "source_derived": "任务",
       "collapse": "收起",
       "expand": "展开",
+      "info_show": "显示说明",
+      "info_hide": "隐藏说明",
       "language": "语言"
     },
     "dashboard": {

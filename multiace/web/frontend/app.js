@@ -4684,10 +4684,38 @@ createApp({
     // keyed by the slicer-T; items pick on mousedown (fires before the
     // button's blur closes the list).
     const hmDropOpen = ref(null);
-    function hmDdToggle(tt) {
-      hmDropOpen.value = (hmDropOpen.value === tt) ? null : tt;
+    // .cmap-pair clips to a rounded card (overflow:hidden, for the colour
+    // swatches) - an absolutely-positioned popup inside it would be clipped
+    // to that tiny card instead of overlaying the page, cutting the option
+    // list down to a sliver (same class of bug .lang-dd-list already works
+    // around). Fixed positioning escapes the clip; the trade-off is we have
+    // to compute where "under the button" is ourselves.
+    const hmDropPos = reactive({top: 0, left: 0, width: 0});
+    function hmDdToggle(tt, evt) {
+      if (hmDropOpen.value === tt) { hmDropOpen.value = null; return; }
+      const btn = evt && evt.currentTarget;
+      if (btn) {
+        const r = btn.getBoundingClientRect();
+        hmDropPos.top = r.bottom + 2;
+        hmDropPos.left = r.left;
+        hmDropPos.width = r.width;
+      }
+      hmDropOpen.value = tt;
     }
     function hmDdClose() { hmDropOpen.value = null; }
+    // The popup is position:fixed, so it does not move with whatever
+    // scrolled (the cmap-strip's own horizontal scroll, or the page) -
+    // closing on any scroll is simpler and less surprising than re-tracking
+    // the anchor on every frame.
+    function _hmDdScrollClose() { if (hmDropOpen.value !== null) hmDdClose(); }
+    onMounted(() => {
+      window.addEventListener("scroll", _hmDdScrollClose, true);
+      window.addEventListener("resize", _hmDdScrollClose);
+    });
+    onUnmounted(() => {
+      window.removeEventListener("scroll", _hmDdScrollClose, true);
+      window.removeEventListener("resize", _hmDdScrollClose);
+    });
     function hmDdPick(tt, id) {
       hmDropOpen.value = null;
       onHeadTargetChange(tt, id);
@@ -6335,6 +6363,21 @@ createApp({
       secClosed[k] = !secClosed[k];
       localStorage.setItem("multiace.sections", JSON.stringify(secClosed));
     }
+    // Config hint boxes: same persisted-collapse pattern as the panels
+    // above, just inverted default - a setting's "what does this do"
+    // paragraph starts HIDDEN and opens on click of the (i) button next to
+    // its label, rather than starting open and collapsing.
+    const infoOpen = reactive((() => {
+      let stored = {};
+      try { stored = JSON.parse(localStorage.getItem("multiace.info") || "{}"); }
+      catch (_) { stored = {}; }
+      return stored || {};
+    })());
+    const infoShown = (k) => !!infoOpen[k];
+    function toggleInfo(k) {
+      infoOpen[k] = !infoOpen[k];
+      localStorage.setItem("multiace.info", JSON.stringify(infoOpen));
+    }
     // Collapsing the lanes panel tears the slot/toolhead elements out of
     // the DOM, so the overlay has to be recomputed on the way back in -
     // scheduleWiringRecompute already does nextTick + rAF, which is
@@ -7024,7 +7067,7 @@ createApp({
       slicerSwapsDisplay,
       headTargets, headTargetOptions, headEffectiveTargetId, headTargetLabel,
       headTargetColor, headTargetLabelById, onHeadTargetChange, headSwapsDisplay,
-      hmDropOpen, hmDdToggle, hmDdClose, hmDdPick,
+      hmDropOpen, hmDropPos, hmDdToggle, hmDdClose, hmDdPick,
       headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanFlushG, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
       cmapDetails, colorMapRows, cmapBands, cmapSummary, cmapEdited, cmapResetAuto, cmapPick,
@@ -7050,7 +7093,7 @@ createApp({
       fmtArgs, cmdLabel,
       uploading, uploadInput, triggerUpload, onUploadGcode,
       railCollapsed, toggleRail, railItems, railSegStyle,
-      secOpen, toggleSec, laneChips, appliedSnapshot,
+      secOpen, toggleSec, infoShown, toggleInfo, laneChips, appliedSnapshot,
       printCtl, printCtlLimits, printCtlDraft, printCtlBusy, printCtlError,
       printCtlSlide, printCtlRelease, printCtlReset, printCtlCancel,
       sendPrintControl,
