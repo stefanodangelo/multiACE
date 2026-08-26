@@ -12,6 +12,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 Known issues: 
 
 - starting the ACE 2 Pro dryer directly above 50 °C can trigger a ptc_error in the ACE firmware, which then needs a power cycle. This is a firmware limitation, not multiACE, but the automatic humidity control runs into it every time it restarts the heater at a stored higher target. The next version works around it with a soft ramp: start at 50 °C and raise to the configured target after a few minutes.
+- Per pair purge in WebUI stays unchecked. Just ACE_SET_PURGE MATRIX=1 in fluidd console enables it (still not visible in WebUI), will be fixed in next version. 
 
 
 
@@ -96,7 +97,7 @@ See it in action: https://youtu.be/9uLE1uydWmo
 ## 🌐 Web-Preflight
 - **Just upload unprocessed GCode via Multiace-Web**, print in actual loaded order or organize spools according to optimized layout to save swaps. Autoloads needed spools, no need to preload.
 
-### In-Print Color Swaps (layer / mid-layer)
+##  In-Print Color Swaps (layer / mid-layer)
 
 Color swaps during an active print can be triggered two ways:
 
@@ -105,6 +106,13 @@ Color swaps during an active print can be triggered two ways:
 
 Both paths use the same hardened load/unload logic as normal toolchanges. See [How to Do Toolswaps](#how-to-do-toolswaps) below for the exact command format and post-processing setup.
 
+## 📺 On-Printer Touchscreen (community, beta)
+
+
+multiACE's own surfaces are browser-based. If you'd rather drive it from the
+printer itself, [physicsG's HelixScreen fork](https://github.com/physicsG/helixscreen)
+adds multiACE support to [HelixScreen](https://github.com/prestonbrown/helixscreen),
+replacing the stock U1 touchscreen UI.
 
 
 ## Features

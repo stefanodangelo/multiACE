@@ -33,12 +33,11 @@
   --ok: #6f6;
   --danger: #b04040;
 
-  /* The shell's two fixed columns: the navigation rail on the left and
-     the webcam/console/print pane on the right. Every position:fixed
-     element offsets itself by these, and the responsive queries zero
-     them - see .rail / .side-pane / .cmd-queue-bar / .notif-strip. */
+  /* The shell's one fixed column: the navigation rail on the left.
+     Every position:fixed element offsets itself by this, and the
+     responsive queries zero it - see .rail / .cmd-queue-bar /
+     .notif-strip. */
   --rail-w: 168px;
-  --pane-w: 380px;
 
   /* Every MEASURED value on the page uses this stack with tabular
      numerals, so a temperature or a percentage does not jitter sideways
@@ -138,7 +137,6 @@ html.rail-tight .rail-brand-sub {
   position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
-.rail-lang.lang-select { width: 100%; }
 .upload-input { display: none; }
 .upload-btn {
   background: var(--card); color: var(--fg);
@@ -153,16 +151,59 @@ html.rail-tight .rail-brand-sub {
 .start-print-btn {
   font-size: 1rem; padding: .7rem 1.4rem; font-weight: 600;
 }
-.monitor-panel { display: flex; flex-direction: column; gap: 1rem; max-width: 900px; }
+.monitor-panel { display: flex; flex-direction: column; gap: 1rem; max-width: 1100px; }
+/* Camera and print control side by side - both are things you watch
+   WHILE a print runs, so neither should cost a click to reach. Wraps
+   below the camera on narrow viewports rather than squeezing both into
+   unusable columns. */
+.monitor-top { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
 .monitor-webcam { background: var(--ink-800); border: 1px solid var(--line);
-                  border-radius: 6px; overflow: hidden; }
+                  border-radius: 6px; overflow: hidden;
+                  flex: 1 1 420px; min-width: 280px; }
 .monitor-start { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
-.lang-select {
+/* Circular flag "coin": fixed square clipped to a circle, so an emoji
+   flag (roughly 4:3) crops to a coin instead of stretching, and an
+   unknown language's text-initials fallback (langFlagGlyph) still reads
+   as a badge instead of a bare two-letter string. */
+.lang-flag {
+  flex: 0 0 20px; width: 20px; height: 20px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  overflow: hidden; background: var(--border); color: var(--fg);
+  font-size: .8rem; font-weight: 700; line-height: 1;
+}
+.lang-flag svg { width: 100%; height: 100%; display: block; }
+/* Custom dropdown, not a <select>: same reasoning as the hm-dd chip
+   picker (an <option> can't carry the flag next to its label). Opens as
+   position:fixed rather than absolute so it escapes the rail's own
+   overflow-y:auto instead of being clipped by it, and stays anchored
+   just outside the rail at any width (expanded or collapsed). */
+.lang-dd { position: relative; width: 100%; }
+.lang-dd-btn {
+  display: flex; align-items: center; gap: .5rem; width: 100%;
   background: transparent; color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px;
-  padding: .3rem .5rem; font-size: .85rem; cursor: pointer;
+  padding: .3rem .5rem; font-size: .8rem; cursor: pointer; font-family: inherit;
 }
-.lang-select:hover { border-color: var(--accent); }
+.lang-dd-btn:hover, .lang-dd-btn:focus { border-color: var(--accent); outline: none; }
+.lang-dd-label { flex: 1 1 auto; min-width: 0; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.lang-dd-caret { flex: 0 0 auto; opacity: .6; font-size: .7rem; }
+.lang-dd-list {
+  position: fixed; z-index: 40; left: calc(var(--rail-w) + 8px); bottom: .6rem;
+  width: 200px; max-height: 260px; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.35);
+}
+.lang-dd-item { display: flex; align-items: center; gap: .5rem;
+                padding: .4rem .55rem; cursor: pointer; font-size: .8rem; white-space: nowrap; }
+.lang-dd-item:hover { background: rgba(255,255,255,.08); }
+.lang-dd-item.sel { background: rgba(255,255,255,.14); }
+html.rail-tight .lang-dd-label,
+html.rail-tight .lang-dd-caret {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+html.rail-tight .lang-dd-btn { justify-content: center; padding: .3rem 0; gap: 0; }
 .conn { font-size: .8rem; color: var(--muted); margin-left: .8rem; }
 .conn.ok { color: var(--ok); }
 .conn.warn { color: var(--warn); }
@@ -341,6 +382,16 @@ header h1 .hl { color: var(--accent); }
   color: var(--ok); border-color: var(--ok);
   animation: dry-pulse 1.6s ease-in-out infinite;
 }
+/* Not scoped to .ace-card h2: the same gear affordance opens the
+   per-toolhead feeder overrides on .toolhead-card h2 too. */
+.ace-overrides-btn {
+  background: transparent; color: var(--muted); border: 1px solid var(--border);
+  width: 1.7rem; height: 1.7rem; border-radius: 999px; cursor: pointer;
+  font-size: .85rem; line-height: 1; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ace-overrides-btn:hover  { color: var(--accent); border-color: var(--accent); }
+.ace-overrides-btn.active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
 @keyframes dry-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(80, 220, 100, 0); }
   50%      { box-shadow: 0 0 0 4px rgba(80, 220, 100, .25); }
@@ -519,7 +570,8 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .toolhead-card.op-unloading { animation: th-blink-unload 1s ease-in-out infinite; opacity: 1; }
 .toolhead-card h2 { margin: 0 0 .4rem 0; font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: .4rem; }
 .toolhead-card h2 small { color: #888; font-weight: 400; font-size: .7rem; }
-.toolhead-card .th-color { width: 14px; height: 14px; border-radius: 50%; margin-left: auto; border: 1px solid #444; }
+.toolhead-card .th-color { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #444; }
+.toolhead-card .th-actions { display: inline-flex; align-items: center; gap: .35rem; margin-left: auto; }
 .toolhead-card code { font-size: .75rem; color: #6cc; }
 .th-manual { display: flex; align-items: center; gap: .35rem; margin-top: .5rem; font-size: .78rem; color: #aaa; cursor: pointer; user-select: none; }
 .th-manual input { cursor: pointer; }
@@ -663,10 +715,6 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .checkbox-grid label { display: inline-flex; gap: .35rem; align-items: center; color: var(--fg); }
 .checkbox-grid code { color: var(--accent); font-size: .85rem; }
 .config-row label { font-size: .9rem; color: var(--muted); }
-/* Same reasoning as .config-form: inside a half-width panel a hard 2 columns
-   squeezes the cards, so pair them up only when the panel is wide enough. */
-.per-ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-                gap: .6rem; margin-bottom: 1rem; }
 /* Checkbox + caption as the row's CONTROL (second grid cell), so it lines up
    with the inputs above instead of reading as a second row label. */
 .config-inline-check { display: inline-flex; align-items: center; gap: .4rem; }
@@ -688,10 +736,6 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
               margin-right: .4rem; max-width: 14ch; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap;
               display: inline-block; vertical-align: middle; }
-.per-ace-card { background: var(--card); border: 1px solid var(--border);
-                border-radius: 6px; padding: .8rem; }
-.per-ace-card h4 { margin: 0 0 .55rem 0; color: var(--accent); font-size: .9rem;
-                   text-transform: uppercase; letter-spacing: .04em; }
 .per-ace-row { margin-bottom: .35rem; font-size: .85rem; color: var(--muted); }
 .per-ace-row label { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
 .per-ace-row input[type=number] {
@@ -776,7 +820,7 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
   .screen-popout { width: 240px; right: .5rem; bottom: 72px; }
 }
 .notif-strip {
-  position: fixed; left: calc(var(--rail-w) + var(--pane-w) + 1rem);
+  position: fixed; left: calc(var(--rail-w) + 1rem);
   right: 1rem; bottom: 8px;
   z-index: 55;
   background: var(--card); border: 1px solid var(--error);
@@ -827,7 +871,7 @@ canvas { background: #000; width: 100%; max-width: 1024px; height: auto;
 .notif-enter-from, .notif-leave-to { opacity: 0; transform: translateY(-4px); }
 .notif-enter-active, .notif-leave-active { transition: opacity .2s ease, transform .2s ease; }
 .cmd-queue-bar {
-  position: fixed; bottom: 0; left: calc(var(--rail-w) + var(--pane-w)); right: 0;
+  position: fixed; bottom: 0; left: var(--rail-w); right: 0;
   display: flex; align-items: center; gap: .5rem;
   padding: .5rem .8rem;
   background: var(--card);
@@ -1113,8 +1157,8 @@ body { padding-bottom: 64px; }
   .upload-btn { margin-left: auto; }
   .config-row { grid-template-columns: 1fr; }
   .config-page { columns: 1; }
-  /* .config-form / .per-ace-grid need no override here - auto-fit is already
-     down to one column at this width. The rows still have to stack. */
+  /* .config-form needs no override here - auto-fit is already down to
+     one column at this width. The rows still have to stack. */
   .config-form .config-row { grid-template-columns: 1fr; }
 }
 
@@ -1671,43 +1715,35 @@ body:has(.panel) .overlay .dialog {
 }
 
 /* ============================================================
-   UNIFIED DASHBOARD: console + print side pane
-   The pane sits directly right of the rail - the shell's chrome packs
-   to the left edge, and main content fills the rest of the width to
-   the right. Fixed, full height, its own scroll, and the body offset
-   by --rail-w + --pane-w so nothing ever slides under it. The point of
-   the pane is to watch the print while driving a swap, and a pane you
-   have to open first is one you look at after the fact.
-
-   The dashboard column keeps its own max-width, so widening the chrome
-   never squeezes the slot cards - which are the thing you came to look
-   at.
+   DASHBOARD: print control (beside the camera) + console (below)
+   Lives on the Dashboard tab only (tab==='monitor' - "Dashboard" is
+   that tab's label; the tab keyed 'dashboard' is the separate
+   "Loadout" page). Both are always on screen there, not behind a tab
+   switch: print control sits beside the camera because you watch both
+   while a print runs; the console goes full-width below it since long
+   lines and the command entry field want the room. Neither takes space
+   away from any other tab - the section (and everything in it) simply
+   is not in the DOM elsewhere.
    ============================================================ */
-.side-pane { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 20;
-             width: var(--pane-w);
-             display: flex; flex-direction: column;
-             background: var(--ink-800);
-             border-right: 1px solid var(--line);
-             /* The panes scroll inside themselves (.console-log,
-                .side-print); the pane itself never does. */
-             overflow: hidden; }
-.main-col { min-width: 0; }
-.side-tabs { display: flex; gap: .25rem; padding: .4rem;
-             background: var(--ink-700);
-             border-bottom: 1px solid var(--line); }
-.side-tabs button { flex: 1; font-size: .8rem; padding: .3rem .5rem; }
-.side-tabs button.active { background: var(--accent); color: var(--accent-fg);
-                           border-color: var(--accent); }
-.side-body { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.side-print { flex: 1 1 320px; min-width: 260px; max-width: 460px;
+              background: var(--ink-800);
+              border: 1px solid var(--line); border-radius: 6px;
+              padding: .6rem; }
+.side-print-head, .side-console-head { margin: 0 0 .5rem; font-size: .95rem; }
 .side-foot { display: flex; align-items: center; justify-content: space-between;
              gap: .5rem; padding: .35rem .5rem; border-top: 1px solid var(--border); }
 .webcam-img { width: 100%; display: block; background: #000; }
 .webcam-none { padding: 1rem; display: flex; flex-direction: column;
                gap: .4rem; align-items: flex-start; }
 .webcam-none p { margin: 0; }
-.console-log { flex: 1; overflow-y: auto; padding: .5rem;
+.side-console { display: flex; flex-direction: column; height: 300px;
+                background: var(--ink-800);
+                border: 1px solid var(--line); border-radius: 6px;
+                overflow: hidden; }
+.side-console-head { padding: .5rem .6rem 0; }
+.console-log { flex: 1; overflow-y: auto; padding: .5rem .6rem;
                font-family: ui-monospace, Menlo, Consolas, monospace;
-               font-size: .72rem; line-height: 1.35; min-height: 220px; }
+               font-size: .72rem; line-height: 1.35; min-height: 0; }
 .console-line { display: flex; gap: .5rem; white-space: pre-wrap;
                 word-break: break-word; }
 .console-ts { color: var(--muted); flex: 0 0 auto; }
@@ -1722,15 +1758,8 @@ body:has(.panel) .overlay .dialog {
                  border-top: 1px solid var(--border); }
 .console-entry input { flex: 1; min-width: 0;
                        font-family: ui-monospace, Menlo, Consolas, monospace; }
-/* Below the two-column threshold the pane stacks under the dashboard
-   instead of shrinking both into unusable strips. It is still always
-   visible - it is just below the content rather than beside it, which is
-   the only honest thing to do with 380px you do not have. */
-@media (max-width: 1100px) {
-  :root { --pane-w: 0px; }
-  .side-pane { position: static; width: auto; border-right: 0;
-               border-top: 1px solid var(--line); margin-top: 1rem; }
-  .console-log { max-height: 40vh; }
+@media (max-width: 700px) {
+  .side-console { height: 40vh; }
 }
 
 /* ============================================================
@@ -1801,15 +1830,16 @@ body:has(.panel) .overlay .dialog {
 /* Babystep is buttons, never a slider: a slider makes it trivially easy to
    send a large negative delta in one gesture, and that drives the nozzle
    into the plate. */
-.side-print { padding: .6rem; overflow-y: auto; }
 .pc-status { display: flex; gap: .4rem; align-items: center;
              flex-wrap: wrap; margin-bottom: .6rem; }
 .pc-row { display: flex; align-items: center; gap: .5rem; margin: .45rem 0; }
 .pc-row > span:first-child { min-width: 6.5rem; }
 .pc-row input[type=range] { flex: 1; min-width: 4rem; }
-.pc-row b { min-width: 4rem; text-align: right; font-variant-numeric: tabular-nums; }
+.pc-row b { min-width: 4rem; text-align: right; font-variant-numeric: tabular-nums;
+            white-space: nowrap; }
 .pc-reset { font-size: .75rem; padding: .1rem .4rem; }
 .pc-temp-in { width: 4.5rem; }
+.pc-baby { flex-wrap: wrap; row-gap: .3rem; }
 .pc-baby button { min-width: 3.2rem; }
 .pc-actions { gap: .4rem; flex-wrap: wrap; }
 .pc-actions button { flex: 1; }
@@ -1984,7 +2014,7 @@ body:has(.panel) .overlay .dialog {
    ============================================================ */
 html.rail-tight { --rail-w: 56px; }
 .shell-body {
-  margin-left: calc(var(--rail-w) + var(--pane-w)); margin-right: 0;
+  margin-left: var(--rail-w); margin-right: 0;
   transition: margin-left .15s ease;
 }
 .rail {

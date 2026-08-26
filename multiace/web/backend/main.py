@@ -119,6 +119,10 @@ MOCK_DATA_DIR = os.environ.get(
     "MULTIACE_MOCK_DIR",
     str(Path(__file__).resolve().parents[3] / "tests" / "fixtures"),
 )
+#: Which fixture under MOCK_DATA_DIR to serve as /api/state. Swap to
+#: mock_state_head.json to develop against a head-mode printer instead of
+#: the default multi-ACE one - see scripts/run-dev-ui.*.
+MOCK_STATE_FILE = os.environ.get("MULTIACE_MOCK_STATE_FILE", "mock_state.json")
 MULTIACE_CFG_PATH = os.environ.get(
     "MULTIACE_CFG_PATH",
     "/home/lava/printer_data/config/extended/ace.cfg",
@@ -1225,7 +1229,7 @@ async def _preflight_loadout(request: Request | None):
     printer, and in mock mode there isn't one.
     """
     if _mock_enabled(request):
-        mock = _mock_load("mock_state.json") or {}
+        mock = _mock_load(MOCK_STATE_FILE) or {}
         return (_live_slots_from_state(mock),
                 await _head_ctx_from_state(mock), True)
     if await _any_head_manual():
@@ -1319,7 +1323,7 @@ async def preflight(request: Request, file: UploadFile = File(...),
                             detail="no slots are loaded on the printer")
 
     if mocked:
-        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+        spool_prices = _spool_prices_from_state(_mock_load(MOCK_STATE_FILE) or {})
     else:
         spool_prices = _spool_prices_from_state(
             _parse_state(await _query_state_gated()))
@@ -1624,7 +1628,7 @@ async def preflight_livedata(request: Request) -> dict:
     mock_state.json, so the whole planner works on a laptop (§2)."""
     live_slots, head_ctx, mocked = await _preflight_loadout(request)
     if mocked:
-        spool_prices = _spool_prices_from_state(_mock_load("mock_state.json") or {})
+        spool_prices = _spool_prices_from_state(_mock_load(MOCK_STATE_FILE) or {})
     else:
         spool_prices = _spool_prices_from_state(
             _parse_state(await _query_state_gated()))
@@ -2394,7 +2398,7 @@ async def upload_and_print(file: UploadFile = File(...)) -> dict:
 async def get_state(request: Request) -> dict:
     """Aggregated dashboard state (ACEs + toolheads + dryer + status)."""
     if _mock_enabled(request):
-        mock = dict(_mock_load("mock_state.json") or {})
+        mock = dict(_mock_load(MOCK_STATE_FILE) or {})
         mock["mock"] = True
         mock["retry_state"] = _read_retry_state()
         return mock
@@ -5150,7 +5154,7 @@ async def ws(websocket: WebSocket) -> None:
 
                 try:
                     if MOCK_MODE:
-                        payload = dict(_mock_load("mock_state.json") or {})
+                        payload = dict(_mock_load(MOCK_STATE_FILE) or {})
                         payload["mock"] = True
                     else:
                         payload = _parse_state(await _query_state())

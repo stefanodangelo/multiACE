@@ -274,10 +274,25 @@
         </button>
       </nav>
       <div class="rail-foot">
-        <select class="lang-select rail-lang" :value="language" @change="setLanguage($event.target.value)"
-                :title="t('ui.common.language')">
-          <option v-for="l in languages" :key="l.code" :value="l.code">{{ l.name }}</option>
-        </select>
+        <div class="lang-dd rail-lang">
+          <button type="button" class="lang-dd-btn"
+                  @click="langMenuOpen = !langMenuOpen"
+                  @keydown.esc="langMenuOpen = false"
+                  @blur="langMenuOpen = false"
+                  :title="t('ui.common.language')">
+            <span class="lang-flag" v-html="langFlagInner(language)"></span>
+            <span class="lang-dd-label">{{ langName(language) }}</span>
+            <span class="lang-dd-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="lang-dd-list" v-if="langMenuOpen">
+            <div class="lang-dd-item" v-for="l in languages" :key="l.code"
+                 :class="{sel: l.code === language}"
+                 @mousedown.prevent="langPick(l.code)">
+              <span class="lang-flag" v-html="langFlagInner(l.code)"></span>
+              <span>{{ l.name }}</span>
+            </div>
+          </div>
+        </div>
         <!-- Colour alone must not carry connection state, so the dot is
              always accompanied by its text - visually hidden, never
              removed, when the rail is collapsed. -->
@@ -340,20 +355,147 @@
          and driving a swap are not fighting for the same screen. -->
     <section v-show="tab==='monitor'" class="monitor-panel">
       <h2>{{ t('ui.tabs.monitor') }}</h2>
-      <div class="monitor-webcam side-webcam">
-        <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
-             :alt="webcam.name || t('ui.sidebar.webcam')">
-        <div v-else class="webcam-none">
-          <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
-                              : t('ui.sidebar.webcam_loading') }}</p>
-          <p class="muted small" v-if="webcam.reason">{{ webcam.reason }}</p>
-          <p class="muted small">{{ t('ui.sidebar.webcam_hint') }}</p>
-          <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
+      <!-- Camera + live print control side by side: both are things you
+           watch WHILE a print runs, so neither should be a click away
+           behind a tab. Console (below, full width) is read less often
+           and wants the horizontal room for long lines. -->
+      <div class="monitor-top">
+        <div class="monitor-webcam side-webcam">
+          <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
+               :alt="webcam.name || t('ui.sidebar.webcam')">
+          <div v-else class="webcam-none">
+            <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
+                                : t('ui.sidebar.webcam_loading') }}</p>
+            <p class="muted small" v-if="webcam.reason">{{ webcam.reason }}</p>
+            <p class="muted small">{{ t('ui.sidebar.webcam_hint') }}</p>
+            <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
+          </div>
+          <div class="side-foot" v-if="webcam.available">
+            <span class="muted small">{{ webcam.name }}</span>
+            <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+          </div>
         </div>
-        <div class="side-foot" v-if="webcam.available">
-          <span class="muted small">{{ webcam.name }}</span>
-          <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+        <!-- Live print control. Every value here is read BACK from the
+             printer, so a change made on the physical display shows up
+             immediately. -->
+        <div class="side-print">
+          <h3 class="side-print-head">{{ t('ui.sidebar.print') }}</h3>
+          <p v-if="printCtlError" class="error small">{{ printCtlError }}</p>
+          <div class="pc-status">
+            <span class="pill">{{ printCtl.state || '–' }}</span>
+            <span v-if="printCtl.progress" class="pill">{{ printCtl.progress }} %</span>
+            <span v-if="printCtl.message" class="muted small">{{ printCtl.message }}</span>
+          </div>
+
+          <label class="pc-row">
+            <span>{{ t('ui.print_control.speed') }}</span>
+            <input type="range" :min="printCtlLimits.ranges.speed.min"
+                   :max="printCtlLimits.ranges.speed.max" step="5"
+                   v-model.number="printCtlDraft.speed"
+                   @input="printCtlSlide('speed', printCtlDraft.speed)"
+                   @change="printCtlRelease('speed', printCtlDraft.speed)">
+            <b>{{ printCtl.speed_factor }} %</b>
+            <button class="pc-reset" @click="printCtlReset('speed')"
+                    :title="t('ui.print_control.reset_hint')">100 %</button>
+          </label>
+
+          <label class="pc-row">
+            <span>{{ t('ui.print_control.flow') }}</span>
+            <input type="range" :min="printCtlLimits.ranges.flow.min"
+                   :max="printCtlLimits.ranges.flow.max" step="1"
+                   v-model.number="printCtlDraft.flow"
+                   @input="printCtlSlide('flow', printCtlDraft.flow)"
+                   @change="printCtlRelease('flow', printCtlDraft.flow)">
+            <b>{{ printCtl.extrude_factor }} %</b>
+            <button class="pc-reset" @click="printCtlReset('flow')"
+                    :title="t('ui.print_control.reset_hint')">100 %</button>
+          </label>
+
+          <label class="pc-row">
+            <span>{{ t('ui.print_control.fan') }}</span>
+            <input type="range" min="0" max="100" step="5"
+                   v-model.number="printCtlDraft.fan"
+                   @input="printCtlSlide('fan', printCtlDraft.fan)"
+                   @change="printCtlRelease('fan', printCtlDraft.fan)">
+            <b>{{ printCtl.fan }} %</b>
+            <button class="pc-reset" @click="printCtlReset('fan')">0 %</button>
+          </label>
+
+          <div class="pc-row pc-temps">
+            <span>{{ t('ui.print_control.nozzle') }}</span>
+            <b>{{ printCtl.nozzle.temp !== null ? Math.round(printCtl.nozzle.temp) : '–' }}
+               / {{ printCtl.nozzle.target !== null ? Math.round(printCtl.nozzle.target) : '–' }} °C</b>
+            <input type="number" class="pc-temp-in"
+                   :min="printCtlLimits.nozzle.min" :max="printCtlLimits.nozzle.max"
+                   :placeholder="printCtlLimits.nozzle.max"
+                   @change="sendPrintControl('nozzle', Number($event.target.value))">
+          </div>
+          <div class="pc-row pc-temps">
+            <span>{{ t('ui.print_control.bed') }}</span>
+            <b>{{ printCtl.bed.temp !== null ? Math.round(printCtl.bed.temp) : '–' }}
+               / {{ printCtl.bed.target !== null ? Math.round(printCtl.bed.target) : '–' }} °C</b>
+            <input type="number" class="pc-temp-in"
+                   :min="printCtlLimits.bed.min" :max="printCtlLimits.bed.max"
+                   :placeholder="printCtlLimits.bed.max"
+                   @change="sendPrintControl('bed', Number($event.target.value))">
+          </div>
+
+          <!-- Babystep is BUTTONS, never a slider: a slider makes it trivial
+               to send a large negative delta in one gesture, and that drives
+               the nozzle into the plate. -->
+          <div class="pc-row pc-baby">
+            <span>{{ t('ui.print_control.babystep') }}</span>
+            <button @click="sendPrintControl('babystep', -0.05)">−0.05</button>
+            <button @click="sendPrintControl('babystep', -0.01)">−0.01</button>
+            <b>{{ printCtl.z_offset.toFixed(3) }} mm</b>
+            <button @click="sendPrintControl('babystep', 0.01)">+0.01</button>
+            <button @click="sendPrintControl('babystep', 0.05)">+0.05</button>
+          </div>
+          <p class="muted small">
+            {{ t('ui.print_control.babystep_used', {
+                 used: printCtlLimits.babystep.used,
+                 max: printCtlLimits.babystep.total }) }}
+          </p>
+
+          <div class="pc-row pc-actions">
+            <button @click="sendPrintControl('pause')"
+                    :disabled="printCtlBusy !== ''">{{ t('ui.print_control.pause') }}</button>
+            <button @click="sendPrintControl('resume')"
+                    :disabled="printCtlBusy !== ''">{{ t('ui.print_control.resume') }}</button>
+            <button class="warn" @click="printCtlCancel"
+                    :disabled="printCtlBusy !== ''">{{ t('ui.print_control.cancel') }}</button>
+          </div>
+          <!-- The controls Fluidd cannot offer, which is why this pane exists
+               here rather than as a link out. -->
+          <div class="pc-row pc-actions" v-if="retryState">
+            <button @click="retryControl('now')">{{ t('ui.retry.now') }}</button>
+            <button class="warn" @click="retryControl('cancel')">{{ t('ui.retry.stop') }}</button>
+          </div>
         </div>
+      </div>
+      <div class="side-console">
+        <h3 class="side-console-head">{{ t('ui.sidebar.console') }}</h3>
+        <div ref="consoleEl" class="console-log">
+          <div v-for="(ln, i) in consoleLines" :key="ln.id != null ? ln.id : 'x'+i"
+               class="console-line" :class="'console-' + ln.kind">
+            <span class="console-ts">{{ consoleTime(ln.ts) }}</span>
+            <span class="console-msg">{{ ln.msg }}</span>
+          </div>
+          <p v-if="!consoleLines.length" class="muted small">
+            {{ t('ui.sidebar.console_empty') }}</p>
+        </div>
+        <div class="console-controls">
+          <label class="console-follow">
+            <input type="checkbox" v-model="consoleFollow">
+            {{ t('ui.sidebar.console_follow') }}
+          </label>
+          <button @click="loadConsole">{{ t('ui.common.reload') }}</button>
+        </div>
+        <form class="console-entry" @submit.prevent="sendConsole">
+          <input v-model="consoleInput" spellcheck="false"
+                 :placeholder="t('ui.sidebar.console_placeholder')">
+          <button type="submit" :disabled="consoleBusy || !consoleInput.trim()">⏎</button>
+        </form>
       </div>
       <div class="monitor-start">
         <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
@@ -446,6 +588,11 @@
                         :class="{active: dryPanelOpen(ace.idx), running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
+                <button class="ace-overrides-btn"
+                        v-if="configForm.perAce[ace.idx]"
+                        :class="{active: overridesPanelOpen(ace.idx)}"
+                        @click="toggleOverridesPanel(ace.idx)"
+                        :title="t('ui.config.per_ace')">⚙</button>
                 <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)"
                         :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load_all') }}</button>
               </span>
@@ -578,6 +725,78 @@
                 </div>
               </div>
             </transition>
+            <transition name="dry-fade">
+              <div v-if="overridesPanelOpen(ace.idx) && configForm.perAce[ace.idx]"
+                   class="dry-panel override-panel" @click.stop>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.dryer_temp_override') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_temp"
+                           min="0" max="80" step="1" placeholder="-"> °C
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.dryer_duration_override') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_duration"
+                           min="0" max="600" step="5" placeholder="-"> min
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.feed_speed') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].feed_speed"
+                           min="1" max="500" step="1" placeholder="-"> mm/s
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.retract_speed') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_speed"
+                           min="1" max="500" step="1" placeholder="-"> mm/s
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.load_length') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].load_length"
+                           min="0" max="5000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.retract_length') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_length"
+                           min="0" max="5000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.swap_retract_length') }}
+                    <input type="number" v-model.number="configForm.perAce[ace.idx].swap_retract_length"
+                           min="0" max="2000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <details class="per-slot-block">
+                  <summary>{{ t('ui.config.per_slot_overrides') }}</summary>
+                  <table class="per-slot-table">
+                    <thead>
+                      <tr>
+                        <th>Slot</th>
+                        <th>{{ t('ui.config.load_length') }}</th>
+                        <th>{{ t('ui.config.retract_length') }}</th>
+                        <th>{{ t('ui.config.swap_retract_length') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="s in 4" :key="s-1">
+                        <td>{{ dispIdx(s-1) }}</td>
+                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].load_length"
+                                   min="0" max="5000" step="10" placeholder="-"></td>
+                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].retract_length"
+                                   min="0" max="5000" step="10" placeholder="-"></td>
+                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].swap_retract_length"
+                                   min="0" max="2000" step="10" placeholder="-"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </details>
+                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
+              </div>
+            </transition>
           </article>
         </div>
         <h3 class="th-section-head">
@@ -592,13 +811,20 @@
                    :class="{empty: !t_.module_exist, present: t_.head_source_known && !t_.load_failed, 'load-failed': t_.load_failed, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
-              <!-- Feeder AND manual heads carry the big feeder-tile instead
-                   of this dot (same colour twice reads as two facts). The
-                   tile sits HERE in the title row, top right where the dot
-                   lived (Dirk: "sollte natuerlich auch oben rechts sein"). -->
-              <span class="th-color"
-                    v-if="t_.color && !t_.feeder && !t_.manual && t_.head_source_known && !toolheadOps[t_.idx]"
-                    :style="{background: t_.color}"></span>
+              <span class="th-actions" @click.stop>
+                <!-- Feeder AND manual heads carry the big feeder-tile instead
+                     of this dot (same colour twice reads as two facts). The
+                     tile sits HERE in the title row, top right where the dot
+                     lived (Dirk: "sollte natuerlich auch oben rechts sein"). -->
+                <span class="th-color"
+                      v-if="t_.color && !t_.feeder && !t_.manual && t_.head_source_known && !toolheadOps[t_.idx]"
+                      :style="{background: t_.color}"></span>
+                <button class="ace-overrides-btn"
+                        v-if="configForm.perFeeder[t_.idx]"
+                        :class="{active: feederOverridesPanelOpen(t_.idx)}"
+                        @click="toggleFeederOverridesPanel(t_.idx)"
+                        :title="t('ui.config.per_feeder')">⚙</button>
+              </span>
             </h2>
             <!-- The tile is a SIBLING of the title, not inside it: in the h2
                  it made the title row 5rem tall, so "T3" centred downward
@@ -707,6 +933,30 @@
                 <span>{{ t('ui.dashboard.bg') }}</span>
               </label>
             </div>
+            <transition name="dry-fade">
+              <div v-if="feederOverridesPanelOpen(t_.idx) && configForm.perFeeder[t_.idx]"
+                   class="dry-panel override-panel" @click.stop>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.feeder_load_length') }}
+                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].load_length"
+                           min="0" max="5000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.feeder_retract_length') }}
+                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].retract_length"
+                           min="0" max="2000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <div class="per-ace-row">
+                  <label>{{ t('ui.config.feeder_swap_retract_length') }}
+                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].swap_retract_length"
+                           min="0" max="2000" step="10" placeholder="-"> mm
+                  </label>
+                </div>
+                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
+              </div>
+            </transition>
           </article>
         </div>
       </div>
@@ -1279,6 +1529,23 @@
           <input type="number" v-model.number="configForm.swap_purge_length"
                  min="0" max="200" step="1" placeholder="0">
         </div>
+        <div class="config-sep"></div>
+        <div class="config-row">
+          <label>{{ t('ui.config.feeder_load_length') }}</label>
+          <input type="number" v-model.number="configForm.feeder_load_length"
+                 min="0" max="5000" step="10" placeholder="1100">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.feeder_retract_length') }}</label>
+          <input type="number" v-model.number="configForm.feeder_retract_length"
+                 min="0" max="2000" step="10" placeholder="-">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.feeder_swap_retract_length') }}</label>
+          <input type="number" v-model.number="configForm.feeder_swap_retract_length"
+                 min="0" max="2000" step="10" placeholder="150">
+        </div>
+        <p class="muted small config-row-hint">{{ t('ui.config.feeder_retract_length_hint') }}</p>
         <!-- Live like the spoolman/confirm toggles (write-through setter,
              no Save/restart): off makes the engine ignore the preflight's
              per-pair purge stamps, also on already-processed files. -->
@@ -1427,92 +1694,6 @@
           <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
         </div>
       </details>
-        </div>
-      </div>
-      <div class="pnl">
-        <h3 class="pnl-head">
-          <button class="pnl-toggle" :aria-expanded="secOpen('cfg.perace')"
-                  @click="toggleSec('cfg.perace')"
-                  :title="secOpen('cfg.perace') ? t('ui.common.collapse') : t('ui.common.expand')">
-            <span class="pnl-caret" aria-hidden="true">▾</span>
-            <span class="pnl-title">{{ t('ui.config.per_ace') }}</span>
-          </button>
-          <span class="pnl-summary" v-if="!secOpen('cfg.perace')">
-            <span class="pnl-sum-text num">{{ configForm.ace_device_count }}×</span>
-          </span>
-        </h3>
-        <div class="pnl-body" v-if="secOpen('cfg.perace')">
-      <div class="per-ace-grid">
-        <div class="per-ace-card" v-for="i in configForm.ace_device_count" :key="i-1">
-          <h4>ACE {{ dispIdx(i-1) }}</h4>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.dryer_temp_override') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].dryer_temp"
-                     min="0" max="80" step="1" placeholder="-"> °C
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.dryer_duration_override') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].dryer_duration"
-                     min="0" max="600" step="5" placeholder="-"> min
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.feed_speed') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].feed_speed"
-                     min="1" max="500" step="1" placeholder="-"> mm/s
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.retract_speed') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].retract_speed"
-                     min="1" max="500" step="1" placeholder="-"> mm/s
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.load_length') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].load_length"
-                     min="0" max="5000" step="10" placeholder="-"> mm
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.retract_length') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].retract_length"
-                     min="0" max="5000" step="10" placeholder="-"> mm
-            </label>
-          </div>
-          <div class="per-ace-row">
-            <label>{{ t('ui.config.swap_retract_length') }}
-              <input type="number" v-model.number="configForm.perAce[i-1].swap_retract_length"
-                     min="0" max="2000" step="10" placeholder="-"> mm
-            </label>
-          </div>
-          <details class="per-slot-block">
-            <summary>{{ t('ui.config.per_slot_overrides') }}</summary>
-            <table class="per-slot-table">
-              <thead>
-                <tr>
-                  <th>Slot</th>
-                  <th>{{ t('ui.config.load_length') }}</th>
-                  <th>{{ t('ui.config.retract_length') }}</th>
-                  <th>{{ t('ui.config.swap_retract_length') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="s in 4" :key="s-1">
-                  <td>{{ dispIdx(s-1) }}</td>
-                  <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].load_length"
-                             min="0" max="5000" step="10" placeholder="-"></td>
-                  <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].retract_length"
-                             min="0" max="5000" step="10" placeholder="-"></td>
-                  <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].swap_retract_length"
-                             min="0" max="2000" step="10" placeholder="-"></td>
-                </tr>
-              </tbody>
-            </table>
-          </details>
-        </div>
-      </div>
         </div>
       </div>
       <div class="pnl">
@@ -1762,142 +1943,6 @@ reboot</pre>
               class="plugin-iframe"></iframe>
     </section>
    </div>
-   <!-- Side pane: webcam, console and print control. Permanently the
-        right-hand column of the shell, mirroring the rail on the left -
-        the whole point is to watch the print while driving a swap, and a
-        pane you have to open first is one you look at after the fact.
-        Still only ONE of the three is mounted at a time: an MJPEG stream
-        nobody is looking at still costs the printer a connection, and a
-        console feed nobody is reading still costs a websocket
-        subscription. -->
-   <aside class="side-pane">
-     <div class="side-tabs">
-       <button :class="{active: sidebar.pane==='console'}"
-               @click="setSidebarPane('console')">{{ t('ui.sidebar.console') }}</button>
-       <button :class="{active: sidebar.pane==='print'}"
-               @click="setSidebarPane('print')">{{ t('ui.sidebar.print') }}</button>
-     </div>
-     <!-- Live print control. A pane rather than a tab: while a print runs
-          you want it one click from the dashboard, not on another page.
-          Every value here is read BACK from the printer, so a change made
-          on the physical display shows up immediately. -->
-     <div v-show="sidebar.pane==='print'" class="side-body side-print">
-       <p v-if="printCtlError" class="error small">{{ printCtlError }}</p>
-       <div class="pc-status">
-         <span class="pill">{{ printCtl.state || '–' }}</span>
-         <span v-if="printCtl.progress" class="pill">{{ printCtl.progress }} %</span>
-         <span v-if="printCtl.message" class="muted small">{{ printCtl.message }}</span>
-       </div>
-
-       <label class="pc-row">
-         <span>{{ t('ui.print_control.speed') }}</span>
-         <input type="range" :min="printCtlLimits.ranges.speed.min"
-                :max="printCtlLimits.ranges.speed.max" step="5"
-                v-model.number="printCtlDraft.speed"
-                @input="printCtlSlide('speed', printCtlDraft.speed)"
-                @change="printCtlRelease('speed', printCtlDraft.speed)">
-         <b>{{ printCtl.speed_factor }} %</b>
-         <button class="pc-reset" @click="printCtlReset('speed')"
-                 :title="t('ui.print_control.reset_hint')">100 %</button>
-       </label>
-
-       <label class="pc-row">
-         <span>{{ t('ui.print_control.flow') }}</span>
-         <input type="range" :min="printCtlLimits.ranges.flow.min"
-                :max="printCtlLimits.ranges.flow.max" step="1"
-                v-model.number="printCtlDraft.flow"
-                @input="printCtlSlide('flow', printCtlDraft.flow)"
-                @change="printCtlRelease('flow', printCtlDraft.flow)">
-         <b>{{ printCtl.extrude_factor }} %</b>
-         <button class="pc-reset" @click="printCtlReset('flow')"
-                 :title="t('ui.print_control.reset_hint')">100 %</button>
-       </label>
-
-       <label class="pc-row">
-         <span>{{ t('ui.print_control.fan') }}</span>
-         <input type="range" min="0" max="100" step="5"
-                v-model.number="printCtlDraft.fan"
-                @input="printCtlSlide('fan', printCtlDraft.fan)"
-                @change="printCtlRelease('fan', printCtlDraft.fan)">
-         <b>{{ printCtl.fan }} %</b>
-         <button class="pc-reset" @click="printCtlReset('fan')">0 %</button>
-       </label>
-
-       <div class="pc-row pc-temps">
-         <span>{{ t('ui.print_control.nozzle') }}</span>
-         <b>{{ printCtl.nozzle.temp !== null ? Math.round(printCtl.nozzle.temp) : '–' }}
-            / {{ printCtl.nozzle.target !== null ? Math.round(printCtl.nozzle.target) : '–' }} °C</b>
-         <input type="number" class="pc-temp-in"
-                :min="printCtlLimits.nozzle.min" :max="printCtlLimits.nozzle.max"
-                :placeholder="printCtlLimits.nozzle.max"
-                @change="sendPrintControl('nozzle', Number($event.target.value))">
-       </div>
-       <div class="pc-row pc-temps">
-         <span>{{ t('ui.print_control.bed') }}</span>
-         <b>{{ printCtl.bed.temp !== null ? Math.round(printCtl.bed.temp) : '–' }}
-            / {{ printCtl.bed.target !== null ? Math.round(printCtl.bed.target) : '–' }} °C</b>
-         <input type="number" class="pc-temp-in"
-                :min="printCtlLimits.bed.min" :max="printCtlLimits.bed.max"
-                :placeholder="printCtlLimits.bed.max"
-                @change="sendPrintControl('bed', Number($event.target.value))">
-       </div>
-
-       <!-- Babystep is BUTTONS, never a slider: a slider makes it trivial
-            to send a large negative delta in one gesture, and that drives
-            the nozzle into the plate. -->
-       <div class="pc-row pc-baby">
-         <span>{{ t('ui.print_control.babystep') }}</span>
-         <button @click="sendPrintControl('babystep', -0.05)">−0.05</button>
-         <button @click="sendPrintControl('babystep', -0.01)">−0.01</button>
-         <b>{{ printCtl.z_offset.toFixed(3) }} mm</b>
-         <button @click="sendPrintControl('babystep', 0.01)">+0.01</button>
-         <button @click="sendPrintControl('babystep', 0.05)">+0.05</button>
-       </div>
-       <p class="muted small">
-         {{ t('ui.print_control.babystep_used', {
-              used: printCtlLimits.babystep.used,
-              max: printCtlLimits.babystep.total }) }}
-       </p>
-
-       <div class="pc-row pc-actions">
-         <button @click="sendPrintControl('pause')"
-                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.pause') }}</button>
-         <button @click="sendPrintControl('resume')"
-                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.resume') }}</button>
-         <button class="warn" @click="printCtlCancel"
-                 :disabled="printCtlBusy !== ''">{{ t('ui.print_control.cancel') }}</button>
-       </div>
-       <!-- The controls Fluidd cannot offer, which is why this pane exists
-            here rather than as a link out. -->
-       <div class="pc-row pc-actions" v-if="retryState">
-         <button @click="retryControl('now')">{{ t('ui.retry.now') }}</button>
-         <button class="warn" @click="retryControl('cancel')">{{ t('ui.retry.stop') }}</button>
-       </div>
-     </div>
-     <div v-show="sidebar.pane==='console'" class="side-body side-console">
-       <div ref="consoleEl" class="console-log">
-         <div v-for="(ln, i) in consoleLines" :key="ln.id != null ? ln.id : 'x'+i"
-              class="console-line" :class="'console-' + ln.kind">
-           <span class="console-ts">{{ consoleTime(ln.ts) }}</span>
-           <span class="console-msg">{{ ln.msg }}</span>
-         </div>
-         <p v-if="!consoleLines.length" class="muted small">
-           {{ t('ui.sidebar.console_empty') }}</p>
-       </div>
-       <div class="console-controls">
-         <label class="console-follow">
-           <input type="checkbox" v-model="consoleFollow">
-           {{ t('ui.sidebar.console_follow') }}
-         </label>
-         <button @click="loadConsole">{{ t('ui.common.reload') }}</button>
-       </div>
-       <form class="console-entry" @submit.prevent="sendConsole">
-         <input v-model="consoleInput" spellcheck="false"
-                :placeholder="t('ui.sidebar.console_placeholder')">
-         <button type="submit" :disabled="consoleBusy || !consoleInput.trim()">⏎</button>
-       </form>
-     </div>
-   </aside>
   </main>
    </div>
   </div>

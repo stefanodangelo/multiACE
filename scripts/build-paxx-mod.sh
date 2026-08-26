@@ -41,6 +41,7 @@ PROFILE="extended"
 SKIP_WHEELS=0
 DRY_RUN=0
 BUILD_BIN=0
+EXPLICIT_VERSION=""
 
 usage() {
     cat <<'EOF'
@@ -51,6 +52,10 @@ Usage: build-paxx-mod.sh [options]
                      build. Needs Docker Desktop running. Implies --into
                      (auto-clones one next to this repo if --into is not
                      also given).
+  --version <ver>    use this exact string as the artifact version instead
+                     of the dist/-scanning auto-bump below. For CI: pins
+                     the release to whatever multiace/VERSION says, rather
+                     than one patch ahead of it.
   --into <dir>       PAXX fork to install the overlay into, at
                      <dir>/overlays/firmware-extended/40-feature-multiace/.
                      With --bin and a dir that does not exist yet, it is
@@ -76,6 +81,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) BUILD_BIN=1; shift ;;
+        --version) EXPLICIT_VERSION="$2"; shift 2 ;;
         --into) PAXX_FORK="$2"; shift 2 ;;
         --paxx-repo) PAXX_REPO_URL="$2"; shift 2 ;;
         --profile) PROFILE="$2"; shift 2 ;;
@@ -153,6 +159,10 @@ _bump_patch() {
 # version (multiace-0.99.8b-extended.bin) count - this is what lets old
 # git-derived names (multiace-0.99.8b.dev12.gb8b0247-extended.bin) sit in
 # dist/ unnoticed instead of corrupting the "latest" comparison.
+if [ -n "$EXPLICIT_VERSION" ]; then
+    ARTIFACT_VERSION="$EXPLICIT_VERSION"
+    say "--version given - using ${ARTIFACT_VERSION} as-is (no auto-bump)"
+else
 LATEST_DIST_VERSION=""
 if [ -d "$OUT_DIR" ]; then
     while IFS= read -r f; do
@@ -174,6 +184,7 @@ if [ -n "$LATEST_DIST_VERSION" ]; then
 else
     ARTIFACT_VERSION="$(_bump_patch "$VERSION")"
     say "no prior build in dist/ - bumping multiace/VERSION (${VERSION}) to ${ARTIFACT_VERSION}"
+fi
 fi
 # Keep the name filesystem- and PAXX-safe regardless of what the bump produced.
 ARTIFACT_VERSION="$(printf '%s' "$ARTIFACT_VERSION" | tr -c 'A-Za-z0-9._-' '-')"
