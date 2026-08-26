@@ -1,0 +1,100 @@
+name: Release firmware .bin
+
+# Builds the flashable PAXX .bin the same way scripts/build-paxx-mod.sh --bin
+# does locally, then publishes it as a GitHub release tagged v<multiace/VERSION>.
+#
+# Triggered whenever multiace/VERSION changes on main - bump that file and
+# push (merge) to cut a release. Also runnable on demand from the Actions tab.
+on:
+  push:
+    branches: [main]
+    paths:
+      - multiace/VERSION
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: PAXX PROFILE to build
+        default: extended
+        required: false
+
+concurrency:
+  group: release-bin
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PROFILE: ${{ github.event.inputs.profile || 'extended' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The PAXX build downloads stock Snapmaker firmware and runs a Docker
+      # build on top of it ("several GB free" per build-paxx-mod.sh) - the
+      # runner's default free space is tight for that, so drop preinstalled
+      # toolchains this job never uses.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read release version
+        id: version
+        run: |
+          VERSION="$(tr -d '[:space:]' < multiace/VERSION)"
+          [ -n "$VERSION" ] || { echo "::error::multiace/VERSION is empty"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite an existing release
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists - bump multiace/VERSION before releasing again."
+            exit 1
+          fi
+
+      - name: Build overlay + .bin via PAXX
+        run: |
+          bash scripts/build-paxx-mod.sh --bin \
+            --version "${{ steps.version.outputs.version }}" \
+            --profile "$PROFILE"
+
+      - name: Verify build artifacts
+        run: |
+          BIN="dist/multiace-${{ steps.version.outputs.version }}-$PROFILE.bin"
+          [ -f "$BIN" ] || { echo "::error::expected $BIN, not found"; ls -la dist; exit 1; }
+
+      # multiACE's own beta tags (v0.99.8b, v0.97.3b, ...) use a trailing
+      # letter for pre-release status - mirror that into GitHub's
+      # prerelease flag instead of guessing separately.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          PRERELEASE_FLAG=""
+          case "$VERSION" in
+            *[A-Za-z]) PRERELEASE_FLAG="--prerelease" ;;
+          esac
+          gh release create "$TAG" \
+            --title "multiACE $VERSION" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            dist/multiace-"$VERSION"-*.bin \
+            dist/multiace-"$VERSION"-*.bin.sha256 \
+            dist/multiace-"$VERSION"-paxx-mod.tar.gz \
+            dist/multiace-"$VERSION"-paxx-mod.tar.gz.sha256

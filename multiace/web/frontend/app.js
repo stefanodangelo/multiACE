@@ -136,6 +136,56 @@ createApp({
         });
       } catch (_) {}
     }
+    // Native <option>s can't carry a flag image next to the label (same
+    // limitation as the head-target picker's colour chip - see hm-dd
+    // below), so the rail's language picker is a small custom dropdown
+    // instead of a <select>. Hand-drawn inline SVGs, not the Unicode flag
+    // emoji: regional-indicator flags render as bare letter pairs without
+    // a colour-emoji font (stock Windows Chromium, most embedded Linux
+    // display images), which defeats "flag icon" entirely on exactly the
+    // touchscreen this app also targets. Square (not the flags' native
+    // 3:2) so the circular crop below keeps each design's centre - for
+    // zh that means the canton is drawn INSIDE the square, not cropped
+    // out of a wider rectangle. Unknown codes fall back to text initials
+    // so a new catalog file works before anyone draws its flag here.
+    const LANG_FLAG_SVG = {
+      en: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
+        + '<rect width="20" height="20" fill="#012169"/>'
+        + '<path d="M0 0 L20 20 M20 0 L0 20" stroke="#fff" stroke-width="4"/>'
+        + '<path d="M0 0 L20 20 M20 0 L0 20" stroke="#C8102E" stroke-width="1.4"/>'
+        + '<rect x="8" width="4" height="20" fill="#fff"/>'
+        + '<rect y="8" width="20" height="4" fill="#fff"/>'
+        + '<rect x="8.7" width="2.6" height="20" fill="#C8102E"/>'
+        + '<rect y="8.7" width="20" height="2.6" fill="#C8102E"/>'
+        + '</svg>',
+      de: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
+        + '<rect width="20" height="6.67" fill="#000"/>'
+        + '<rect y="6.67" width="20" height="6.67" fill="#DD0000"/>'
+        + '<rect y="13.33" width="20" height="6.67" fill="#FFCE00"/>'
+        + '</svg>',
+      zh: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
+        + '<rect width="20" height="20" fill="#DE2910"/>'
+        + '<g fill="#FFDE00">'
+        + '<polygon points="6,3 6.9,5.6 9.6,5.6 7.4,7.2 8.3,9.8 6,8.2 3.7,9.8 4.6,7.2 2.4,5.6 5.1,5.6"/>'
+        + '<circle cx="10.5" cy="2.6" r=".6"/><circle cx="12.3" cy="4.8" r=".6"/>'
+        + '<circle cx="12.1" cy="7.6" r=".6"/><circle cx="10.1" cy="9.2" r=".6"/>'
+        + '</g></svg>',
+    };
+    function langFlagGlyph(code) {
+      return (code || "?").slice(0, 2).toUpperCase();
+    }
+    function langFlagInner(code) {
+      return LANG_FLAG_SVG[code] || langFlagGlyph(code);
+    }
+    function langName(code) {
+      const l = languages.value.find(x => x.code === code);
+      return l ? l.name : code;
+    }
+    const langMenuOpen = ref(false);
+    function langPick(code) {
+      langMenuOpen.value = false;
+      if (code !== language.value) setLanguage(code);
+    }
     const version = ref("");
     const printerName = ref("");
     const printerFw = ref("");
@@ -3164,6 +3214,23 @@ createApp({
       if (dryOpenAces.has(aceIdx)) dryOpenAces.delete(aceIdx);
       else dryOpenAces.add(aceIdx);
     }
+    // Per-ACE overrides live on the dashboard card now (behind the gear
+    // icon) instead of buried in Settings -> Config; same open-set pattern
+    // as the dry panel above so multiple cards can be open independently.
+    const overridesOpenAces = reactive(new Set());
+    function overridesPanelOpen(aceIdx) { return overridesOpenAces.has(aceIdx); }
+    function toggleOverridesPanel(aceIdx) {
+      if (overridesOpenAces.has(aceIdx)) overridesOpenAces.delete(aceIdx);
+      else overridesOpenAces.add(aceIdx);
+    }
+    // Same gear-icon pattern, one toolhead card instead of one ACE card -
+    // per-head feeder length overrides (feeder_*_length_N in the config).
+    const feederOverridesOpenHeads = reactive(new Set());
+    function feederOverridesPanelOpen(headIdx) { return feederOverridesOpenHeads.has(headIdx); }
+    function toggleFeederOverridesPanel(headIdx) {
+      if (feederOverridesOpenHeads.has(headIdx)) feederOverridesOpenHeads.delete(headIdx);
+      else feederOverridesOpenHeads.add(headIdx);
+    }
     function aceDrying(ace) {
       const d = ace && ace.dryer;
       return !!(d && d.status && d.status !== 'stop');
@@ -3375,6 +3442,9 @@ createApp({
       seat_overshoot_length: '',
       swap_retract_length: '',
       swap_purge_length: '',
+      feeder_load_length: '',
+      feeder_retract_length: '',
+      feeder_swap_retract_length: '',
       dryer_temp: '',
       dryer_duration: '',
       display_index_base: 0,
@@ -3388,6 +3458,10 @@ createApp({
       usb_debug: false,
       fa_debug: false,
       perAce: [],
+      // Fixed at 4 (T0-T3), same as the config file's commented-out
+      // feeder_*_length_0..3 placeholders - toolhead count, not ace count.
+      perFeeder: [0, 1, 2, 3].map(() => (
+        {load_length: '', retract_length: '', swap_retract_length: ''})),
     });
     function _makePerAceEntry() {
       const perSlot = [];
@@ -3430,6 +3504,10 @@ createApp({
       configForm.seat_overshoot_length = numOrEmpty(params.seat_overshoot_length);
       configForm.swap_retract_length = numOrEmpty(params.swap_retract_length);
       configForm.swap_purge_length = numOrEmpty(params.swap_purge_length);
+      configForm.feeder_load_length = numOrEmpty(params.feeder_load_length);
+      configForm.feeder_retract_length = numOrEmpty(params.feeder_retract_length);
+      configForm.feeder_swap_retract_length =
+        numOrEmpty(params.feeder_swap_retract_length);
       configForm.dryer_temp        = numOrEmpty(params.dryer_temp);
       configForm.dryer_duration    = numOrEmpty(params.dryer_duration);
       configForm.display_index_base = numOrEmpty(params.display_index_base);
@@ -3463,6 +3541,17 @@ createApp({
           configForm.perAce[i].perSlot[s].swap_retract_length = numOrEmpty(aceSec[`swap_retract_length_${s}`]);
         }
       }
+      // feeder_*_length_N are [ace] main-section keys with a numeric
+      // suffix (same shape as dryer_temp_N above), not a per-ace
+      // sub-section - N here is the toolhead index, not an ACE index.
+      for (let i = 0; i < configForm.perFeeder.length; i++) {
+        configForm.perFeeder[i].load_length =
+          numOrEmpty(params[`feeder_load_length_${i}`]);
+        configForm.perFeeder[i].retract_length =
+          numOrEmpty(params[`feeder_retract_length_${i}`]);
+        configForm.perFeeder[i].swap_retract_length =
+          numOrEmpty(params[`feeder_swap_retract_length_${i}`]);
+      }
     }
     function formToCfgContent(content) {
       const lines = content.split('\n');
@@ -3476,6 +3565,10 @@ createApp({
         seat_overshoot_length: numStr(configForm.seat_overshoot_length),
         swap_retract_length: numStr(configForm.swap_retract_length),
         swap_purge_length:   numStr(configForm.swap_purge_length),
+        feeder_load_length:  numStr(configForm.feeder_load_length),
+        feeder_retract_length: numStr(configForm.feeder_retract_length),
+        feeder_swap_retract_length:
+                            numStr(configForm.feeder_swap_retract_length),
         dryer_temp:         numStr(configForm.dryer_temp),
         dryer_duration:     numStr(configForm.dryer_duration),
         display_index_base: numStr(configForm.display_index_base),
@@ -3495,6 +3588,12 @@ createApp({
         const p = configForm.perAce[i];
         mainRepl[`dryer_temp_${i}`]     = numStr(p.dryer_temp);
         mainRepl[`dryer_duration_${i}`] = numStr(p.dryer_duration);
+      }
+      for (let i = 0; i < configForm.perFeeder.length; i++) {
+        const p = configForm.perFeeder[i];
+        mainRepl[`feeder_load_length_${i}`]  = numStr(p.load_length);
+        mainRepl[`feeder_retract_length_${i}`] = numStr(p.retract_length);
+        mainRepl[`feeder_swap_retract_length_${i}`] = numStr(p.swap_retract_length);
       }
       const perAceRepl = {};
       for (let i = 0; i < configForm.perAce.length; i++) {
@@ -6124,13 +6223,13 @@ createApp({
     // Markup plus two helpers rather than a component: this app runs off
     // vue.global.prod.js with one createApp and zero registered
     // components, and introducing a component system for a handful of
-    // call sites would be out of character. Same idiom `sidebar` uses.
+    // call sites would be out of character.
     //
     // The four rarely-touched config sections default CLOSED; everything
     // you look at while standing at the printer defaults open.
     // =================================================================
     const SEC_DEFAULT_CLOSED = {
-      "cfg.firmware": true, "cfg.perace": true,
+      "cfg.firmware": true,
       "cfg.tipform": true, "cfg.update": true,
     };
     const secClosed = reactive((() => {
@@ -6195,24 +6294,6 @@ createApp({
     // gates the work: no camera stream is opened and no console
     // subscription is sent for a pane that is not the visible one, so
     // exactly one of the three is ever live.
-    // =================================================================
-    // Console by default, not the camera: the pane is now always on
-    // screen, so whatever this defaults to opens a connection on every
-    // single page load. A console subscription is cheap; an MJPEG stream
-    // costs the printer a connection whether or not anyone is watching
-    // it. Picking the camera is a decision the user gets to make.
-    // "webcam" was a valid pane before the webcam moved to its own
-    // Dashboard tab - a browser with that stale value persisted must not
-    // land on a pane that no longer exists.
-    const _storedSidebarPane = localStorage.getItem("multiace.sidebar.pane");
-    const sidebar = reactive({
-      pane: (_storedSidebarPane === "console" || _storedSidebarPane === "print")
-        ? _storedSidebarPane : "console",
-    });
-    watch(() => sidebar.pane,
-          v => localStorage.setItem("multiace.sidebar.pane", v));
-    function setSidebarPane(p) { sidebar.pane = p; }
-
     // =================================================================
     // Live print control (plan section 8)
     //
@@ -6319,7 +6400,7 @@ createApp({
     // dialog on the control you reach for in a hurry is its own hazard.
 
     const printControlShown = computed(() =>
-      !panelMode && sidebar.pane === "print");
+      !panelMode && tab.value === "monitor");
     watch(printControlShown, on => { if (on) loadPrintControlLimits(); });
 
     // =================================================================
@@ -6409,7 +6490,7 @@ createApp({
     const consoleBusy = ref(false);
     const consoleEl = ref(null);
     const consoleShown = computed(() =>
-      !panelMode && sidebar.pane === "console");
+      !panelMode && tab.value === "monitor");
     let lastConsoleId = 0;
     watch(consoleFollow,
           v => localStorage.setItem("multiace.console.follow", v ? "1" : "0"));
@@ -6823,6 +6904,8 @@ createApp({
       spoolExport, spoolImport, triggerSpoolImport,
       isPrinting,
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
+      overridesPanelOpen, toggleOverridesPanel,
+      feederOverridesPanelOpen, toggleFeederOverridesPanel,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
       aceHeadsRightSide,
@@ -6864,6 +6947,7 @@ createApp({
       screenDown, screenMove, screenUp,
       wiringContainerEl, setSlotEl, setThEl, wiringPaths, wiringViewBox,
       t, dispIdx, language, languages, setLanguage,
+      langFlagInner, langName, langMenuOpen, langPick,
       picker, openPicker, closePicker, savePicker, clearPickerOverride, pickerMaterials,
       pickerDb, pickerVendors, currentSubtypes,
       pickerHasRfid, pickerHasOverride, pickerRfidStyle, readPickerRfid,
@@ -6871,7 +6955,6 @@ createApp({
       sendingAll, sendAllToPrinter,
       fmtArgs, cmdLabel,
       uploading, uploadInput, triggerUpload, onUploadGcode,
-      sidebar, setSidebarPane,
       railCollapsed, toggleRail, railItems, railSegStyle,
       secOpen, toggleSec, laneChips, appliedSnapshot,
       printCtl, printCtlLimits, printCtlDraft, printCtlBusy, printCtlError,

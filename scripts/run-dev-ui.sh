@@ -5,6 +5,9 @@
 #   ./scripts/run-dev-ui.sh                 # auto-detect
 #   MOONRAKER_URL=http://printer:7125 ./scripts/run-dev-ui.sh
 #   MULTIACE_MOCK_MODE=1 ./scripts/run-dev-ui.sh   # force mock
+#   MULTIACE_MOCK_STATE_FILE=mock_state_head.json ./scripts/run-dev-ui.sh
+#       # dashboard in head mode (per-head ACE picker, feeder-combo, bg-swap)
+#       # instead of the default multi-ACE fixture
 #
 # Mock mode also unlocks POST /api/debug/simulate, which the UI's debug
 # panel (?debug=1) uses to inject load failures, console lines and

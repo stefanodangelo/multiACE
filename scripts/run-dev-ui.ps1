@@ -4,6 +4,9 @@
 #   .\scripts\run-dev-ui.ps1
 #   $env:MOONRAKER_URL = "http://printer:7125"; .\scripts\run-dev-ui.ps1
 #   $env:MULTIACE_MOCK_MODE = "1"; .\scripts\run-dev-ui.ps1   # force mock
+#   $env:MULTIACE_MOCK_STATE_FILE = "mock_state_head.json"; .\scripts\run-dev-ui.ps1
+#       # dashboard in head mode (per-head ACE picker, feeder-combo, bg-swap)
+#       # instead of the default multi-ACE fixture
 #
 # Mock mode also unlocks POST /api/debug/simulate, used by the UI debug
 # panel (?debug=1) to inject load failures and console lines - that is
