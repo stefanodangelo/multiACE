@@ -135,6 +135,15 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
+# The "what-if" virtual loadout overlay (frontend's virtualLoadout ref). Used
+# to be browser-localStorage-only, so it never survived a different browser/
+# device or a cleared profile. Same directory and atomic-write pattern as
+# OVERRIDE_FILE above, but nothing else in the backend reads or writes this
+# file, so - unlike overrides - it needs no mtime-poll reload.
+VIRTUAL_LOADOUT_FILE = os.environ.get(
+    "MULTIACE_VIRTUAL_LOADOUT_FILE",
+    "/home/lava/printer_data/config/extended/multiace/virtual_loadout.json",
+)
 # multiACE's own runtime data (print history, swap calibration). Written by
 # ace.py, read here - see plan §4.
 MULTIACE_DATA_DIR = os.environ.get(
@@ -872,6 +881,16 @@ class SlotOverride(BaseModel):
     brand: str | None = ""
     subtype: str | None = ""
     color: str | None = ""
+
+class VirtualLoadoutSlot(BaseModel):
+    ace: int
+    slot: int
+    material: str | None = ""
+    color: str | None = ""
+
+class VirtualLoadoutSave(BaseModel):
+    enabled: bool = False
+    slots: list[VirtualLoadoutSlot] = []
 
 async def _mr_get(path: str) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -4077,6 +4096,42 @@ async def delete_slot_override(ace: int, slot: int) -> dict:
     return {"ok": True}
 
 _load_overrides_from_disk()
+
+def _load_virtual_loadout_from_disk() -> dict:
+    p = Path(VIRTUAL_LOADOUT_FILE)
+    if not p.exists():
+        return {"enabled": False, "slots": []}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return {
+            "enabled": bool(data.get("enabled", False)),
+            "slots": data.get("slots") or [],
+        }
+    except Exception:
+        return {"enabled": False, "slots": []}
+
+def _save_virtual_loadout_to_disk(data: dict) -> None:
+    """Atomic write, same pattern as _save_overrides_to_disk."""
+    p = Path(VIRTUAL_LOADOUT_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(p))
+
+@app.get("/api/virtual-loadout")
+async def get_virtual_loadout() -> dict:
+    return _load_virtual_loadout_from_disk()
+
+@app.put("/api/virtual-loadout")
+async def put_virtual_loadout(req: VirtualLoadoutSave) -> dict:
+    data = {"enabled": req.enabled, "slots": [s.model_dump() for s in req.slots]}
+    _save_virtual_loadout_to_disk(data)
+    return {"ok": True, **data}
+
+@app.delete("/api/virtual-loadout")
+async def delete_virtual_loadout() -> dict:
+    _save_virtual_loadout_to_disk({"enabled": False, "slots": []})
+    return {"ok": True}
 
 _notifications: deque = deque(maxlen=50)
 _next_notification_id = int(time.time() * 1000)

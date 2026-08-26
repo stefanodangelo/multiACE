@@ -5416,26 +5416,54 @@ createApp({
     // swap to spools holding a different material and run them at the
     // wrong temperature.
     // =================================================================
+    // Backend-persisted (GET/PUT /api/virtual-loadout) so it survives a
+    // different browser/device or a cleared profile - not just this one's
+    // localStorage. The localStorage copy stays as an instant local cache:
+    // it paints the last-known state before the initial fetch resolves, and
+    // is the fallback if that fetch fails (offline / backend restarting).
     const VIRTUAL_KEY = "multiace.virtualLoadout";
     const virtualLoadout = reactive({
       enabled: false,
       slots: [],          // [{ace, slot, material, color}]
     });
+    let _virtualLoadoutSaveTimer = null;
+    let _virtualLoadoutLoaded = false;
 
-    function loadVirtualLoadout() {
+    function _applyVirtualLoadout(j) {
+      virtualLoadout.enabled = !!j.enabled;
+      virtualLoadout.slots = Array.isArray(j.slots) ? j.slots : [];
+    }
+    function loadVirtualLoadoutCache() {
       try {
         const raw = localStorage.getItem(VIRTUAL_KEY);
-        if (!raw) return;
-        const j = JSON.parse(raw);
-        virtualLoadout.enabled = !!j.enabled;
-        virtualLoadout.slots = Array.isArray(j.slots) ? j.slots : [];
+        if (raw) _applyVirtualLoadout(JSON.parse(raw));
       } catch (_) {}
     }
-    function saveVirtualLoadout() {
+    async function loadVirtualLoadout() {
+      loadVirtualLoadoutCache();
       try {
-        localStorage.setItem(VIRTUAL_KEY, JSON.stringify({
-          enabled: virtualLoadout.enabled, slots: virtualLoadout.slots}));
-      } catch (_) {}
+        const r = await fetch(`${API}/virtual-loadout`);
+        if (r.ok) _applyVirtualLoadout(await r.json());
+      } catch (_) {
+        // Backend unreachable - keep the localStorage cache loaded above.
+      } finally {
+        _virtualLoadoutLoaded = true;
+      }
+    }
+    function saveVirtualLoadout() {
+      const payload = {enabled: virtualLoadout.enabled, slots: virtualLoadout.slots};
+      try { localStorage.setItem(VIRTUAL_KEY, JSON.stringify(payload)); } catch (_) {}
+      // Skip the round-trip while the initial GET is still in flight, so it
+      // can't win a race and clobber a fetch that resolves after it.
+      if (!_virtualLoadoutLoaded) return;
+      clearTimeout(_virtualLoadoutSaveTimer);
+      _virtualLoadoutSaveTimer = setTimeout(() => {
+        fetch(`${API}/virtual-loadout`, {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        }).catch(() => {});
+      }, 400);
     }
     watch(() => JSON.stringify(virtualLoadout), saveVirtualLoadout);
     loadVirtualLoadout();
