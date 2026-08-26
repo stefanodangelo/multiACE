@@ -3244,6 +3244,57 @@ createApp({
       if (feederOverridesOpenHeads.has(headIdx)) feederOverridesOpenHeads.delete(headIdx);
       else feederOverridesOpenHeads.add(headIdx);
     }
+    // Placeholders for the override panels above: show what actually
+    // applies when a field is left blank, instead of a bare "-". Mirrors
+    // the fallback chains in ace.py's get_load_length/get_retract_length/
+    // get_swap_retract_length (per-slot -> per-ACE -> global) and
+    // feeder_load_length_for/feeder_retract_length_for/
+    // get_feeder_swap_retract_length (per-head -> global).
+    const DRYER_TEMP_DEFAULT = 55;
+    const DRYER_DURATION_DEFAULT = 240;
+    const SWAP_RETRACT_LENGTH_DEFAULT = 0;
+    const FEEDER_LOAD_LENGTH_DEFAULT = 1100;
+    const FEEDER_SWAP_RETRACT_LENGTH_DEFAULT = 150;
+    function globalSwapRetractLengthEffective() {
+      return configForm.swap_retract_length !== ''
+        ? configForm.swap_retract_length : SWAP_RETRACT_LENGTH_DEFAULT;
+    }
+    function feederRetractLengthEffective() {
+      return configForm.feeder_retract_length !== ''
+        ? configForm.feeder_retract_length : configForm.retract_length;
+    }
+    function perAcePlaceholder(aceIdx, field) {
+      const p = configForm.perAce[aceIdx];
+      if (p && p[field] !== '') return p[field];
+      switch (field) {
+        case 'dryer_temp':
+          return configForm.dryer_temp !== '' ? configForm.dryer_temp : DRYER_TEMP_DEFAULT;
+        case 'dryer_duration':
+          return configForm.dryer_duration !== '' ? configForm.dryer_duration : DRYER_DURATION_DEFAULT;
+        case 'feed_speed': return configForm.feed_speed;
+        case 'retract_speed': return configForm.retract_speed;
+        case 'load_length': return configForm.load_length;
+        case 'retract_length': return configForm.retract_length;
+        case 'swap_retract_length': return globalSwapRetractLengthEffective();
+        default: return '';
+      }
+    }
+    function perSlotPlaceholder(aceIdx, slotIdx, field) {
+      const p = configForm.perAce[aceIdx];
+      const slot = p && p.perSlot[slotIdx];
+      if (slot && slot[field] !== '') return slot[field];
+      return perAcePlaceholder(aceIdx, field);
+    }
+    function perFeederPlaceholder(headIdx, field) {
+      const p = configForm.perFeeder[headIdx];
+      if (p && p[field] !== '') return p[field];
+      switch (field) {
+        case 'load_length': return FEEDER_LOAD_LENGTH_DEFAULT;
+        case 'retract_length': return feederRetractLengthEffective();
+        case 'swap_retract_length': return FEEDER_SWAP_RETRACT_LENGTH_DEFAULT;
+        default: return '';
+      }
+    }
     function aceDrying(ace) {
       const d = ace && ace.dryer;
       return !!(d && d.status && d.status !== 'stop');
@@ -6919,6 +6970,8 @@ createApp({
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
       overridesPanelOpen, toggleOverridesPanel,
       feederOverridesPanelOpen, toggleFeederOverridesPanel,
+      perAcePlaceholder, perSlotPlaceholder, perFeederPlaceholder,
+      feederRetractLengthEffective,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
       aceHeadsRightSide,
