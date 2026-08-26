@@ -731,43 +731,50 @@
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.dryer_temp_override') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_temp"
-                           min="0" max="80" step="1" placeholder="-"> °C
+                           min="0" max="80" step="1"
+                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_temp')"> °C
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.dryer_duration_override') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_duration"
-                           min="0" max="600" step="5" placeholder="-"> min
+                           min="0" max="600" step="5"
+                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_duration')"> min
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.feed_speed') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].feed_speed"
-                           min="1" max="500" step="1" placeholder="-"> mm/s
+                           min="1" max="500" step="1"
+                           :placeholder="perAcePlaceholder(ace.idx, 'feed_speed')"> mm/s
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.retract_speed') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].retract_speed"
-                           min="1" max="500" step="1" placeholder="-"> mm/s
+                           min="1" max="500" step="1"
+                           :placeholder="perAcePlaceholder(ace.idx, 'retract_speed')"> mm/s
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.load_length') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].load_length"
-                           min="0" max="5000" step="10" placeholder="-"> mm
+                           min="0" max="5000" step="10"
+                           :placeholder="perAcePlaceholder(ace.idx, 'load_length')"> mm
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.retract_length') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].retract_length"
-                           min="0" max="5000" step="10" placeholder="-"> mm
+                           min="0" max="5000" step="10"
+                           :placeholder="perAcePlaceholder(ace.idx, 'retract_length')"> mm
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.swap_retract_length') }}
                     <input type="number" v-model.number="configForm.perAce[ace.idx].swap_retract_length"
-                           min="0" max="2000" step="10" placeholder="-"> mm
+                           min="0" max="2000" step="10"
+                           :placeholder="perAcePlaceholder(ace.idx, 'swap_retract_length')"> mm
                   </label>
                 </div>
                 <details class="per-slot-block">
@@ -785,11 +792,14 @@
                       <tr v-for="s in 4" :key="s-1">
                         <td>{{ dispIdx(s-1) }}</td>
                         <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].load_length"
-                                   min="0" max="5000" step="10" placeholder="-"></td>
+                                   min="0" max="5000" step="10"
+                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'load_length')"></td>
                         <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].retract_length"
-                                   min="0" max="5000" step="10" placeholder="-"></td>
+                                   min="0" max="5000" step="10"
+                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'retract_length')"></td>
                         <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].swap_retract_length"
-                                   min="0" max="2000" step="10" placeholder="-"></td>
+                                   min="0" max="2000" step="10"
+                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'swap_retract_length')"></td>
                       </tr>
                     </tbody>
                   </table>
@@ -939,19 +949,22 @@
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.feeder_load_length') }}
                     <input type="number" v-model.number="configForm.perFeeder[t_.idx].load_length"
-                           min="0" max="5000" step="10" placeholder="-"> mm
+                           min="0" max="5000" step="10"
+                           :placeholder="perFeederPlaceholder(t_.idx, 'load_length')"> mm
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.feeder_retract_length') }}
                     <input type="number" v-model.number="configForm.perFeeder[t_.idx].retract_length"
-                           min="0" max="2000" step="10" placeholder="-"> mm
+                           min="0" max="2000" step="10"
+                           :placeholder="perFeederPlaceholder(t_.idx, 'retract_length')"> mm
                   </label>
                 </div>
                 <div class="per-ace-row">
                   <label>{{ t('ui.config.feeder_swap_retract_length') }}
                     <input type="number" v-model.number="configForm.perFeeder[t_.idx].swap_retract_length"
-                           min="0" max="2000" step="10" placeholder="-"> mm
+                           min="0" max="2000" step="10"
+                           :placeholder="perFeederPlaceholder(t_.idx, 'swap_retract_length')"> mm
                   </label>
                 </div>
                 <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
@@ -1538,7 +1551,7 @@
         <div class="config-row">
           <label>{{ t('ui.config.feeder_retract_length') }}</label>
           <input type="number" v-model.number="configForm.feeder_retract_length"
-                 min="0" max="2000" step="10" placeholder="-">
+                 min="0" max="2000" step="10" :placeholder="feederRetractLengthEffective()">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.feeder_swap_retract_length') }}</label>
@@ -1561,11 +1574,11 @@
         <div class="config-sep"></div>
         <div class="config-row">
           <label>{{ t('ui.config.dryer_temp') }}</label>
-          <input type="number" v-model.number="configForm.dryer_temp" min="0" max="80" step="1" placeholder="-">
+          <input type="number" v-model.number="configForm.dryer_temp" min="0" max="80" step="1" placeholder="55">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.dryer_duration') }}</label>
-          <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="-">
+          <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="240">
         </div>
         <div class="config-sep"></div>
         <!-- Spoolman: url + after-print sync. Live like the checkbox below
