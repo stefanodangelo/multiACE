@@ -49,6 +49,8 @@
       "panel_full": "Open the full interface in a new tab",
       "collapse": "Collapse",
       "expand": "Expand",
+      "info_show": "Show info",
+      "info_hide": "Hide info",
       "language": "Language"
     },
     "dashboard": {

@@ -49,6 +49,8 @@
       "panel_full": "Volle Oberfläche in neuem Tab öffnen",
       "collapse": "Einklappen",
       "expand": "Ausklappen",
+      "info_show": "Info anzeigen",
+      "info_hide": "Info ausblenden",
       "language": "Sprache"
     },
     "dashboard": {

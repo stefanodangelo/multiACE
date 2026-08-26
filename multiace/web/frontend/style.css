@@ -64,9 +64,10 @@ html, body { margin: 0; padding: 0; height: 100%; }
    block that forgot to fell back to the browser default - i.e. WHITE in a
    dark UI. That is what made the spool table stand out. One rule here, so a
    new field is dark by default and nobody has to remember. Types are listed
-   explicitly: checkbox/radio/range/color must keep their native look, and a
-   bare `input` selector would flatten them too. Component rules come later
-   in the file and are more specific, so their sizing still wins. */
+   explicitly: radio/range/color must keep their native look (checkbox no
+   longer does - see the toggle-switch rule below), and a bare `input`
+   selector would flatten them too. Component rules come later in the file
+   and are more specific, so their sizing still wins. */
 input[type="text"], input[type="number"], input[type="password"],
 input[type="search"], input[type="url"], input[type="email"],
 input[type="date"], input[type="time"], select {
@@ -75,6 +76,49 @@ input[type="date"], input[type="time"], select {
   padding: .25rem .4rem;
 }
 select option { background: #111; color: var(--fg); }
+/* Every boolean setting app-wide (combo mode, manual/feeder heads,
+   confirm-commands, auto-dry, debug flags, preflight prefs, ...) is a plain
+   <input type=checkbox> with its @change/v-model binding on the element
+   itself - so restyling THE ELEMENT into a track+thumb switch is a one-rule
+   change, not a 27-call-site markup rewrite. `appearance:none` drops the
+   native box; everything else is drawn with ::before as the thumb. */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 2.2em; height: 1.3em; flex: none; margin: 0; padding: 0;
+  background: #111; border: 1px solid var(--border); border-radius: 1em;
+  position: relative; vertical-align: middle; cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+input[type="checkbox"]::before {
+  content: ""; position: absolute; top: .15em; left: .15em;
+  width: 1em; height: 1em; border-radius: 50%;
+  background: var(--muted);
+  transition: transform .15s ease, background .15s ease;
+}
+input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::before { background: var(--accent-fg); transform: translateX(.9em); }
+input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
+input[type="checkbox"]:disabled::before { background: #666; }
+@media (prefers-reduced-motion: reduce) {
+  input[type="checkbox"], input[type="checkbox"]::before { transition: none; }
+}
+/* Config setting explainers: a small (i) button next to a setting's label
+   toggles its own "what does this do" paragraph (infoShown/toggleInfo in
+   app.js) - hidden by default instead of permanently cluttering the page,
+   same persisted-state pattern as the panel collapse (.pnl-toggle). */
+.info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.1rem; height: 1.1rem; flex: none; margin-left: .35rem;
+  border-radius: 50%; border: 1px solid var(--border);
+  background: transparent; color: var(--muted);
+  font: italic 700 .7rem Georgia, "Times New Roman", serif;
+  text-transform: none; letter-spacing: normal;
+  line-height: 1; padding: 0; cursor: pointer; vertical-align: middle;
+}
+.info-btn:hover { color: var(--fg); border-color: var(--muted); }
+.info-btn[aria-expanded="true"] {
+  color: var(--accent-fg); background: var(--accent); border-color: var(--accent);
+}
 /* A value the UI refuses to send (see autoDryPairInvalid) or one the printer
    refused: framed, not popped up, and the typed text stays put.
    !important is deliberate and the one place it is used. An error frame that
@@ -532,7 +576,7 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .toolhead-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem;
                   grid-auto-rows: 1fr; }
 .toolhead-card { background: var(--card); border: 1px solid var(--border); padding: .8rem; border-radius: 6px;
-                  display: flex; flex-direction: column; }
+                  display: flex; flex-direction: column; position: relative; }
 /* Push actions + manual toggle to the bottom so cards with/without
    the subtype line still line up flush. When channel_state is present
    it owns the auto-margin and actions sit flush against it; otherwise
@@ -996,8 +1040,14 @@ body { padding-bottom: 64px; }
 .hm-dd-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
                white-space: nowrap; }
 .hm-dd-caret { flex: 0 0 auto; opacity: .6; font-size: .7rem; }
-.hm-dd-list { position: absolute; z-index: 40; top: calc(100% + 2px);
-              left: 0; min-width: 100%; max-height: 260px; overflow-y: auto;
+/* position:fixed with top/left/width set inline (app.js hmDdToggle) -
+   .cmap-pair clips to a rounded card (overflow:hidden), so an absolutely
+   positioned popup inside it was clipped to that tiny card instead of
+   overlaying the page (only a sliver of the option list ever showed, and
+   what did show barely scrolled) - same class of bug .lang-dd-list already
+   escapes with fixed positioning. */
+.hm-dd-list { position: fixed; z-index: 40;
+              max-height: 260px; overflow-y: auto;
               background: var(--card); border: 1px solid var(--border);
               border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
 .hm-dd-item { display: flex; align-items: center; gap: .45rem;
