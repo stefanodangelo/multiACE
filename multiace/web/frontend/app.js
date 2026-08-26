@@ -733,13 +733,13 @@ createApp({
     // page - "analog zu manual (also zukuenftig)" - and when ONLY manual
     // heads exist the tab says Manual instead.
     const panelFeederHeads = computed(() =>
-      (state.toolheads || []).filter(t => t.feeder || t.manual));
+      (state.toolheads || []).filter(t => t.feeder || t.manual || t.combo_feeder));
     const panelPages = computed(() => {
       const pages = (visibleAces.value || []).map(a =>
         ({id: 'a' + a.idx, kind: 'ace', ace: a.idx,
           label: String(dispIdx(a.idx))}));
       if (panelFeederHeads.value.length) {
-        const anyFeeder = panelFeederHeads.value.some(x => x.feeder);
+        const anyFeeder = panelFeederHeads.value.some(x => x.feeder || x.combo_feeder);
         pages.push({id: 'feeders', kind: 'feeders',
                     label: t(anyFeeder ? 'ui.dashboard.feeder'
                                        : 'ui.dashboard.manual')});

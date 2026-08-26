@@ -216,6 +216,11 @@
                             :disabled="isPrinting || th.filament_at_extruder"
                             :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{
                         t('ui.dashboard.load') }}</button>
+                    <button class="panel-btn" v-if="th.combo_feeder"
+                            @click="loadComboFeederHead(th.idx)"
+                            :disabled="isPrinting || th.filament_at_extruder"
+                            :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{
+                        t('ui.dashboard.load') }}</button>
                     <button class="panel-btn warn"
                             @click="unloadHead(th.idx)"
                             :disabled="isPrinting || (!th.head_source_known && !th.filament_at_extruder)"
