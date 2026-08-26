@@ -532,7 +532,7 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .toolhead-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem;
                   grid-auto-rows: 1fr; }
 .toolhead-card { background: var(--card); border: 1px solid var(--border); padding: .8rem; border-radius: 6px;
-                  display: flex; flex-direction: column; }
+                  display: flex; flex-direction: column; position: relative; }
 /* Push actions + manual toggle to the bottom so cards with/without
    the subtype line still line up flush. When channel_state is present
    it owns the auto-margin and actions sit flush against it; otherwise
