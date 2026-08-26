@@ -10657,8 +10657,14 @@ class MultiAce:
                 key = str(head)
                 if key in saved and saved[key]:
                     self._head_source[head] = saved[key]
-                    logging.info('[multiACE] Restored head %d -> ACE %d / Slot %d' % (
-                        head, saved[key]['ace_index'], saved[key]['slot']))
+                    if saved[key].get('slot') == 'feeder':
+                        logging.info(
+                            '[multiACE] Restored head %d -> feeder tap source'
+                            % head)
+                    else:
+                        logging.info(
+                            '[multiACE] Restored head %d -> ACE %d / Slot %d' % (
+                                head, saved[key]['ace_index'], saved[key]['slot']))
 
     def notify_external_load(self, module, channel, head):
         """Hook called from filament_feed_ace.py after a successful
