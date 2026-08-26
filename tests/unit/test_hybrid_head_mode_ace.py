@@ -93,6 +93,33 @@ class TestHeadAceActiveFor:
         assert ace.head_ace_active_for(0) is True
 
 
+class _FakeSaveVariables:
+    def __init__(self, all_variables):
+        self.allVariables = all_variables
+
+
+class TestRestoreHeadSource:
+    """_restore_head_source() runs from _handle_ready() on every Klipper
+    boot. A saved feeder-tap sentinel (ace_index=None, slot='feeder') must
+    not crash the '%d' logging path - it did, taking Klipper to shutdown
+    on every restart with a combo head parked on its feeder tap."""
+
+    def test_ace_slot_source_restores_and_logs(self, ace):
+        ace.save_variables = _FakeSaveVariables({
+            'ace__head_source': {'0': {'ace_index': 1, 'slot': 2}},
+        })
+        ace._restore_head_source()
+        assert ace._head_source[0] == {'ace_index': 1, 'slot': 2}
+
+    def test_feeder_tap_sentinel_restores_without_crashing(self, ace):
+        sentinel = dict(ace_module_source_sentinel(ace))
+        ace.save_variables = _FakeSaveVariables({
+            'ace__head_source': {'0': sentinel},
+        })
+        ace._restore_head_source()
+        assert ace._head_source[0] == sentinel
+
+
 class TestFeederLengthAccessors:
     def test_load_length_falls_back_to_the_global(self, ace):
         assert ace.feeder_load_length_for(2) == 1100.0

@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Resupply Run"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "a56b627"
+MULTIACE_BUILD_TAG = "bdf3698"
 MULTIACE_BUNDLE_SHA1 = "e3a093f"
 
 def _load_i18n_catalog(i18n_dir, lang):
@@ -10657,8 +10657,14 @@ class MultiAce:
                 key = str(head)
                 if key in saved and saved[key]:
                     self._head_source[head] = saved[key]
-                    logging.info('[multiACE] Restored head %d -> ACE %d / Slot %d' % (
-                        head, saved[key]['ace_index'], saved[key]['slot']))
+                    if saved[key].get('slot') == 'feeder':
+                        logging.info(
+                            '[multiACE] Restored head %d -> feeder tap source'
+                            % head)
+                    else:
+                        logging.info(
+                            '[multiACE] Restored head %d -> ACE %d / Slot %d' % (
+                                head, saved[key]['ace_index'], saved[key]['slot']))
 
     def notify_external_load(self, module, channel, head):
         """Hook called from filament_feed_ace.py after a successful
