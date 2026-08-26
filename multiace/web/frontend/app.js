@@ -1237,6 +1237,11 @@ createApp({
       if (!t_) return false;
       if (t_.feeder) return t_.filament_detected === false;
       if (t_.manual) return t_.filament_at_extruder === false;
+      // combo_feeder: t_.filament_detected mirrors the ACE gate while the
+      // head is ACE-routed, so it can't tell "feeder tap empty" apart from
+      // "ACE side empty" here - filament_in_toolhead is the feeder port's
+      // own raw sensor, unaffected by which side is currently routed.
+      if (t_.combo_feeder) return t_.filament_in_toolhead === false;
       return false;
     }
     function spoolBadgeCls(sp) {
@@ -2505,6 +2510,14 @@ createApp({
       if (_blockIfPrinting()) return;
       if (!_confirmCmd("ui.confirm.load_head", {head: dispIdx(h)})) return;
       enqueue("ACE_LOAD_HEAD", {HEAD: h});
+    }
+    // Same load, but for a hybrid combo head's stock feeder tap rather
+    // than its ACE slot - SOURCE=FEEDER routes cmd_ACE_LOAD_HEAD to the
+    // feeder path (ace.py:12395).
+    function loadComboFeederHead(h) {
+      if (_blockIfPrinting()) return;
+      if (!_confirmCmd("ui.confirm.load_head", {head: dispIdx(h)})) return;
+      enqueue("ACE_LOAD_HEAD", {HEAD: h, SOURCE: "FEEDER"});
     }
     // head mode: the ACE head wired to this ACE (head_ace reverse lookup), or
     // null if no ACE head uses it.
@@ -6883,7 +6896,7 @@ createApp({
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
       spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,

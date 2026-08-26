@@ -626,15 +626,18 @@ def _parse_state(status: dict) -> dict:
         is_feeder = (op_mode == "head"
                      and bool(head_feeder.get(str(t), head_feeder.get(t, False)))
                      and not is_manual)
-        # Hybrid combo head currently sourced from its feeder tap
-        # (head_source resolves to slot='feeder', not a real ACE slot - see
-        # _resolve_head_source). Its identity comes from the same
-        # display-pushed PTC record a plain feeder head uses, since the
-        # sentinel itself carries no material/colour.
+        # Hybrid combo head not currently sourced from an ACE slot - either
+        # idle (nothing loaded on either side yet) or already loaded from
+        # its feeder tap (head_source resolves to slot='feeder' - see
+        # _resolve_head_source). Both states share the same UI: the feeder
+        # tap's identity comes from the same display-pushed PTC record a
+        # plain feeder head uses (the ACE-slot path, when d_explicit is
+        # set, populates material/colour from the slot instead - see the
+        # block above).
         is_combo_on_feeder = (op_mode == "head" and not is_manual
                               and bool(head_feeder_combo.get(
                                   str(t), head_feeder_combo.get(t, False)))
-                              and sl_explicit == "feeder")
+                              and d_explicit is None)
         if is_manual or is_feeder:
 
             d_explicit = sl_explicit = None
@@ -677,10 +680,12 @@ def _parse_state(status: dict) -> dict:
             "load_failed":        load_failed and not is_manual and not is_feeder,
             "manual":             is_manual,
             "feeder":             is_feeder,
+            "combo_feeder":       is_combo_on_feeder,
             "reader_spool_id":    (int(head_reader.get(str(t),
                                                        head_reader.get(t, 0))
                                        or 0)
-                                   if (is_manual or is_feeder) else 0),
+                                   if (is_manual or is_feeder
+                                       or is_combo_on_feeder) else 0),
             "source":             source,
         })
 

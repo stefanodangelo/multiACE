@@ -832,7 +832,7 @@
                  heruntergerutscht"). The card grid (CSS .feeder/.manual)
                  puts it in a right-hand column spanning title+meta+actions -
                  the text column reads exactly like an ACE toolhead card. -->
-            <button class="feeder-tile" v-if="t_.feeder || t_.manual"
+            <button class="feeder-tile" v-if="t_.feeder || t_.manual || t_.combo_feeder"
                     :class="{'no-color': !t_.color, 'tile-empty': headTileEmpty(t_)}"
                     :style="t_.color ? (headTileEmpty(t_) ? {borderColor: t_.color} : {background: t_.color}) : {}"
                     @click="openHeadPicker(t_)"
@@ -861,7 +861,7 @@
               <br v-if="t_.material && subText(t_.subtype) && !t_.load_failed">
               <span v-if="t_.material && subText(t_.subtype) && !t_.load_failed" class="muted">{{ subText(t_.subtype) }}</span>
             </p>
-            <p class="meta" v-else-if="t_.feeder || t_.manual">
+            <p class="meta" v-else-if="t_.feeder || t_.manual || t_.combo_feeder">
               <span class="muted">{{ t(t_.manual ? 'ui.dashboard.manual' : 'ui.dashboard.feeder') }}</span>
             </p>
             <p class="meta" v-else-if="t_.filament_at_extruder">
@@ -878,6 +878,8 @@
             </p>
             <div class="toolhead-actions" v-if="t_.module_exist">
               <button v-if="t_.feeder && !t_.filament_at_extruder" @click="loadFeederHead(t_.idx)"
+                      :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load') }}</button>
+              <button v-if="t_.combo_feeder && !t_.filament_at_extruder" @click="loadComboFeederHead(t_.idx)"
                       :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load') }}</button>
               <button class="warn" @click="unloadHead(t_.idx)"
                       :disabled="(!t_.head_source_known && !t_.filament_at_extruder) || isPrinting"
