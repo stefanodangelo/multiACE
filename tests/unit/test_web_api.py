@@ -38,6 +38,8 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MULTIACE_RETRY_CONTROL", str(tmp_path / "retry_control"))
     monkeypatch.setenv("MULTIACE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     monkeypatch.setenv("MULTIACE_OVERRIDE_FILE", str(tmp_path / "overrides.json"))
+    monkeypatch.setenv("MULTIACE_VIRTUAL_LOADOUT_FILE",
+                        str(tmp_path / "virtual_loadout.json"))
     monkeypatch.setenv("MULTIACE_MOCK_DIR", str(ROOT / "tests" / "fixtures"))
     monkeypatch.setenv("MULTIACE_WEB_VERSION", "test")
     # Every other MULTIACE_* path this fixture cares about is pinned above;
@@ -50,6 +52,14 @@ def app_env(tmp_path, monkeypatch):
     # this line existed. The suite has to be hermetic against shell state,
     # not rely on the caller remembering to clear it.
     monkeypatch.delenv("MULTIACE_MOCK_MODE", raising=False)
+    # Same hazard as MULTIACE_MOCK_MODE above: run-dev-ui.ps1/.sh document
+    # setting this in the shell to preview head mode locally
+    # ($env:MULTIACE_MOCK_STATE_FILE = "mock_state_head.json"). Left set in
+    # that same terminal, it silently swaps every mock-mode test here onto
+    # the head fixture instead of the default one, which doesn't error -
+    # it just returns a different (head-mode) plan shape, failing whatever
+    # assertion assumed "slicer/optimize/layer" and zero swaps.
+    monkeypatch.delenv("MULTIACE_MOCK_STATE_FILE", raising=False)
     monkeypatch.syspath_prepend(str(BACKEND))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
@@ -876,3 +886,45 @@ class TestDebugModeFlag:
         detail = r.json()["detail"]
         assert "direct write failed" in detail
         assert "sudo touch also failed" in detail
+
+
+class TestVirtualLoadoutStore:
+    """Backend persistence for the frontend's what-if overlay (formerly
+    localStorage-only, so it never survived a different browser/profile)."""
+
+    def test_empty_by_default(self, client):
+        c, main, cfg, calls = client
+        assert c.get("/api/virtual-loadout").json() == {"enabled": False, "slots": []}
+
+    def test_put_persists_to_disk(self, client):
+        c, main, cfg, calls = client
+        body = {"enabled": True, "slots": [
+            {"ace": 0, "slot": 1, "material": "PLA", "color": "#ff0000"}]}
+        r = c.put("/api/virtual-loadout", json=body)
+        assert r.status_code == 200
+        assert r.json()["enabled"] is True
+
+        on_disk = json.loads(Path(main.VIRTUAL_LOADOUT_FILE).read_text())
+        assert on_disk["enabled"] is True
+        assert on_disk["slots"][0]["material"] == "PLA"
+
+    def test_survives_a_fresh_read(self, client):
+        c, main, cfg, calls = client
+        body = {"enabled": True, "slots": [
+            {"ace": 1, "slot": 2, "material": "PETG", "color": "#00ff00"}]}
+        c.put("/api/virtual-loadout", json=body)
+        assert c.get("/api/virtual-loadout").json() == body
+
+    def test_delete_clears_it(self, client):
+        c, main, cfg, calls = client
+        c.put("/api/virtual-loadout", json={"enabled": True, "slots": [
+            {"ace": 0, "slot": 0, "material": "PLA", "color": "#888888"}]})
+        r = c.delete("/api/virtual-loadout")
+        assert r.status_code == 200
+        assert c.get("/api/virtual-loadout").json() == {"enabled": False, "slots": []}
+
+    def test_corrupt_file_is_treated_as_empty(self, client):
+        c, main, cfg, calls = client
+        Path(main.VIRTUAL_LOADOUT_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(main.VIRTUAL_LOADOUT_FILE).write_text("{not json")
+        assert c.get("/api/virtual-loadout").json() == {"enabled": False, "slots": []}

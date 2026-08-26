@@ -28,10 +28,23 @@ TWO PUSH CLASSES, and -WebOnly is the DEFAULT (plan section 13.1):
                       restarts. Shipped alongside -Full, because a recovery
                       path that has never run is not a recovery path.
 
+  -BootstrapKey       installs -PublicKeyPath on the printer's
+                      authorized_keys, then exits - nothing else in this
+                      script runs. Needed after a reimage, when the
+                      printer's authorized_keys is gone and every other
+                      call here (ssh -o BatchMode=yes) refuses to fall back
+                      to a password prompt by design. This is the one call
+                      that deliberately omits BatchMode, so ssh itself
+                      prompts for the printer's password at the console -
+                      it is never read into a script variable, so it can't
+                      end up in PowerShell history, an error message, or a
+                      process listing.
+
 .EXAMPLE
   .\push-to-printer.ps1 -PrinterHost 192.168.1.50
   .\push-to-printer.ps1 -PrinterHost 192.168.1.50 -Full
   .\push-to-printer.ps1 -PrinterHost 192.168.1.50 -Rollback
+  .\push-to-printer.ps1 -PrinterHost 192.168.1.50 -BootstrapKey
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +53,8 @@ param(
     [switch]$WebOnly,
     [switch]$Full,
     [switch]$Rollback,
+    [switch]$BootstrapKey,
+    [string]$PublicKeyPath = $(if ($env:MULTIACE_SSH_PUBKEY) { $env:MULTIACE_SSH_PUBKEY } else { Join-Path $HOME ".ssh\id_ed25519.pub" }),
     [switch]$DryRun,
     [switch]$NoRestart,
     [switch]$SkipTests,
@@ -88,6 +103,15 @@ if (-not $PrinterHost) {
 }
 
 function Invoke-Remote ($Command) {
+    # This file is CRLF (Windows-native PowerShell), so a multi-line
+    # here-string built from it - e.g. the web-only sync script below -
+    # carries literal `r`n between lines. ssh ships $Command to the
+    # printer's bash byte-for-byte; a bare `r in the middle of a bash
+    # script is not whitespace to bash, it's part of the token, so lines
+    # like "set -e`r" fail as "invalid option" instead of running. Strip
+    # `r unconditionally so every call site is safe, not just multi-line
+    # ones - a single-line command has none to strip anyway.
+    $Command = $Command -replace "`r", ""
     if ($DryRun) {
         Write-Host "DRY-RUN: ssh $PrinterUser@$PrinterHost $Command"
         return ""
@@ -258,7 +282,42 @@ fi
     Say "rollback done"
 }
 
+# Deliberately the one place in this script that does NOT pass
+# -o BatchMode=yes: its whole job is bootstrapping the key that every other
+# call here depends on. The key is piped in over stdin (never interpolated
+# into the remote command string) so an unusual key comment can't break
+# quoting. Dedup with grep -qxF so re-running this after it already
+# succeeded is a no-op, not a growing authorized_keys file.
+function Invoke-KeyBootstrap {
+    if (-not (Test-Path $PublicKeyPath)) {
+        Die "no public key at '$PublicKeyPath' - pass -PublicKeyPath or set MULTIACE_SSH_PUBKEY."
+    }
+    Say "installing $PublicKeyPath on ${PrinterUser}@${PrinterHost}"
+    Warn "this will prompt for the printer's password at the console (typed straight into ssh - never captured by this script)"
+    if ($DryRun) { Write-Host "DRY-RUN: <install $PublicKeyPath into ~/.ssh/authorized_keys>"; return }
+    $remoteScript = @'
+set -e
+umask 077
+mkdir -p ~/.ssh
+touch ~/.ssh/authorized_keys
+key=$(cat)
+grep -qxF "$key" ~/.ssh/authorized_keys || echo "$key" >> ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+'@
+    Get-Content $PublicKeyPath -Raw | ssh "$PrinterUser@$PrinterHost" $remoteScript
+    if ($LASTEXITCODE -ne 0) {
+        Die "key bootstrap failed ($LASTEXITCODE) - check the password and that root login is permitted."
+    }
+    Say "public key installed - future pushes should authenticate without a password"
+}
+
 # --- main ------------------------------------------------------------------
+
+if ($BootstrapKey) {
+    Invoke-KeyBootstrap
+    exit 0
+}
 
 if ($Rollback) {
     Assert-PrinterIdle
@@ -367,14 +426,22 @@ try {
     # ambiguity, at the cost of ~33% more bytes on the wire, irrelevant at
     # this file's size. The remote end only needs `base64`, a standard
     # BusyBox applet, not the scp/sftp subsystem that keeps crashing.
+    #
+    # The base64 text itself still can't go through `$b64 | ssh ...` -
+    # PowerShell 5.1's pipeline-to-native-stdin path mangles a single very
+    # long string (reproduced locally: a 2.7M-char base64 string piped this
+    # way arrives at the far end truncated to 0 bytes, "base64: invalid
+    # input", even though it's plain ASCII with no encoding ambiguity of
+    # its own - the pipeline machinery is the thing at fault, not the
+    # content). Writing it to a file and letting cmd.exe's `<` operator
+    # bind that file straight to ssh's stdin is real OS-level redirection,
+    # bypasses PowerShell's pipeline entirely, and round-trips byte-for-
+    # byte in the same repro.
     $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($tarball))
-    # The pipe has to be INSIDE the scriptblock, not `$b64 | Invoke-
-    # NativeChecked {...}` - that form tries to bind $b64 to one of the
-    # wrapper's own parameters and throws a ParameterBindingException
-    # before ssh ever runs. Inside the block, $b64 is just a normal closed-
-    # over variable and pipes into the native command exactly as expected.
+    $b64File = Join-Path $Stage "payload.b64"
+    [System.IO.File]::WriteAllText($b64File, $b64, (New-Object System.Text.ASCIIEncoding))
     Invoke-NativeChecked {
-        $b64 | ssh -T -o BatchMode=yes "$PrinterUser@$PrinterHost" "base64 -d > $RemoteTar"
+        cmd /c "ssh -T -o BatchMode=yes $PrinterUser@$PrinterHost `"base64 -d > $RemoteTar`" < `"$b64File`""
     }
     if ($LASTEXITCODE -ne 0) { Die "streaming copy to the printer failed" }
 

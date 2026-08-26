@@ -28,17 +28,32 @@
 #                         because a recovery path that has never run is not
 #                         a recovery path.
 #
+#   --bootstrap-key       installs $MULTIACE_SSH_PUBKEY (default
+#                         ~/.ssh/id_ed25519.pub) into the printer's
+#                         authorized_keys, then exits - nothing else here
+#                         runs. Needed after a reimage, when authorized_keys
+#                         is gone and every other call in this script (ssh
+#                         -o BatchMode=yes) refuses to fall back to a
+#                         password prompt by design. Deliberately the one
+#                         call that omits BatchMode, so ssh itself prompts
+#                         for the printer's password at the console - it
+#                         never passes through a shell variable, so it can't
+#                         end up in shell history, an error message, or a
+#                         process listing.
+#
 # Behaviour is shared with push-to-printer.ps1 - keep the two in step.
 set -euo pipefail
 
 HOST="${MULTIACE_PRINTER_HOST:-}"
 USER_NAME="${MULTIACE_PRINTER_USER:-root}"
+PUBKEY_PATH="${MULTIACE_SSH_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
 MODE="web-only"
 DRY_RUN=0
 NO_RESTART=0
 SKIP_TESTS=0
 FORCE_MID_PRINT=0
 ROLLBACK=0
+BOOTSTRAP_KEY=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE_TAR="/tmp/multiace-dev.tar.gz"
@@ -57,6 +72,10 @@ Usage: push-to-printer.sh [options]
   --web-only         sync multiace/web only, no Klipper restart (DEFAULT)
   --full             sync everything and run install_multiace.sh
   --rollback         restore the installer's pre-multiACE backups, restart
+  --bootstrap-key    install a pubkey into the printer's authorized_keys,
+                     then exit (prompts for the printer's password)
+  --pubkey <path>    public key to install with --bootstrap-key
+                     (default ~/.ssh/id_ed25519.pub, or $MULTIACE_SSH_PUBKEY)
   --dry-run          print what would happen, change nothing
   --no-restart       skip every restart (implies no post-restart check)
   --skip-tests       skip the local pytest run (--full only; prints what it
@@ -70,9 +89,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --host) HOST="$2"; shift 2 ;;
         --user) USER_NAME="$2"; shift 2 ;;
+        --pubkey) PUBKEY_PATH="$2"; shift 2 ;;
         --web-only) MODE="web-only"; shift ;;
         --full) MODE="full"; shift ;;
         --rollback) ROLLBACK=1; shift ;;
+        --bootstrap-key) BOOTSTRAP_KEY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --no-restart) NO_RESTART=1; shift ;;
         --skip-tests) SKIP_TESTS=1; shift ;;
@@ -246,6 +267,35 @@ restart_web() {
     run_remote '/etc/init.d/S98multiace-web restart >/dev/null 2>&1 || true'
 }
 
+# Deliberately the one function that does NOT pass -o BatchMode=yes: its
+# whole job is bootstrapping the key every other call here depends on. The
+# key goes over stdin (never interpolated into the remote command string)
+# so an unusual key comment can't break quoting. Dedup with grep -qxF so
+# re-running this after it already succeeded is a no-op, not a growing
+# authorized_keys file.
+do_bootstrap_key() {
+    [ -f "$PUBKEY_PATH" ] \
+        || die "no public key at '${PUBKEY_PATH}' - pass --pubkey or set MULTIACE_SSH_PUBKEY."
+    say "installing ${PUBKEY_PATH} on ${USER_NAME}@${HOST}"
+    warn "this will prompt for the printer's password at the console (typed straight into ssh - never captured by this script)"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY-RUN: <install ${PUBKEY_PATH} into ~/.ssh/authorized_keys>"
+        return 0
+    fi
+    ssh "${USER_NAME}@${HOST}" '
+set -e
+umask 077
+mkdir -p ~/.ssh
+touch ~/.ssh/authorized_keys
+key=$(cat)
+grep -qxF "$key" ~/.ssh/authorized_keys || echo "$key" >> ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+' < "$PUBKEY_PATH" \
+        || die "key bootstrap failed - check the password and that root login is permitted."
+    say "public key installed - future pushes should authenticate without a password"
+}
+
 # --- post-restart verification (§13.1) ------------------------------------
 # Verify recovery, do not assume it. A push that half-lands is exactly the
 # "half-stock, half-multiACE" state the README warns about.
@@ -281,6 +331,11 @@ half-landed. If the printer misbehaves, run: $0 --host ${HOST} --rollback" ;;
 }
 
 # --- main ------------------------------------------------------------------
+if [ "$BOOTSTRAP_KEY" = "1" ]; then
+    do_bootstrap_key
+    exit 0
+fi
+
 if [ "$ROLLBACK" = "1" ]; then
     check_printer_idle
     do_rollback
