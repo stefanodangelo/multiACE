@@ -241,25 +241,25 @@
       }
     },
     {
-      "_comment": "Head 1 has the hybrid feeder-combo on: its stock feeder is Y-spliced onto ACE 0's path, so both the feeder-combo checkbox and the per-head ACE picker are exercised together here.",
+      "_comment": "Head 1 has the hybrid feeder-combo on (Y-splice joining its stock feeder onto ACE 0's path) and is currently idle on the feeder side - not sourced from an ACE slot, with filament sitting detected in its stock loader. Exercises the combo_feeder tile/spool-picker/Load button (added alongside the ACE picker + feeder-combo checkbox, which read head_feeder_combo/head_ace directly above and don't depend on this head's load state).",
       "idx": 1,
       "name": "T1",
-      "ace": 0,
-      "slot": 1,
+      "ace": null,
+      "slot": "feeder",
       "module_exist": true,
-      "filament_detected": false,
-      "channel_state": "load_pull",
-      "head_source_known": true,
-      "material": "PLA",
-      "color": "#3f7fd0",
+      "filament_detected": true,
+      "filament_in_toolhead": true,
+      "filament_at_extruder": false,
+      "channel_state": "preload_finish",
+      "head_source_known": false,
+      "material": "PETG",
+      "color": "#3cc07a",
       "brand": "Generic",
-      "subtype": "Matte",
+      "subtype": "",
       "manual": false,
       "feeder": false,
-      "source": {
-        "ace_index": 0,
-        "slot": 1
-      }
+      "combo_feeder": true,
+      "source": null
     },
     {
       "_comment": "A failed load, so the collapsed lane-header chips have an error state to cope with as well as an absent one (ACE 1 slot 1 and 2 are empty).",
@@ -326,7 +326,7 @@
           "weight_initial_g": 500.0, "price_per_kg": 32.0}
   },
   "spool_binding": {
-    "0_0": "1", "0_1": "2", "0_3": "3", "1_0": "4", "1_3": "5"
+    "0_0": "1", "0_1": "2", "0_3": "3", "1_0": "4", "1_3": "5", "h1": "3"
   },
   "retry_state": null
 }
