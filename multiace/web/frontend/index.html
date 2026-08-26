@@ -690,6 +690,16 @@
                   <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
               </label>
+              <label class="th-manual th-combo"
+                     :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
+                     :title="(t_.head_source_known || t_.filament_at_extruder)
+                       ? t('ui.dashboard.feeder_unload_first')
+                       : t('ui.dashboard.feeder_combo_hint')">
+                <input type="checkbox" :checked="headFeederComboOf(t_.idx)"
+                       :disabled="t_.head_source_known || t_.filament_at_extruder"
+                       @change="headToggle($event, headFeederComboOf(t_.idx), v => setHeadFeederCombo(t_.idx, v))">
+                <span>{{ t('ui.dashboard.feeder_combo') }}</span>
+              </label>
               <label class="th-manual th-bg" v-if="state.bg_swap?.available"
                      :title="t('ui.dashboard.bg_hint')">
                 <input type="checkbox" :checked="bgEnabledFor(t_.idx)"

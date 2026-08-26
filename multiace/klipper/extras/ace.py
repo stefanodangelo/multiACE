@@ -76,6 +76,12 @@ class AceException(Exception):
 GATE_UNKNOWN = -1
 GATE_EMPTY = 0
 
+# Hybrid per-head mode: _head_source sentinel for "this head is currently fed
+# from its combo feeder tap, not an ACE slot". slot is the string 'feeder'
+# (not an int like -1) so every isinstance(x, int) guard on _head_source
+# fails closed instead of silently treating it as a real ACE slot index.
+FEEDER_TAP_SOURCE = {'ace_index': None, 'slot': 'feeder'}
+
 RESCAN_BIND_WINDOW = 8.0
 GATE_AVAILABLE = 1
 
@@ -258,6 +264,7 @@ class MultiAce:
     VARS_ACE_HEAD_MANUAL = 'ace__head_manual'
     VARS_ACE_HEAD = 'ace__ace_head'
     VARS_ACE_HEAD_FEEDER = 'ace__head_feeder'
+    VARS_ACE_HEAD_FEEDER_COMBO = 'ace__head_feeder_combo'
     VARS_ACE_HEAD_ACE = 'ace__head_ace'
     VARS_ACE_PURGE_USED = 'ace__purge_bin_used_mm'
     VARS_ACE_HEADS_MANUAL_CONV = 'ace__heads_manual_conv'
@@ -492,6 +499,43 @@ class MultiAce:
         for i in range(4):
             self.head_ace[i] = config.getint(
                 'head_ace_%d' % i, i, minval=0, maxval=3)
+
+        # Hybrid per-head mode: a head that is ACE-driven (head_ace) AND has
+        # the stock feeder spliced onto the SAME path via a Y-splitter, so it
+        # can swap between its ACE's slots and the feeder spool mid-print.
+        # Orthogonal to head_feeder (which means "no ACE at all" for a head).
+        self.head_feeder_combo = {}
+        for i in range(4):
+            self.head_feeder_combo[i] = config.getboolean(
+                'head_feeder_combo_%d' % i, False)
+
+        self.feeder_load_length = config.getfloat(
+            'feeder_load_length', 1100., minval=100., maxval=5000.)
+        self._feeder_load_length_head = {}
+        for i in range(4):
+            v = config.getfloat(
+                'feeder_load_length_%d' % i, None, minval=100., maxval=5000.)
+            if v is not None:
+                self._feeder_load_length_head[i] = v
+
+        self.feeder_retract_length = config.getfloat(
+            'feeder_retract_length', None, minval=0., maxval=2000.)
+        self._feeder_retract_length_head = {}
+        for i in range(4):
+            v = config.getfloat(
+                'feeder_retract_length_%d' % i, None, minval=0., maxval=2000.)
+            if v is not None:
+                self._feeder_retract_length_head[i] = v
+
+        self.feeder_swap_retract_length = config.getfloat(
+            'feeder_swap_retract_length', 150., minval=0., maxval=2000.)
+        self._feeder_swap_retract_length_head = {}
+        for i in range(4):
+            v = config.getfloat(
+                'feeder_swap_retract_length_%d' % i, None,
+                minval=0., maxval=2000.)
+            if v is not None:
+                self._feeder_swap_retract_length_head[i] = v
 
         self._ace_section_load_length = {}
         self._ace_section_load_length_slot = {}
@@ -1062,6 +1106,9 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_SET_HEAD_ACE', self.cmd_ACE_SET_HEAD_ACE,
             desc=self.cmd_ACE_SET_HEAD_ACE_help)
+        self.gcode.register_command(
+            'ACE_SET_HEAD_FEEDER_COMBO', self.cmd_ACE_SET_HEAD_FEEDER_COMBO,
+            desc=self.cmd_ACE_SET_HEAD_FEEDER_COMBO_help)
         self.gcode.register_command(
             'ACE_SET_PURGE', self.cmd_ACE_SET_PURGE,
             desc=self.cmd_ACE_SET_PURGE_help)
@@ -2004,6 +2051,7 @@ class MultiAce:
             self._ace_mode = self.save_variables.allVariables.get('ace__mode', 'normal')
             self._restore_head_manual()
             self._restore_head_feeder()
+            self._restore_head_feeder_combo()
             self._restore_head_ace()
             _mc = self.save_variables.allVariables.get(
                 self.VARS_ACE_HEADS_MANUAL_CONV, None)
@@ -2332,6 +2380,56 @@ class MultiAce:
         if v is not None:
             return v
         return self.swap_retract_length
+
+    def feeder_load_length_for(self, head):
+        """Native stock-feeder load distance ceiling (mm) for HEAD - the
+        feeder-side equivalent of get_load_length. Per-head override wins,
+        else the global feeder_load_length (default 1100, same as the old
+        hardcoded FEED_LOAD_LENGTH_MAX in filament_feed_ace.py). Sensor-
+        stopped like an ACE load - this is only the jam/no-filament abort
+        ceiling, a Y-splitter on a combo head just needs it raised to cover
+        the added tube length."""
+        try:
+            head = int(head)
+        except (TypeError, ValueError):
+            return self.feeder_load_length
+        v = self._feeder_load_length_head.get(head)
+        if v is not None:
+            return v
+        return self.feeder_load_length
+
+    def feeder_retract_length_for(self, head):
+        """Retract distance (mm) to clear a combo head's feeder filament
+        past the Y-splitter junction so the ACE can feed through the same
+        shared path. Per-head override wins, else the global
+        feeder_retract_length, else retract_length (compat fallback -
+        matches the pre-existing incidental reuse of the ACE's own
+        retract_length for feeder-head unload probing, so an upgrade with no
+        new config added changes no existing behaviour)."""
+        try:
+            head = int(head)
+        except (TypeError, ValueError):
+            head = None
+        if head is not None:
+            v = self._feeder_retract_length_head.get(head)
+            if v is not None:
+                return v
+        if self.feeder_retract_length is not None:
+            return self.feeder_retract_length
+        return self.retract_length
+
+    def get_feeder_swap_retract_length(self, head):
+        """Mid-print swap retract (mm) for pulling a combo head's feeder
+        filament clear before an ACE-slot swap takes over that head. Per-
+        head override wins, else the global feeder_swap_retract_length."""
+        try:
+            head = int(head)
+        except (TypeError, ValueError):
+            return self.feeder_swap_retract_length
+        v = self._feeder_swap_retract_length_head.get(head)
+        if v is not None:
+            return v
+        return self.feeder_swap_retract_length
 
     def get_purge_length(self):
         """Flush LENGTH for the stock INNER_FLUSH_FILAMENT. A per-swap
@@ -10662,6 +10760,45 @@ class MultiAce:
         except (TypeError, ValueError):
             return False
 
+    def head_has_feeder_tap(self, head):
+        """True for a hybrid combo head: ACE-driven, with the stock feeder
+        also spliced onto the same path via a Y-splitter (head_feeder_combo).
+        Only meaningful in head mode, and only ever true together with
+        head_uses_ace(head) - a combo tap is an ADDITION to an ACE head, not
+        an alternative to head_feeder."""
+        if getattr(self, '_ace_mode', 'multi') != 'head':
+            return False
+        if not self.head_uses_ace(head):
+            return False
+        try:
+            return bool(self.head_feeder_combo.get(int(head), False))
+        except (TypeError, ValueError):
+            return False
+
+    def head_source_is_feeder_tap(self, head):
+        """True when HEAD is currently loaded from its combo feeder tap
+        (FEEDER_TAP_SOURCE), rather than an ACE slot."""
+        src = self._head_source.get(head)
+        return bool(src) and src.get('slot') == 'feeder'
+
+    def head_ace_active_for(self, head):
+        """Like head_uses_ace, but dynamic: for a hybrid combo head this
+        reflects the head's CURRENT routing rather than its static wiring -
+        False while the head is actively sourced from its feeder tap.
+
+        head_uses_ace itself must stay a purely static wiring check (the
+        dashboard wiring overlay and _head_for_ace need to keep showing a
+        combo head's ACE slots as belonging to it even while it happens to
+        be printing from the feeder tap right now). This is the dynamic
+        counterpart filament_feed_ace.py's per-operation load/unload/feed-
+        assist mechanics need instead: which physical path is THIS load,
+        unload or sensor read actually driving."""
+        if not self.head_uses_ace(head):
+            return False
+        if self.head_source_is_feeder_tap(head):
+            return False
+        return True
+
     def head_uses_ace(self, head):
 
         if self.head_is_manual(head):
@@ -10896,10 +11033,60 @@ class MultiAce:
         if self.save_variables:
             self._save_head_feeder()
 
+        if enable and self.head_feeder_combo.get(head, False):
+            # Feeder-only and combo are mutually exclusive (combo requires
+            # head_uses_ace) - drop the now-meaningless combo flag rather
+            # than leave it stale (mirrors the head_source clear above).
+            self.head_feeder_combo[head] = False
+            if self.save_variables:
+                self._save_head_feeder_combo()
+
         if enable and not was_feeder:
             self._clear_filament_display(head)
         self.log_always(
             '[multiACE] head %d feeder mode %s'
+            % (head, 'ENABLED' if enable else 'disabled'))
+
+    cmd_ACE_SET_HEAD_FEEDER_COMBO_help = (
+        '[multiACE] Toggle the hybrid combo feeder tap on an ACE-driven head '
+        '(head mode only). Usage: ACE_SET_HEAD_FEEDER_COMBO HEAD=0..3 '
+        'ENABLE=0|1. Requires the head to already be ACE-driven (head_ace, '
+        'not manual/feeder). When enabled, a Y-splitter is assumed to join '
+        "the head's stock side feeder onto the same path as its ACE, so the "
+        'head can swap between its ACE slots and the feeder spool mid-print '
+        'via ACE_SWAP_HEAD ... SOURCE=FEEDER. Persisted.')
+
+    def cmd_ACE_SET_HEAD_FEEDER_COMBO(self, gcmd):
+        head = gcmd.get_int('HEAD', minval=0, maxval=3)
+        enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
+        was_combo = bool(self.head_feeder_combo.get(head, False))
+
+        if bool(enable) != was_combo and self._head_is_loaded(head):
+            self._head_loaded_refusal_info(head, 'ACE_SET_HEAD_FEEDER_COMBO')
+            raise gcmd.error(
+                self._t('msg.head_feeder_combo_loaded', head=self._disp(head)))
+
+        if enable and not self.head_uses_ace(head):
+            raise gcmd.error(
+                self._t('msg.head_feeder_combo_needs_ace', head=self._disp(head)))
+
+        if bool(enable) != was_combo and self.head_source_is_feeder_tap(head):
+            # Disabling the tap while it is the head's current source would
+            # leave a head_source pointing at a source that no longer
+            # exists - clear it the same way the other setters clear a stale
+            # head_source on a state change.
+            logging.info(
+                '[multiACE] ACE_SET_HEAD_FEEDER_COMBO: clearing stale '
+                'feeder-tap head_source of head %d' % head)
+            self._head_source[head] = None
+            self._save_head_source()
+
+        self.head_feeder_combo[head] = bool(enable)
+        if self.save_variables:
+            self._save_head_feeder_combo()
+
+        self.log_always(
+            '[multiACE] head %d feeder combo tap %s'
             % (head, 'ENABLED' if enable else 'disabled'))
 
     cmd_ACE_SET_HEAD_ACE_help = (
@@ -11077,6 +11264,28 @@ class MultiAce:
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
             % (self.VARS_ACE_HEAD_FEEDER, value_str))
+
+    def _restore_head_feeder_combo(self):
+        saved = self.save_variables.allVariables.get(
+            self.VARS_ACE_HEAD_FEEDER_COMBO, None)
+        if saved and isinstance(saved, dict):
+            for head in range(4):
+                key = str(head)
+                if key in saved:
+                    self.head_feeder_combo[head] = bool(saved[key])
+                    if self.head_feeder_combo[head]:
+                        logging.info(
+                            '[multiACE] Restored head %d -> feeder combo tap'
+                            % head)
+
+    def _save_head_feeder_combo(self):
+        save_data = {str(h): bool(self.head_feeder_combo[h]) for h in range(4)}
+        value_str = (json.dumps(save_data)
+                     .replace(': true', ': True')
+                     .replace(': false', ': False'))
+        self.gcode.run_script_from_command(
+            "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
+            % (self.VARS_ACE_HEAD_FEEDER_COMBO, value_str))
 
     def _restore_head_ace(self):
         saved = self.save_variables.allVariables.get(
@@ -12183,11 +12392,17 @@ class MultiAce:
         run('INNER_DISCARD_FILAMENT_BASE_DISCARD')
         run('M107')
 
-    cmd_ACE_LOAD_HEAD_help = '[multiACE] Load a toolhead from ACE. Usage: ACE_LOAD_HEAD HEAD=0 [ACE=0] [SLOT=0]'
+    cmd_ACE_LOAD_HEAD_help = ('[multiACE] Load a toolhead from ACE. Usage: '
+        'ACE_LOAD_HEAD HEAD=0 [ACE=0] [SLOT=0]  or, on a hybrid combo head, '
+        'ACE_LOAD_HEAD HEAD=0 SOURCE=FEEDER to load its stock feeder tap.')
     def cmd_ACE_LOAD_HEAD(self, gcmd):
 
         head = gcmd.get_int('HEAD')
         self._last_load_ok = True
+        # Hybrid combo head: load the stock feeder tap instead of the ACE.
+        # want_feeder=False (the default, SOURCE omitted) reproduces every
+        # existing call site's behaviour byte-for-byte - this is additive.
+        want_feeder = gcmd.get('SOURCE', 'ACE').upper() == 'FEEDER'
 
         if head < 0 or head > 3:
             raise self._ace_error(gcmd, 'HEAD must be 0-3', code=200)
@@ -12196,9 +12411,15 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_LOAD_HEAD ignored, '
                 'load it by hand' % head)
             return
+        if want_feeder and not self.head_has_feeder_tap(head):
+            raise self._ace_error(gcmd,
+                'head %d has no feeder combo tap - enable with '
+                'ACE_SET_HEAD_FEEDER_COMBO first' % self._disp(head),
+                code=209, head=head)
         self._wait_bg_op(head, gcmd)
 
-        _hm = (getattr(self, '_ace_mode', 'multi') == 'head'
+        _hm = (not want_feeder
+               and getattr(self, '_ace_mode', 'multi') == 'head'
                and self.head_uses_ace(head))
         if _hm:
             ace_index = gcmd.get_int('ACE', self.head_ace_for(head))
@@ -12227,7 +12448,7 @@ class MultiAce:
             'filament_motion_sensor e%d_filament' % head, None)
 
         _staged = getattr(self, '_bg_staged', {}).get(head)
-        if _staged is not None and self.head_uses_ace(head):
+        if _staged is not None and self.head_uses_ace(head) and not want_feeder:
             if int(_staged[0]) == int(ace_index)\
                     and int(_staged[1]) == int(slot):
                 self._bg_staged.pop(head, None)
@@ -12247,7 +12468,7 @@ class MultiAce:
                                self._disp(ace_index), self._disp(slot)),
                     code=203, head=head)
         elif sensor and sensor.get_status(0)['filament_detected']:
-            if not self.head_uses_ace(head):
+            if not self.head_uses_ace(head) or want_feeder:
 
                 self.log_always(self._t('msg.load_head_already_loaded',
                     head=self._disp(head)))
@@ -12282,7 +12503,7 @@ class MultiAce:
         self.log_always(self._t('msg.load_head_starting',
             head=self._disp(head), ace=self._disp(ace_index), slot=self._disp(slot)))
 
-        if self.head_uses_ace(head):
+        if self.head_uses_ace(head) and not want_feeder:
             if ace_index != self._active_device_index:
                 if not self._switch_ace_for_head_target(ace_index):
                     raise self._ace_error(gcmd,
@@ -12303,7 +12524,14 @@ class MultiAce:
 
         module, channel = self.EXTRUDER_MAP[head]
 
-        if self.head_uses_ace(head):
+        if want_feeder:
+            # Set BEFORE FEED_AUTO runs: head_ace_active_for(head) reads
+            # this to route every per-channel branch in filament_feed_ace.py
+            # (feed-assist arming, seat press, sensor readback, ...) to the
+            # native/feeder path for the whole duration of this load.
+            self._head_source[head] = dict(FEEDER_TAP_SOURCE)
+            self._save_head_source()
+        elif self.head_uses_ace(head):
             self._head_source[head] = self._inherit_prev_capture(
                 head, ace_index, slot, self._overlay_override(
                     ace_index, slot, {
@@ -12357,7 +12585,7 @@ class MultiAce:
             finally:
                 self._in_internal_load_head = False
 
-            if fail_reason is None and self.head_uses_ace(head):
+            if fail_reason is None and self.head_uses_ace(head) and not want_feeder:
                 _load_ok = True
                 _skip_reason = None
                 try:
@@ -12473,16 +12701,25 @@ class MultiAce:
                 raise fail_exc
             raise gcmd.error(detail)
 
-        if not self.head_uses_ace(head):
+        if not self.head_uses_ace(head) or want_feeder:
 
-            self._head_source[head] = None
+            if not want_feeder:
+                # Plain feeder head: structurally has only one possible
+                # source, so head_source stays None by design (the toolhead
+                # sensor alone is the truth for it). A combo head's feeder
+                # tap keeps its FEEDER_TAP_SOURCE sentinel (set above, before
+                # FEED_AUTO ran) - it has TWO possible sources and needs to
+                # remember which one is currently active.
+                self._head_source[head] = None
             self._save_head_source()
             self._ghost_heads.discard(head)
             self._refresh_filament_exist_flags()
             self.log_always(
-                '[multiACE] Head %d loaded via stock feeder (no ACE source)'
-                % self._disp(head))
-            self._audit_state('LOAD_HEAD', {'head': head, 'feeder': True})
+                '[multiACE] Head %d loaded via stock feeder%s'
+                % (self._disp(head),
+                   ' combo tap' if want_feeder else ' (no ACE source)'))
+            self._audit_state('LOAD_HEAD', {'head': head, 'feeder': True,
+                                            'combo': want_feeder})
             return
 
         rfid_deadline = self.reactor.monotonic() + 3.0
@@ -12587,7 +12824,13 @@ class MultiAce:
                 logging.info('[multiACE] unload head %d: using bg-staged '
                              'ACE %d slot %d as the source'
                              % (head, staged[0], staged[1]))
-        if source:
+        if source and source.get('slot') == 'feeder':
+            # Hybrid combo head, currently sourced from its feeder tap - no
+            # ACE to switch to, the native feed engine handles the whole
+            # unload (below) same as a plain feeder head.
+            self.log_always(
+                '[multiACE] Unload: head %d (feeder tap)' % self._disp(head))
+        elif source:
             ace_index = source['ace_index']
             slot = source['slot']
             self.log_always(self._t('msg.unload_head_starting',
@@ -12606,9 +12849,10 @@ class MultiAce:
 
         proto = self._protocols.get(active_idx)
         is_v2 = (proto is not None and getattr(proto, 'NAME', None) == 'v2')
-        if not self.head_uses_ace(head):
+        if not self.head_uses_ace(head) or (source and source.get('slot') == 'feeder'):
 
-            self._fa_trace('unload: head %d not ACE-driven - skip ACE FA' % head)
+            self._fa_trace('unload: head %d not ACE-driven (or on its feeder '
+                           'tap) - skip ACE FA' % head)
         elif is_v2:
             self._v2_arm_fa_for_unload(head)
             self._fa_trace(
@@ -13030,7 +13274,9 @@ class MultiAce:
             % (head, self.swap_default_temp))
         return self.swap_default_temp
 
-    cmd_ACE_SWAP_HEAD_help = '[multiACE] Mid-print filament swap. Usage: ACE_SWAP_HEAD HEAD=0 ACE=1 [SLOT=0]'
+    cmd_ACE_SWAP_HEAD_help = ('[multiACE] Mid-print filament swap. Usage: '
+        'ACE_SWAP_HEAD HEAD=0 ACE=1 [SLOT=0]  or, on a hybrid combo head, '
+        'ACE_SWAP_HEAD HEAD=0 SOURCE=FEEDER to swap onto its stock feeder tap.')
     def _dwell_fan(self, on):
         """Part-fan bracket for the swap's PASSIVE dock waits (bulk retract
         to the ACE, bowden feed to the sensor) - the dwell-heat-soak
@@ -13079,7 +13325,11 @@ class MultiAce:
     def cmd_ACE_SWAP_HEAD(self, gcmd):
 
         head = gcmd.get_int('HEAD')
-        ace_index = gcmd.get_int('ACE')
+        # Hybrid combo head: swap onto the stock feeder tap instead of an
+        # ACE slot. want_feeder=False (SOURCE omitted, the default)
+        # reproduces every existing call site's behaviour byte-for-byte.
+        want_feeder = gcmd.get('SOURCE', 'ACE').upper() == 'FEEDER'
+        ace_index = gcmd.get_int('ACE', -1)
         slot = gcmd.get_int('SLOT', head)
 
         if gcmd.get_int('SKIP_POS_RESTORE', 0):
@@ -13124,24 +13374,30 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_SWAP_HEAD ignored, '
                 'load it by hand' % head)
             return
+        if want_feeder and not self.head_has_feeder_tap(head):
+            raise self._ace_error(gcmd,
+                'head %d has no feeder combo tap - enable with '
+                'ACE_SET_HEAD_FEEDER_COMBO first' % self._disp(head),
+                code=209, head=head)
         self._wait_bg_op(head, gcmd, rearm_target=(ace_index, slot))
-        if ace_index < 0 or not self._ensure_ace_available(ace_index):
-            raise self._ace_error(gcmd,
-                'ACE %d not available' % self._disp(ace_index),
-                code=208, head=head)
-        if slot < 0 or slot > 3:
-            raise self._ace_error(gcmd, 'SLOT must be 0-3', code=200,
-                                  head=head)
+        if not want_feeder:
+            if ace_index < 0 or not self._ensure_ace_available(ace_index):
+                raise self._ace_error(gcmd,
+                    'ACE %d not available' % self._disp(ace_index),
+                    code=208, head=head)
+            if slot < 0 or slot > 3:
+                raise self._ace_error(gcmd, 'SLOT must be 0-3', code=200,
+                                      head=head)
 
-        if (getattr(self, '_ace_mode', 'multi') == 'head'
-                and self.head_uses_ace(head)
-                and ace_index != self.head_ace_for(head)):
-            raise self._ace_error(gcmd,
-                'head %d is wired to ACE %d (one ACE per head) - '
-                'refusing swap on ACE %d. Rewire via ACE_SET_HEAD_ACE first.'
-                % (self._disp(head), self._disp(self.head_ace_for(head)),
-                   self._disp(ace_index)),
-                code=207, head=head)
+            if (getattr(self, '_ace_mode', 'multi') == 'head'
+                    and self.head_uses_ace(head)
+                    and ace_index != self.head_ace_for(head)):
+                raise self._ace_error(gcmd,
+                    'head %d is wired to ACE %d (one ACE per head) - '
+                    'refusing swap on ACE %d. Rewire via ACE_SET_HEAD_ACE first.'
+                    % (self._disp(head), self._disp(self.head_ace_for(head)),
+                       self._disp(ace_index)),
+                    code=207, head=head)
         if head in self._ghost_heads:
             raise self._ace_error(gcmd,
                 'SWAP refused: head %d is a ghost (filament at '
@@ -13152,10 +13408,17 @@ class MultiAce:
                 code=202, head=head)
 
         source = self._head_source.get(head)
-        if (source and source['ace_index'] == ace_index and source['slot'] == slot
-                and not source.get('load_failed')):
-            logging.info('[multiACE] Swap: HEAD %d already on ACE %d / Slot %d - skipping' % (
-                head, ace_index, slot))
+        if want_feeder:
+            already_there = bool(source) and source.get('slot') == 'feeder'
+        else:
+            already_there = (source and source['ace_index'] == ace_index
+                             and source['slot'] == slot
+                             and not source.get('load_failed'))
+        if already_there:
+            logging.info(
+                '[multiACE] Swap: HEAD %d already on %s - skipping'
+                % (head, 'feeder tap' if want_feeder
+                   else 'ACE %d / Slot %d' % (ace_index, slot)))
 
             try:
                 active_ext = self.toolhead.get_extruder().get_name()
@@ -13228,12 +13491,13 @@ class MultiAce:
                              'idle head at load_temp' % (head, active_head))
             return
 
-        if ace_index in self._fa_load_disable:
+        if not want_feeder and ace_index in self._fa_load_disable:
             self.log_error(self._t('msg.swap_refused_fa_load_disable',
                 ace=self._disp(ace_index), head=self._disp(head)))
             return
 
-        target_gate = self._gate_status_per_ace.get(ace_index)
+        target_gate = (None if want_feeder
+                       else self._gate_status_per_ace.get(ace_index))
         if (target_gate is not None and slot < len(target_gate)
                 and target_gate[slot] != GATE_AVAILABLE):
             cur_src = self._head_source.get(head)
@@ -13288,10 +13552,19 @@ class MultiAce:
         # machine. Classified the way the planner classifies it, so the two
         # are comparable.
         _job_swap_started = time.time()
-        _job_swap_kind = (
-            'first_load' if prev_source is None
-            else ('same_ace' if prev_ace_src == ace_index
-                  else 'cross_ace_inline'))
+        _prev_was_feeder = bool(prev_source) and prev_slot_src == 'feeder'
+        if prev_source is None:
+            _job_swap_kind = 'first_load'
+        elif want_feeder or _prev_was_feeder:
+            # One shared kind either direction (matches swap_cost.py's
+            # SWAP_KINDS) - the calibration in §4.3 aggregates by kind, and
+            # a feeder-tap swap's mechanical cost doesn't otherwise depend
+            # on which way it runs.
+            _job_swap_kind = 'feeder_swap'
+        elif prev_ace_src == ace_index:
+            _job_swap_kind = 'same_ace'
+        else:
+            _job_swap_kind = 'cross_ace_inline'
         self._resume_wipe_deadline = 0.
 
         self._resistance_pause_pending = None
@@ -13408,14 +13681,22 @@ class MultiAce:
 
                 logging.info('[multiACE] Swap: delegating unload to ACE_UNLOAD_HEAD')
                 unload_start_ts = time.monotonic()
-                if prev_source:
+                if _prev_was_feeder:
+                    # Unloading a combo head's feeder tap - there is no ACE
+                    # slot to compute a retract length from (the sentinel's
+                    # ace_index is None, slot is the string 'feeder': feeding
+                    # either into get_swap_retract_length/int() would crash).
+                    _src_ace, _src_slot = None, 'feeder'
+                    swap_rl = self.get_feeder_swap_retract_length(head)
+                elif prev_source:
                     _src_ace = int(prev_source.get('ace_index',
                                                    self._active_device_index))
                     _src_slot = int(prev_source.get('slot', head))
+                    swap_rl = self.get_swap_retract_length(_src_ace, _src_slot)
                 else:
                     _src_ace = self._active_device_index
                     _src_slot = head
-                swap_rl = self.get_swap_retract_length(_src_ace, _src_slot)
+                    swap_rl = self.get_swap_retract_length(_src_ace, _src_slot)
 
                 try:
                     if swap_rl > 0:
@@ -13453,7 +13734,7 @@ class MultiAce:
                     )
                     return
 
-            if ace_index != self._active_device_index:
+            if not want_feeder and ace_index != self._active_device_index:
                 logging.info(self._t('msg.swap_switching_ace',
                     ace=self._disp(ace_index)))
                 if not self._switch_ace_for_head_target(ace_index):
@@ -13461,7 +13742,7 @@ class MultiAce:
                         'Failed to connect to ACE %d' % self._disp(ace_index),
                         code=208, head=head)
 
-            if self.gate_status[slot] != GATE_AVAILABLE:
+            if not want_feeder and self.gate_status[slot] != GATE_AVAILABLE:
 
                 swap_status = 'slot_empty'
                 self._swap_back_to_orig_for_pause(
@@ -13484,11 +13765,20 @@ class MultiAce:
                 return
 
             self._swap_phase = 'load'
-            logging.info('[multiACE] Swap: delegating load to ACE_LOAD_HEAD (ACE %d / Slot %d)' % (ace_index, slot))
             load_start_ts = time.monotonic()
             try:
-                self.gcode.run_script_from_command(
-                    'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d' % (head, ace_index, slot))
+                if want_feeder:
+                    logging.info(
+                        '[multiACE] Swap: delegating load to ACE_LOAD_HEAD '
+                        '(feeder tap)')
+                    self.gcode.run_script_from_command(
+                        'ACE_LOAD_HEAD HEAD=%d SOURCE=FEEDER' % head)
+                else:
+                    logging.info(
+                        '[multiACE] Swap: delegating load to ACE_LOAD_HEAD '
+                        '(ACE %d / Slot %d)' % (ace_index, slot))
+                    self.gcode.run_script_from_command(
+                        'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d' % (head, ace_index, slot))
             except Exception as load_e:
 
                 swap_status = 'load_failed'
@@ -13522,16 +13812,24 @@ class MultiAce:
 
             self._auto_feed_enabled = True
             self._fa_context = fa_prev_context if fa_prev_context in ('print', 'load') else 'print'
-            try:
-                self._arm_fa_for(ace_index, slot)
-                self.wait_ace_ready()
+            if want_feeder:
+                # No ACE feed-assist to arm for the native feeder tap - the
+                # gate is simply left open (_auto_feed_enabled=True above),
+                # same as a plain feeder head during printing.
+                self._fa_trace(
+                    'gate RE-OPEN for post-load wipe (context=%s) - feeder '
+                    'tap, no ACE FA to arm' % self._fa_context)
+            else:
+                try:
+                    self._arm_fa_for(ace_index, slot)
+                    self.wait_ace_ready()
 
-                self._v2_schedule_fa_rearm(
-                    ace_index, slot, 'post-load-verify', delay=0.20)
-                self._fa_trace('gate RE-OPEN for post-load wipe (context=%s) on ACE %d slot %d' % (
-                    self._fa_context, ace_index, slot))
-            except Exception as fa_e:
-                logging.info('[multiACE] post-load FA re-enable failed: %s' % fa_e)
+                    self._v2_schedule_fa_rearm(
+                        ace_index, slot, 'post-load-verify', delay=0.20)
+                    self._fa_trace('gate RE-OPEN for post-load wipe (context=%s) on ACE %d slot %d' % (
+                        self._fa_context, ace_index, slot))
+                except Exception as fa_e:
+                    logging.info('[multiACE] post-load FA re-enable failed: %s' % fa_e)
 
             wipe_temp = saved_heater_target if saved_heater_target >= 170 else swap_temp
             self.gcode.run_script_from_command('M109 S%d' % wipe_temp)
@@ -14556,6 +14854,24 @@ class MultiAce:
         self.log_always(_msg)
         logging.info(_msg)
 
+    def _reset_head_feeder_combo(self):
+        """Multi mode has no concept of a per-head feeder tap at all - drop
+        every head_feeder_combo flag on the way out of head mode so a stale
+        combo tap does not silently reappear on the next round trip back
+        into head mode (§1.2 of the hybrid per-head mode plan)."""
+        any_set = any(self.head_feeder_combo.get(h, False) for h in range(4))
+        if not any_set:
+            return
+        for h in range(4):
+            self.head_feeder_combo[h] = False
+        try:
+            self._save_head_feeder_combo()
+        except Exception as e:
+            logging.info('[multiACE] feeder-combo reset persist failed: %s' % e)
+        self.log_always(
+            '[multiACE] multi mode: feeder combo taps cleared '
+            '(head mode only)')
+
     def _save_heads_manual_conv(self):
         if not self.save_variables:
             return
@@ -14595,6 +14911,7 @@ class MultiAce:
                         self._clear_filament_display(h)
             elif mode == 'multi':
                 self._convert_feeder_to_manual()
+                self._reset_head_feeder_combo()
             self._restore_head_source()
             self._ensure_extruder_change_handler()
             self.log_always(self._t('msg.switched_to_mode', mode=mode.upper()))
@@ -14627,6 +14944,7 @@ class MultiAce:
         elif mode == 'multi':
 
             self._convert_feeder_to_manual()
+            self._reset_head_feeder_combo()
 
         try:
             import subprocess
@@ -15403,6 +15721,9 @@ class MultiAce:
                             for h in range(4)},
             'head_feeder': {str(h): bool(self.head_feeder.get(h, False))
                             for h in range(4)},
+            'head_feeder_combo': {
+                str(h): bool(self.head_feeder_combo.get(h, False))
+                for h in range(4)},
 
             'head_reader_spool': {
                 str(h): (self._ptc_spool_id_for(h)

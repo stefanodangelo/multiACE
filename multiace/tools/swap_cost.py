@@ -67,10 +67,10 @@ UNMEASURED_S = {
 }
 
 SWAP_KINDS = ("feeder_pin", "same_ace", "cross_ace_inline", "cross_ace_bg",
-              "first_load")
+              "first_load", "feeder_swap")
 
 #: Kinds whose cost lands on the print's critical path in full.
-INLINE_KINDS = ("same_ace", "cross_ace_inline")
+INLINE_KINDS = ("same_ace", "cross_ace_inline", "feeder_swap")
 
 # Fallback densities in g/cm3, used only when the slicer wrote no
 # `; filament used [g]` line (see parse_header - the Snapmaker Orca fork
@@ -466,6 +466,16 @@ class SwapCostModel(object):
             p.get("swap_anti_ooze_retract", 10) or 0)
         self.swap_purge_length = float(p.get("swap_purge_length", 0) or 0)
 
+        # Hybrid per-head mode (§3/§4.1): a combo head's feeder-tap leg of a
+        # swap uses the feeder's own load/retract config, not the ACE's -
+        # the two are physically different runs (local drive gear vs. the
+        # ACE's own bowden). No per-head override plumbing here (unlike the
+        # ACE per-slot table above) - this model is an estimate, and a
+        # global default is enough for that.
+        self.feeder_load_length = float(p.get("feeder_load_length", 1100) or 0)
+        self.feeder_swap_retract_length = float(
+            p.get("feeder_swap_retract_length", 150) or 0)
+
         # §3.4 colour-aware purge. Off by default: over-purging wastes more
         # than it saves, and an overflowing purge bin is a hotend-ending
         # blob (§13.2).
@@ -542,6 +552,15 @@ class SwapCostModel(object):
             # other one keeps printing, so none of their mechanical time is
             # on the critical path.
             return 0.0
+        if kind == "feeder_swap":
+            # A combo head's feeder tap: retract/load lengths come from the
+            # feeder's own config, not the ACE's (§3.2/§4.1 of the hybrid
+            # per-head mode plan) - no per-head override table for these
+            # yet, so this is the global default only.
+            pull = (self.feeder_swap_retract_length
+                    + self._p("swap_anti_ooze_retract", ace, slot, 0.0))
+            return pull / retract + self.feeder_load_length / feed \
+                + (2.0 * seat) / feed
         pull = (self._p("swap_retract_length", ace, slot, 0.0)
                 + self._p("swap_anti_ooze_retract", ace, slot, 0.0))
         return pull / retract + load_len / feed + (2.0 * seat) / feed
@@ -555,6 +574,11 @@ class SwapCostModel(object):
         if kind == "first_load":
             return (c["tool_pickup"] + c["seat_press"] + c["heat_settle"]
                     + c["sensor_wait"] + c["first_load_extra"])
+        if kind == "feeder_swap":
+            # No ACE spool change involved either direction - the feeder
+            # tap has exactly one spool, always ready.
+            return (c["tip_form"] + c["seat_press"] + c["heat_settle"]
+                    + c["tool_pickup"] + c["sensor_wait"])
         return (c["tip_form"] + c["ace_spool_change"] + c["seat_press"]
                 + c["heat_settle"] + c["tool_pickup"] + c["sensor_wait"])
 

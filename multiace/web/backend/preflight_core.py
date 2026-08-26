@@ -478,9 +478,10 @@ def head_maps(head_ctx: dict) -> tuple:
     return ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads
 
 def head_mode_targets(pp, feeders: list, ace_slots: list,
-                      ace_head_of_ace: dict) -> list:
+                      ace_head_of_ace: dict, combo_heads: list = None) -> list:
     """The dropdown universe: each pin-able feeder + each ACE slot on a wired
-    ACE (tagged with the ACE head that feeds it), with an id."""
+    ACE (tagged with the ACE head that feeds it) + each hybrid combo head's
+    feeder tap, with an id."""
     targets = []
     for f in feeders:
         targets.append({
@@ -497,6 +498,15 @@ def head_mode_targets(pp, feeders: list, ace_slots: list,
             "ace": s["ace"], "slot": s["slot"],
             "material": s["material"], "color": (s["color"] or "").lower(),
             "name": pp.approx_color_name(s["color"]) or ""})
+    for c in (combo_heads or []):
+        # Hybrid per-head mode: a combo head's feeder tap, addressed as one
+        # more 'ace'-kind target with ace=None, slot='feeder' - matches the
+        # assignment shape compute_head_mode_layout emits for it.
+        targets.append({
+            "id": "combofeeder-%d" % c["head"], "kind": "ace",
+            "head": c["head"], "ace": None, "slot": "feeder",
+            "material": c["material"], "color": (c["color"] or "").lower(),
+            "name": pp.approx_color_name(c["color"]) or ""})
     return targets
 
 def head_target_id(e: dict):
@@ -505,6 +515,8 @@ def head_target_id(e: dict):
     if e.get("kind") == "pin":
         return "feeder-%d" % e["head"]
     if e.get("kind") == "ace":
+        if e.get("slot") == "feeder":
+            return "combofeeder-%d" % e["head"]
         return "slot-%d-%d" % (e["ace"], e["slot"])
     return None
 
@@ -646,9 +658,11 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     Plus the colour grids at the top (available targets + slicer colours).
     """
     feeders = (head_ctx or {}).get("feeders") or []
+    combo_heads = (head_ctx or {}).get("combo_heads") or []
     ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads =\
         head_maps(head_ctx)
-    targets = head_mode_targets(pp, feeders, ace_slots, ace_head_of_ace)
+    targets = head_mode_targets(pp, feeders, ace_slots, ace_head_of_ace,
+                                combo_heads)
 
     try:
         result = pp.plan_loadout(plan_proxy) or {}
@@ -672,9 +686,18 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices)
 
     nz_groups, nz_mixed = nozzle_context(pp, meta, head_ctx)
-    layout = pp.compute_head_mode_layout(
-        slicer_colors, slicer_types, feeders, ace_slots, ace_head_of_ace,
-        fuzzy_max_distance=fuzzy, nozzle_groups=nz_groups)
+    try:
+        layout = pp.compute_head_mode_layout(
+            slicer_colors, slicer_types, feeders, ace_slots, ace_head_of_ace,
+            fuzzy_max_distance=fuzzy, nozzle_groups=nz_groups,
+            combo_heads=combo_heads)
+    except TypeError:
+        # An outdated post-processor (no combo_heads param yet) - soft-
+        # degrade to the pre-hybrid behaviour rather than failing the whole
+        # preflight over one new keyword.
+        layout = pp.compute_head_mode_layout(
+            slicer_colors, slicer_types, feeders, ace_slots, ace_head_of_ace,
+            fuzzy_max_distance=fuzzy, nozzle_groups=nz_groups)
     assignment = layout["assignment"]
     loadout_mapping = []
     for t in sorted(slicer_colors.keys()):
@@ -904,9 +927,11 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
     if mode == "head":
         ensure_head_mode_support(pp)
         feeders = (head_ctx or {}).get("feeders") or []
+        combo_heads = (head_ctx or {}).get("combo_heads") or []
         ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads =\
             head_maps(head_ctx)
-        targets = head_mode_targets(pp, feeders, live_slots, ace_head_of_ace)
+        targets = head_mode_targets(pp, feeders, live_slots, ace_head_of_ace,
+                                    combo_heads)
 
         hm_bg_heads = [int(h) for h in
                        ((head_ctx or {}).get("bg_heads") or [])]
@@ -958,10 +983,17 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
         elif head_assignment:
             assignment = assignment_from_target_ids(head_assignment, targets)
         else:
-            layout = pp.compute_head_mode_layout(
-                slicer_colors, slicer_types, feeders, live_slots,
-                ace_head_of_ace, fuzzy_max_distance=fuzzy,
-                nozzle_groups=nozzle_context(pp, meta, head_ctx)[0])
+            try:
+                layout = pp.compute_head_mode_layout(
+                    slicer_colors, slicer_types, feeders, live_slots,
+                    ace_head_of_ace, fuzzy_max_distance=fuzzy,
+                    nozzle_groups=nozzle_context(pp, meta, head_ctx)[0],
+                    combo_heads=combo_heads)
+            except TypeError:
+                layout = pp.compute_head_mode_layout(
+                    slicer_colors, slicer_types, feeders, live_slots,
+                    ace_head_of_ace, fuzzy_max_distance=fuzzy,
+                    nozzle_groups=nozzle_context(pp, meta, head_ctx)[0])
             assignment = layout["assignment"]
 
         set_stage("rewrite", 10.0)
