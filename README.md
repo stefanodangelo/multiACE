@@ -16,7 +16,7 @@ Known issues:
 
 
 
-## What's new in multiACE 0.99.13b (changes since 0.99.8b)
+## What's new in multiACE 0.99.13b "Twin Feed" (changes since 0.99.8b)
 
 Covers everything merged across 0.99.9b, 0.99.10b, 0.99.11b, 0.99.12b and 0.99.13b.
 
