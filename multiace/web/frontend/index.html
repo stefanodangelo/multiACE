@@ -950,6 +950,7 @@
                   <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
               </label>
+              <p v-if="aceOptionsForHead(t_.idx).length === 0" class="muted small th-ace-none">{{ t('ui.dashboard.head_ace_none') }}</p>
               <label class="th-manual th-combo"
                      :class="{disabled: t_.head_source_known || (t_.filament_at_extruder && !t_.combo_feeder)}"
                      :title="t_.head_source_known || (t_.filament_at_extruder && !t_.combo_feeder)

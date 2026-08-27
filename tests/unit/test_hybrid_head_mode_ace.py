@@ -20,6 +20,11 @@ def ace(ace_module):
     obj.head_feeder = {0: False, 1: True, 2: True, 3: True}
     obj.head_feeder_combo = {0: False, 1: False, 2: False, 3: False}
     obj.head_ace = {0: 0, 1: 1, 2: 2, 3: 3}
+    # A single connected ACE (index 0), the common real-world case. Combo on
+    # a head wired to a higher, non-present ACE index must be refused.
+    obj._ace_devices = ['/dev/serial/by-id/ace0']
+    obj._ace_canonical = None
+    obj._ace_present = set(obj._ace_devices)
     obj._head_source = {0: None, 1: None, 2: None, 3: None}
     obj.feeder_load_length = 1100.0
     obj._feeder_load_length_head = {}
@@ -231,6 +236,19 @@ class TestSetHeadFeederComboGuardRails:
         gcmd = self._gcmd(HEAD=0, ENABLE=1)
         ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
         assert ace.head_feeder_combo[0] is True
+
+    def test_refuses_when_the_heads_ace_is_not_connected(self, ace, monkeypatch):
+        # head 0 is ACE-driven, but wired to ACE 2 while only ACE 0 is present
+        # (the dangling index-based default with fewer units than heads). The
+        # combo tap would enable onto a head that has no selectable slots -
+        # refuse loudly instead.
+        ace.head_ace[0] = 2
+        monkeypatch.setattr(ace, '_head_is_loaded', lambda h: False)
+        monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
+        gcmd = self._gcmd(HEAD=0, ENABLE=1)
+        with pytest.raises(AssertionError):
+            ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
+        assert ace.head_feeder_combo[0] is False
 
     def test_disables_while_the_head_is_loaded_from_its_own_feeder_tap(
             self, ace, monkeypatch):
