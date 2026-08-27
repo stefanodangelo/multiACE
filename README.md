@@ -16,6 +16,35 @@ Known issues:
 
 
 
+## What's new in multiACE 0.99.13b "Twin Feed" (changes since 0.99.8b)
+
+Covers everything merged across 0.99.9b, 0.99.10b, 0.99.11b, 0.99.12b and 0.99.13b.
+
+**Hybrid combo heads (ACE + stock feeder on one head)**
+- A head can now run **both** its ACE slots and its stock feeder spool on the same path via a Y-splitter, and swap between them mid-print - up to `slots + 1` colours on that one head. Load or swap onto the feeder tap with `ACE_LOAD_HEAD HEAD=n SOURCE=FEEDER` / `ACE_SWAP_HEAD HEAD=n SOURCE=FEEDER`.
+- Detects and loads stock feeder filament on combo heads, and shows combo feeder-tap heads in the embedded Fluidd panel view.
+- Boot-crash fix when restoring a combo head's feeder-tap source across a Klipper restart.
+- Combo/ACE heads wired to a **non-connected** ACE unit are now guarded instead of erroring.
+- Several combo-head UI fixes: feeder-tile visibility and positioning, gear-icon overlap, a collapsible config info text, and `ACE_SET_HEAD_FEEDER_COMBO` no longer refusing to disable a tap that has been used.
+
+**Unload reliability - blob / snapped-tip hardening**
+- Real per-material **PLA tip-forming choreography** with a cooling step, so the tip is formed short and tapered instead of the long stringy one the stock pull leaves (which snaps and strands a fragment at the head - the "Filament still detected after unload" jam).
+- **Snapped-tip recovery**: when a fragment is stranded above the extruder gear where no ACE retract can reach it, the extruder now purges it out of the nozzle instead of the unload simply failing.
+- Hot re-unload retries now **honor the configured unload temperature** instead of creeping hotter (a hotter PLA hold made the tip stringier, not cleaner).
+
+**Config & dashboard UX**
+- Config override fields show the **effective inherited default** as a placeholder, so you can see what a blank field will actually use.
+- **Dashboard restart buttons**, plus a sidebar right-padding fix.
+- The virtual loadout overlay now **persists server-side**.
+
+**Fixes & infrastructure**
+- Fix `FLOW_RESET_K` crashing Klipper on every boot.
+- SSH key bootstrap mode for developer pushes, and a fix for CRLF corruption in the remote push commands.
+- Fix the ARM64 cross-compile Docker build (QEMU emulation).
+- Release-bin workflow, head-mode developer support, and many internal test / mock-fixture improvements.
+
+
+
 ## What's new in multiACE 0.99.8b "Resupply Run" (Update, mod and firmware.bin available)
 
 - Quad Replenish - ACE Refill - When a spool runs out mid-print, multiACE loads a matching spool from another ace or slot and continues.
