@@ -18,6 +18,9 @@ Known issues:
 
 ## What's new in multiACE 0.99.13b "Twin Feed" (changes since 0.99.8b)
 
+**Note**: I'm currently working on a bug that still prevents filaments from being assigned to a head in combo mode. Doing it triggers the following error: "Head 1 is ACE-driven - its spool follows the slot it loads from. Bind the spool to the ACE slot instead; a head binding is for feeder/manual heads.". Therefore, the related version and tag have been removed from the releases.
+**Note 2**: Version 0.99.11b was removed because it was unstable.
+
 Covers everything merged across 0.99.9b, 0.99.10b, 0.99.11b, 0.99.12b and 0.99.13b.
 
 **Hybrid combo heads (ACE + stock feeder on one head)**
