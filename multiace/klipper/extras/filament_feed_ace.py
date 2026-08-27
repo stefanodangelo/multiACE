@@ -141,6 +141,17 @@ FEED_UNLOAD_TRIGGER_SETTLE                          = 0.5
 
 FEED_UNLOAD_PROBE_RETRACT                           = 150
 
+# Snapped-tip recovery. When the short probe-retract pulls its FULL commanded
+# length (the ACE free-wheeled) yet the inlet sensor still reads present, the
+# filament has snapped and a fragment is stranded ABOVE the extruder gear where
+# no ACE-side retract can reach it. The only actuator that can move it is the
+# extruder itself, so we feed the fragment DOWN through the gear and purge it
+# out the nozzle (over the discard bin) before the next hot re-unload retry.
+# _SPAN_FRAC: fraction of the short retract the decoder must have spanned to
+# count as a free-wheel/snap (vs a genuine stall, which spans very little).
+FEED_UNLOAD_SNAP_PURGE                              = 50
+FEED_UNLOAD_SNAP_SPAN_FRAC                          = 0.85
+
 UNLOAD_DECODER_DIAG                                 = True
 
 class FeedLight:
@@ -2306,6 +2317,52 @@ class FilamentFeed:
                                         "retry %d/%d - hot re-unload",
                                         self.filament_ch[ch],
                                         unload_attempt + 1, unload_max)
+                                    _snap = False
+                                    try:
+                                        _snap = (abs(_usp[0]) >= _short_retract
+                                                 * FEED_UNLOAD_SNAP_SPAN_FRAC)
+                                    except Exception:
+                                        _snap = False
+                                    if _snap and bool(getattr(
+                                            self.ace, 'unload_snap_recovery', True)):
+
+                                        try:
+                                            self.gcode.run_script_from_command(
+                                                "MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
+                                            self.gcode.run_script_from_command(
+                                                'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
+                                                % (self.toolhead.get_extruder().get_name(),
+                                                   filament_unload_temp))
+                                            self.gcode.run_script_from_command("M83\r\n")
+                                            self.gcode.run_script_from_command(
+                                                "G1 E%d F120\r\n" % FEED_UNLOAD_SNAP_PURGE)
+                                            self.toolhead.wait_moves()
+                                            logging.info(
+                                                "[feed][unload] head %d SNAP recovery: "
+                                                "span %s ~ short %d (free-wheel) + sensor "
+                                                "present - pushed %dmm to purge the "
+                                                "stranded fragment out the nozzle",
+                                                self.filament_ch[ch], _usp[0],
+                                                _short_retract, FEED_UNLOAD_SNAP_PURGE)
+                                        except Exception:
+                                            logging.info("[feed][unload] snap-recovery "
+                                                         "purge push failed")
+                                        self.reactor.pause(self.reactor.monotonic()
+                                                           + FEED_UNLOAD_TRIGGER_SETTLE)
+                                        if not self.runout_sensor[ch].get_status(
+                                                0)['filament_detected']:
+                                            logging.info(
+                                                "[feed][unload] head %d SNAP recovery "
+                                                "cleared the sensor (attempt %d/%d)",
+                                                self.filament_ch[ch],
+                                                unload_attempt + 1, unload_max)
+                                            try:
+                                                self.runout_sensor[ch].runout_helper\
+                                                    .note_filament_present(False, True)
+                                            except Exception:
+                                                pass
+                                            unload_ok = True
+                                            break
                                 else:
 
                                     try:
@@ -2609,6 +2666,52 @@ class FilamentFeed:
                                         "retry %d/%d - hot re-unload",
                                         self.filament_ch[ch],
                                         unload_attempt + 1, unload_max)
+                                    _snap = False
+                                    try:
+                                        _snap = (abs(_usp[0]) >= _short_retract
+                                                 * FEED_UNLOAD_SNAP_SPAN_FRAC)
+                                    except Exception:
+                                        _snap = False
+                                    if _snap and bool(getattr(
+                                            self.ace, 'unload_snap_recovery', True)):
+
+                                        try:
+                                            self.gcode.run_script_from_command(
+                                                "MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
+                                            self.gcode.run_script_from_command(
+                                                'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
+                                                % (self.toolhead.get_extruder().get_name(),
+                                                   filament_unload_temp))
+                                            self.gcode.run_script_from_command("M83\r\n")
+                                            self.gcode.run_script_from_command(
+                                                "G1 E%d F120\r\n" % FEED_UNLOAD_SNAP_PURGE)
+                                            self.toolhead.wait_moves()
+                                            logging.info(
+                                                "[feed][unload] head %d SNAP recovery: "
+                                                "span %s ~ short %d (free-wheel) + sensor "
+                                                "present - pushed %dmm to purge the "
+                                                "stranded fragment out the nozzle",
+                                                self.filament_ch[ch], _usp[0],
+                                                _short_retract, FEED_UNLOAD_SNAP_PURGE)
+                                        except Exception:
+                                            logging.info("[feed][unload] snap-recovery "
+                                                         "purge push failed")
+                                        self.reactor.pause(self.reactor.monotonic()
+                                                           + FEED_UNLOAD_TRIGGER_SETTLE)
+                                        if not self.runout_sensor[ch].get_status(
+                                                0)['filament_detected']:
+                                            logging.info(
+                                                "[feed][unload] head %d SNAP recovery "
+                                                "cleared the sensor (attempt %d/%d)",
+                                                self.filament_ch[ch],
+                                                unload_attempt + 1, unload_max)
+                                            try:
+                                                self.runout_sensor[ch].runout_helper\
+                                                    .note_filament_present(False, True)
+                                            except Exception:
+                                                pass
+                                            unload_ok = True
+                                            break
                                 else:
 
                                     try:
