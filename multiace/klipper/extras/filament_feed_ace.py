@@ -633,6 +633,24 @@ class FilamentFeed:
             return self._feed_load_counts_max
         return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
 
+    def _preload_counts_max_for(self, ch):
+        """Per-channel PRELOAD wheel-count ceiling. A combo head
+        (head_feeder_combo) must stop its stock-feeder insert well short of
+        the toolhead sensor, at the Y-splitter entrance - ace.py's
+        feeder_park_length[_N] - instead of the module-wide preload_length
+        every plain feeder head still uses. Reaching this ceiling is treated
+        as a successful preload (see the FEED_ACT_PRELOAD loop), exactly
+        like reaching the toolhead sensor is for a plain head."""
+        if self.ace is not None:
+            try:
+                head = self.filament_ch[ch]
+                if self.ace.head_has_feeder_tap(head):
+                    length = self.ace.feeder_park_length_for(head)
+                    return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
+            except Exception:
+                pass
+        return self._feed_preload_counts
+
     def _runout_evt_handle(self, extruder, present):
         if present == True:
             return
@@ -1051,6 +1069,10 @@ class FilamentFeed:
                     wheel_speed_err_max = FEED_PRELOAD_WHEEL_ERR_CNT_MAX
                     motor_speed_err_max = FEED_PRELOAD_MOTOR_ERR_CNT_MAX
                     if arrive_runout_sensor == False:
+                        # Combo head: this ceiling is feeder_park_length, not
+                        # preload_length - reaching it here (splitter
+                        # entrance) is the intended stop, not a fallback.
+                        _preload_ceiling = self._preload_counts_max_for(ch)
                         while 1:
                             wheel_cnt_a_2 = self.wheel[ch].get_counts()
                             wheel_cnt_b_2 = self.wheel_2[ch].get_counts()
@@ -1068,8 +1090,8 @@ class FilamentFeed:
                                 self.channel_error[ch] = FEED_ERR_NO_FILAMENT
                                 self.exception_code[ch] = 13
                                 break
-                            if (wheel_cnt_a_2 - wheel_cnt_a_1) / self.wheel[ch].ppr > self._feed_preload_counts or\
-                                    (wheel_cnt_b_2 - wheel_cnt_b_1) / self.wheel_2[ch].ppr > self._feed_preload_counts:
+                            if (wheel_cnt_a_2 - wheel_cnt_a_1) / self.wheel[ch].ppr > _preload_ceiling or\
+                                    (wheel_cnt_b_2 - wheel_cnt_b_1) / self.wheel_2[ch].ppr > _preload_ceiling:
                                 self.channel_error[ch] = FEED_OK
                                 break
                             if motor_speed < FEED_PRELOAD_MOTOR_MIN_SPEED:
@@ -3276,6 +3298,19 @@ class FilamentFeed:
                 else:
                     logging.info("[feed] FEED_AUTO LOAD skipped: channel[%d] runout_sensor disabled or None", channel)
                     return
+
+            # A bare FEED_AUTO LOAD=1 carries no source of its own - only
+            # ambiguous for a combo head, and only when nothing has already
+            # resolved it (_in_internal_load_head is set for the exact
+            # duration of ace.py's own internal FEED_AUTO call, once it has
+            # already set _head_source explicitly - see ace.py's
+            # cmd_ACE_LOAD_HEAD/resolve_ambiguous_combo_load).
+            if (self.ace is not None
+                    and not getattr(self.ace, '_in_internal_load_head', False)):
+                _head = self.filament_ch[channel]
+                if self.ace.head_has_feeder_tap(_head):
+                    self.ace.resolve_ambiguous_combo_load(
+                        gcmd, _head, self._port[channel].get_filament_detected())
 
             try:
                 if machine_state_manager is not None:

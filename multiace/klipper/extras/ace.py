@@ -22,8 +22,8 @@ MULTIACE_CODENAME = "Resupply Run"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "0ea39a3"
-MULTIACE_BUNDLE_SHA1 = "c3b7d23"
+MULTIACE_BUILD_TAG = "be8dd69"
+MULTIACE_BUNDLE_SHA1 = "0841c1a"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -517,6 +517,21 @@ class MultiAce:
                 'feeder_load_length_%d' % i, None, minval=100., maxval=5000.)
             if v is not None:
                 self._feeder_load_length_head[i] = v
+
+        # Combo head only: how far a stock-feeder PRELOAD (filament inserted
+        # into the port) is allowed to travel before it's considered done -
+        # short of the toolhead sensor, at the Y-splitter entrance, so an
+        # inserted stock spool never sits far enough forward to block the
+        # ACE leg. Ignored for a plain feeder-only head (head_feeder), which
+        # still preloads all the way to the toolhead sensor as before.
+        self.feeder_park_length = config.getfloat(
+            'feeder_park_length', 900., minval=100., maxval=1500.)
+        self._feeder_park_length_head = {}
+        for i in range(4):
+            v = config.getfloat(
+                'feeder_park_length_%d' % i, None, minval=100., maxval=1500.)
+            if v is not None:
+                self._feeder_park_length_head[i] = v
 
         self.feeder_retract_length = config.getfloat(
             'feeder_retract_length', None, minval=0., maxval=2000.)
@@ -2397,6 +2412,22 @@ class MultiAce:
         if v is not None:
             return v
         return self.feeder_load_length
+
+    def feeder_park_length_for(self, head):
+        """Combo head only: how far FEED_ACT_PRELOAD drives a stock-feeder
+        insert before stopping, short of the toolhead sensor - at the
+        Y-splitter entrance, not through it. Per-head override wins, else
+        the global feeder_park_length (default 900). Meaningless for a
+        plain feeder-only head, which still preloads to the toolhead
+        sensor as before."""
+        try:
+            head = int(head)
+        except (TypeError, ValueError):
+            return self.feeder_park_length
+        v = self._feeder_park_length_head.get(head)
+        if v is not None:
+            return v
+        return self.feeder_park_length
 
     def feeder_retract_length_for(self, head):
         """Retract distance (mm) to clear a combo head's feeder filament
@@ -10805,6 +10836,72 @@ class MultiAce:
             return False
         return True
 
+    def resolve_ambiguous_combo_load(self, gcmd, head, stock_ready):
+        """Decide ACE vs. feeder tap for a combo head's LOAD when nothing
+        told us which one the caller meant. The OEM touchscreen's Load
+        button (and a runout auto-continue) issue a bare FEED_AUTO LOAD=1
+        with no source parameter at all - _do_feed's LOAD branch would
+        otherwise just read whatever _head_source happened to hold last
+        (head_ace_active_for), silently defaulting to ACE regardless of
+        what the user actually just inserted. Every call site that DOES
+        know the source (ACE_SWAP_HEAD, ACE_LOAD_HEAD, a print's own swap)
+        sets _head_source explicitly before FEED_AUTO runs and never
+        reaches this method - see the _in_internal_load_head guard at the
+        one call site in filament_feed_ace.py.
+
+        Sequential and sensor-only: checked and committed in order, before
+        any physical drive starts, so a stock load and an ACE load can
+        never be attempted at once for the same shared path.
+
+        stock_ready: the feeder inlet's port sensor, read by the caller
+        (filament_feed_ace.py owns self._port, not this module).
+
+        1. Stock feeder first - something is physically staged there.
+        2. Else this head's own ACE slot, if it has filament.
+        3. Else raise: neither source has anything to load.
+        """
+        if stock_ready:
+            if not self.head_source_is_feeder_tap(head):
+                logging.info(
+                    '[multiACE] FEED_AUTO LOAD ambiguous for combo head %d: '
+                    'stock feeder has filament staged - routing to the '
+                    'feeder tap' % head)
+            self._head_source[head] = dict(FEEDER_TAP_SOURCE)
+            self._save_head_source()
+            return
+
+        ace_idx = self.head_ace_for(head)
+        slot = self._ace_slot_for_head(head)
+        info = self._info_per_ace.get(ace_idx, self._make_default_info(ace_idx))
+        slots = info.get('slots', [])
+        slot_status = slots[slot].get('status') if 0 <= slot < len(slots) else None
+        if self._is_empty_status(slot_status):
+            raise self._ace_error(gcmd,
+                'head %d: nothing to load (stock feeder inlet empty, '
+                'ACE %d / Slot %d empty too)'
+                % (self._disp(head), self._disp(ace_idx), self._disp(slot)),
+                code=211, head=head)
+
+        if self.head_source_is_feeder_tap(head):
+            # Was pinned to the feeder tap by an earlier ambiguous load, but
+            # the feeder is empty now and the ACE slot has filament - switch
+            # the routing back, same shape cmd_ACE_LOAD_HEAD's ACE branch
+            # uses to set _head_source.
+            self._head_source[head] = self._inherit_prev_capture(
+                head, ace_idx, slot, self._overlay_override(
+                    ace_idx, slot, {
+                        'ace_index': ace_idx,
+                        'slot': slot,
+                        'type': '',
+                        'color': '',
+                        'brand': '',
+                    }))
+            self._save_head_source()
+        logging.info(
+            '[multiACE] FEED_AUTO LOAD ambiguous for combo head %d: stock '
+            'feeder empty - routing to ACE %d / Slot %d'
+            % (head, ace_idx, slot))
+
     def head_uses_ace(self, head):
 
         if self.head_is_manual(head):
@@ -12855,6 +12952,21 @@ class MultiAce:
         if not self._head_is_loaded(head):
             self.log_always(self._t('msg.unload_head_already_empty',
                 head=self._disp(head)))
+            # Confirmed empty (sensor says so) means nothing here is stale
+            # either, whatever it says - a head_source left over from an
+            # earlier failed load (load_failed=True, stuck ACE/slot
+            # identity) used to survive this early return forever, since
+            # only a real unload run clears it below. That's what left the
+            # dashboard showing a permanent "load FAILED" badge for a head
+            # that had already been physically cleared by hand.
+            if self._head_source.get(head) is not None:
+                self._head_source[head] = None
+                self._save_head_source()
+                self._bg_load_unverified.discard(head)
+                getattr(self, '_bg_prime_deficit', {}).pop(head, None)
+                logging.info(
+                    '[multiACE] UNLOAD_HEAD: head %d confirmed empty - '
+                    'cleared stale head_source' % head)
             return
 
         sensor = self.printer.lookup_object(
