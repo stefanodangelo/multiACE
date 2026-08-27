@@ -200,6 +200,15 @@ class TestFeederLengthAccessors:
 
 
 class TestSetHeadFeederComboGuardRails:
+    """NOTE (2026-08-27): combo mode is temporarily disabled - every
+    ENABLE=1 call now raises immediately (see
+    test_refuses_to_enable_while_combo_mode_is_disabled) before reaching
+    any of the older, more specific guards below. The other ENABLE=1
+    tests here (no-ACE-wiring, head-loaded, ACE-not-connected) still pass,
+    but only because the blanket disable short-circuits first - their own
+    guard logic is dormant until the kill switch is reverted. Left in
+    place as regression coverage for that moment."""
+
     def _gcmd(self, **params):
         class G:
             def __init__(self, p):
@@ -229,13 +238,21 @@ class TestSetHeadFeederComboGuardRails:
             ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
         assert ace.head_feeder_combo[0] is False
 
-    def test_enables_on_a_free_ace_head(self, ace, monkeypatch):
+    def test_refuses_to_enable_while_combo_mode_is_disabled(
+            self, ace, monkeypatch):
+        """Combo mode is temporarily disabled (not working correctly yet -
+        see head_feeder_combo's init comment in ace.py): enabling must be
+        refused even for an otherwise-eligible free ACE head. Once the
+        underlying spool-tracking gap is fixed and the kill switch comes
+        out, this reverts to asserting a successful enable."""
         monkeypatch.setattr(ace, '_head_is_loaded', lambda h: False)
+        monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
         ace.save_variables = None
         monkeypatch.setattr(ace, 'log_always', lambda *a, **k: None)
         gcmd = self._gcmd(HEAD=0, ENABLE=1)
-        ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
-        assert ace.head_feeder_combo[0] is True
+        with pytest.raises(AssertionError):
+            ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
+        assert ace.head_feeder_combo[0] is False
 
     def test_refuses_when_the_heads_ace_is_not_connected(self, ace, monkeypatch):
         # head 0 is ACE-driven, but wired to ACE 2 while only ACE 0 is present

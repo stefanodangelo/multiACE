@@ -853,6 +853,7 @@
     "head_ace_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann den zugeordneten ACE ändern",
     "head_feeder_combo_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann den Feeder-Combo-Abgriff ändern",
     "head_feeder_combo_needs_ace": "[multiACE] Kopf {head} ist nicht ACE-gesteuert - erst mit ACE_SET_HEAD_ACE verdrahten, dann den Feeder-Combo-Abgriff aktivieren",
+    "head_feeder_combo_disabled": "[multiACE] Kopf {head}: Combo-Modus (ACE + Feeder) ist vorübergehend deaktiviert - er funktioniert noch nicht korrekt.",
     "spool_head_not_feeder": "[multiACE] Kopf {head} ist ACE-geführt – seine Spule folgt dem Slot, aus dem er lädt. Binde die Spule an den ACE-Slot; eine Kopf-Bindung ist für Feeder-/Manual-Köpfe."
   }
 }

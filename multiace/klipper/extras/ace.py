@@ -504,10 +504,24 @@ class MultiAce:
         # the stock feeder spliced onto the SAME path via a Y-splitter, so it
         # can swap between its ACE's slots and the feeder spool mid-print.
         # Orthogonal to head_feeder (which means "no ACE at all" for a head).
+        #
+        # TEMPORARILY DISABLED (2026-08-27): the feature isn't working
+        # correctly yet (spool tracking breaks while a combo head is
+        # sourced from its feeder tap - book_spool_use/_spoollink_smid_for
+        # can't build a key for FEEDER_TAP_SOURCE and silently no-op). Force
+        # every head off here so every head_feeder_combo-gated code path
+        # downstream (head_has_feeder_tap, resolve_ambiguous_combo_load,
+        # the preload park-length branch, ...) stays unreachable without
+        # having to touch each of them individually. Revert this block
+        # (and the matching guard in cmd_ACE_SET_HEAD_FEEDER_COMBO) once
+        # the spool-tracking gap is fixed.
         self.head_feeder_combo = {}
         for i in range(4):
-            self.head_feeder_combo[i] = config.getboolean(
-                'head_feeder_combo_%d' % i, False)
+            if config.getboolean('head_feeder_combo_%d' % i, False):
+                logging.warning(
+                    '[multiACE] head_feeder_combo_%d is set in config but '
+                    'combo mode is temporarily disabled - ignoring' % i)
+            self.head_feeder_combo[i] = False
 
         self.feeder_load_length = config.getfloat(
             'feeder_load_length', 1100., minval=100., maxval=5000.)
@@ -11171,6 +11185,14 @@ class MultiAce:
     def cmd_ACE_SET_HEAD_FEEDER_COMBO(self, gcmd):
         head = gcmd.get_int('HEAD', minval=0, maxval=3)
         enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
+
+        # TEMPORARILY DISABLED (2026-08-27, see head_feeder_combo's init
+        # comment): refuse to enable. Disabling stays allowed so a head
+        # already parked on its combo tap can still be turned off cleanly.
+        if enable:
+            raise gcmd.error(self._t(
+                'msg.head_feeder_combo_disabled', head=self._disp(head)))
+
         was_combo = bool(self.head_feeder_combo.get(head, False))
         changing = bool(enable) != was_combo
 
@@ -11411,17 +11433,20 @@ class MultiAce:
             % (self.VARS_ACE_HEAD_FEEDER, value_str))
 
     def _restore_head_feeder_combo(self):
+        # Combo mode is temporarily disabled (see head_feeder_combo's
+        # init comment) - never restore a persisted True, so a printer
+        # that had it enabled before the kill switch doesn't come back
+        # with it silently on.
         saved = self.save_variables.allVariables.get(
             self.VARS_ACE_HEAD_FEEDER_COMBO, None)
         if saved and isinstance(saved, dict):
             for head in range(4):
                 key = str(head)
-                if key in saved:
-                    self.head_feeder_combo[head] = bool(saved[key])
-                    if self.head_feeder_combo[head]:
-                        logging.info(
-                            '[multiACE] Restored head %d -> feeder combo tap'
-                            % head)
+                if key in saved and bool(saved[key]):
+                    logging.warning(
+                        '[multiACE] head %d had feeder combo tap saved as '
+                        'enabled, but combo mode is temporarily disabled - '
+                        'leaving it off' % head)
 
     def _save_head_feeder_combo(self):
         save_data = {str(h): bool(self.head_feeder_combo[h]) for h in range(4)}

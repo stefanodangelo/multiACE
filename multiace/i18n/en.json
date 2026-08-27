@@ -868,6 +868,7 @@
     "head_feeder_combo_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change its feeder combo tap",
     "head_feeder_combo_needs_ace": "[multiACE] Head {head} is not ACE-driven - wire it with ACE_SET_HEAD_ACE first, then enable the feeder combo tap",
     "head_feeder_combo_ace_absent": "[multiACE] Head {head} is wired to ACE {ace}, which is not connected ({count} ACE unit(s) detected). Wire this head to a connected ACE with ACE_SET_HEAD_ACE HEAD={head} ACE=<n> first, then enable the feeder combo tap.",
+    "head_feeder_combo_disabled": "[multiACE] Head {head}: combo (ACE + feeder) mode is temporarily disabled - it isn't working correctly yet.",
     "head_ace_absent": "[multiACE] Warning: head {head} is now wired to ACE {ace}, which is not connected ({count} ACE unit(s) detected). This head will have no ACE slots to load until a matching ACE is connected or you rewire it.",
     "spool_head_not_feeder": "[multiACE] Head {head} is ACE-driven - its spool follows the slot it loads from. Bind the spool to the ACE slot instead; a head binding is for feeder/manual heads."
   }
