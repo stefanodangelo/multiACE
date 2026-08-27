@@ -823,7 +823,7 @@
           <article v-for="t_ in state.toolheads" :key="t_.idx"
                    :ref="el => setThEl(t_.idx, el)"
                    class="toolhead-card"
-                   :class="{empty: !t_.module_exist, present: t_.head_source_known && !t_.load_failed, 'load-failed': t_.load_failed, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
+                   :class="{empty: !t_.module_exist, present: t_.head_source_known && !t_.load_failed, 'load-failed': t_.load_failed, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, combo: t_.combo_feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
               <span class="th-actions" @click.stop>
