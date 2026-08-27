@@ -471,7 +471,18 @@
     },
     "ace_startup": {
       "waiting": "Waiting for {expected} ACE(s) – found {found}. Power the ACE on; it is picked up automatically within a few seconds. No restart needed.",
-      "rescan": "Rescan now"
+      "rescan": "Rescan now",
+      "restart_hint": "Still not found after a rescan? Try a firmware restart."
+    },
+    "restart": {
+      "firmware_btn": "Restart Firmware",
+      "firmware_title": "Restart the firmware?",
+      "firmware_msg": "Runs FIRMWARE_RESTART: Klipper reloads its config and reconnects to the MCUs. A print in progress would be interrupted.",
+      "firmware_sent": "Firmware restart requested.",
+      "printer_btn": "Restart Printer",
+      "printer_title": "Restart the printer?",
+      "printer_msg": "Reboots the printer's onboard computer. Slower than a firmware restart and interrupts any running print.",
+      "printer_sent": "Printer restart requested."
     },
     "debug": {
       "mock": "Mock data",

@@ -6871,6 +6871,46 @@ createApp({
       }, 2000);
     }
 
+    // Direct restart buttons (dashboard toolbar, ACE-not-found banner):
+    // same /api/restart the config-apply modal uses, just without the
+    // modal - a plain confirm, then _awaitPrinterBack does the same
+    // reconnect-and-refresh it always does. Guarded on isPrinting the
+    // same way unload/load already are - both restarts drop the MCU
+    // connection and would abort a running print.
+    async function _fireRestart(behavior, sentKey) {
+      const r = await fetch(`${API}/restart`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({behavior}),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text()}`);
+      setMacroLog(t(sentKey));
+      _awaitPrinterBack();
+    }
+    function restartFirmware() {
+      if (isPrinting.value) return;
+      confirm({
+        title: t("ui.restart.firmware_title"),
+        message: t("ui.restart.firmware_msg"),
+        okLabel: t("ui.restart.firmware_btn"),
+        onOk: async () => {
+          try { await _fireRestart("klipper_restart", "ui.restart.firmware_sent"); }
+          catch (e) { setMacroLog(`${t("ui.common.error")}: ${e.message || e}`); }
+        },
+      });
+    }
+    function restartPrinter() {
+      if (isPrinting.value) return;
+      confirm({
+        title: t("ui.restart.printer_title"),
+        message: t("ui.restart.printer_msg"),
+        okLabel: t("ui.restart.printer_btn"),
+        onOk: async () => {
+          try { await _fireRestart("printer_reboot", "ui.restart.printer_sent"); }
+          catch (e) { setMacroLog(`${t("ui.common.error")}: ${e.message || e}`); }
+        },
+      });
+    }
+
     // =================================================================
     // Debug panel (?debug=1): connection facts and, in mock mode, event
     // injection - the only way to exercise the retry UI without a jam.
@@ -7106,6 +7146,7 @@ createApp({
       aceStartup, aceRescanBusy, aceRescan,
       firmware, firmwareWarn,
       applyModal, closeApplyModal, applyRestart, restartLabel,
+      restartFirmware, restartPrinter,
       debugPanel, simulateEvent, debugSince,
       sampleBusy, loadSampleGcode,
       startInboxPreflight, dismissInbox, inboxCanStart,
