@@ -951,7 +951,10 @@
                 </select>
               </label>
               <p v-if="aceOptionsForHead(t_.idx).length === 0" class="muted small th-ace-none">{{ t('ui.dashboard.head_ace_none') }}</p>
-              <label class="th-manual th-combo"
+              <!-- Combo (ACE + feeder) mode temporarily disabled (2026-08-27):
+                   not working correctly yet, see ace.py's head_feeder_combo
+                   kill switch. Remove this v-if once it's fixed. -->
+              <label class="th-manual th-combo" v-if="false"
                      :class="{disabled: t_.head_source_known || (t_.filament_at_extruder && !t_.combo_feeder)}"
                      :title="t_.head_source_known || (t_.filament_at_extruder && !t_.combo_feeder)
                        ? t('ui.dashboard.feeder_unload_first')
