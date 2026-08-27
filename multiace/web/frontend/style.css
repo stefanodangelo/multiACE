@@ -576,7 +576,7 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .toolhead-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem;
                   grid-auto-rows: 1fr; }
 .toolhead-card { background: var(--card); border: 1px solid var(--border); padding: .8rem; border-radius: 6px;
-                  display: flex; flex-direction: column; position: relative; }
+                  display: flex; flex-direction: column; }
 /* Push actions + manual toggle to the bottom so cards with/without
    the subtype line still line up flush. When channel_state is present
    it owns the auto-margin and actions sit flush against it; otherwise
@@ -635,12 +635,12 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
    Absolutely positioned top right; h2/meta reserve its width, and the
    meta min-height guarantees the title+meta zone is at least as tall
    as the tile, so the actions row can never slide under it. */
-.toolhead-card.feeder, .toolhead-card.manual { position: relative; }
-.toolhead-card.feeder > h2, .toolhead-card.manual > h2,
-.toolhead-card.feeder > .meta, .toolhead-card.manual > .meta {
+.toolhead-card.feeder, .toolhead-card.manual, .toolhead-card.combo { position: relative; }
+.toolhead-card.feeder > h2, .toolhead-card.manual > h2, .toolhead-card.combo > h2,
+.toolhead-card.feeder > .meta, .toolhead-card.manual > .meta, .toolhead-card.combo > .meta {
   padding-right: 4.5rem;
 }
-.toolhead-card.feeder > .meta, .toolhead-card.manual > .meta {
+.toolhead-card.feeder > .meta, .toolhead-card.manual > .meta, .toolhead-card.combo > .meta {
   min-height: 2.4rem;
 }
 .toolhead-card .feeder-tile {

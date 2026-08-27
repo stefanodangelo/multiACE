@@ -305,6 +305,11 @@ grep -qxF "$key" ~/.ssh/authorized_keys || echo "$key" >> ~/.ssh/authorized_keys
 chmod 700 ~/.ssh
 chmod 600 ~/.ssh/authorized_keys
 '@
+    # Same CRLF corruption Invoke-Remote guards against (see its comment) -
+    # this function can't route through Invoke-Remote since it must omit
+    # -o BatchMode=yes for the interactive password prompt, so it needs its
+    # own strip.
+    $remoteScript = $remoteScript -replace "`r", ""
     Get-Content $PublicKeyPath -Raw | ssh "$PrinterUser@$PrinterHost" $remoteScript
     if ($LASTEXITCODE -ne 0) {
         Die "key bootstrap failed ($LASTEXITCODE) - check the password and that root login is permitted."
