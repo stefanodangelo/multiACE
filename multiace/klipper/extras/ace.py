@@ -22,8 +22,8 @@ MULTIACE_CODENAME = "Resupply Run"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "4b7a7ad"
-MULTIACE_BUNDLE_SHA1 = "9ba7849"
+MULTIACE_BUILD_TAG = "0ea39a3"
+MULTIACE_BUNDLE_SHA1 = "c3b7d23"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
