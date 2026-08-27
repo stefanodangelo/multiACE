@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Resupply Run"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "68c858e"
+MULTIACE_BUILD_TAG = "4b7a7ad"
 MULTIACE_BUNDLE_SHA1 = "9ba7849"
 
 def _load_i18n_catalog(i18n_dir, lang):
