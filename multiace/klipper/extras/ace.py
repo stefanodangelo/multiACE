@@ -11097,6 +11097,20 @@ class MultiAce:
             raise gcmd.error(
                 self._t('msg.head_feeder_combo_needs_ace', head=self._disp(head)))
 
+        # The combo tap only makes sense if this head's wired ACE is actually
+        # connected: a combo head still sources its slots through that ACE, so
+        # a dangling head_ace (e.g. the index-based default head_ace_N=N with
+        # fewer units than heads) leaves the dashboard with no ACE card and no
+        # selectable slots for this head - the tap silently "enables" onto
+        # nothing. Refuse loudly and point at the fix instead of succeeding.
+        if enable:
+            wired = self.head_ace_for(head)
+            if not self._is_ace_present(wired):
+                raise gcmd.error(self._t(
+                    'msg.head_feeder_combo_ace_absent',
+                    head=self._disp(head), ace=self._disp(wired),
+                    count=len(self._ace_devices)))
+
         if on_feeder_tap:
             # Disabling the tap while it is the head's current source would
             # leave a head_source pointing at a source that no longer
@@ -11155,6 +11169,10 @@ class MultiAce:
         self.head_ace[head] = ace_idx
         if self.save_variables:
             self._save_head_ace()
+        if not self._is_ace_present(ace_idx):
+            self.log_always(self._t(
+                'msg.head_ace_absent', head=self._disp(head),
+                ace=self._disp(ace_idx), count=len(self._ace_devices)))
         if _swapped is not None:
             self.log_always(
                 '[multiACE] head %d -> ACE %d (swapped: head %d -> ACE %d)'

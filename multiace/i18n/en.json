@@ -93,6 +93,7 @@
       "head_ace": "ACE",
       "head_ace_hint": "Which ACE feeds this head. The head can only load/swap this ACE’s slots.",
       "head_ace_unload_first": "Unload this head first to change its ACE.",
+      "head_ace_none": "No connected ACE is wired to this head — set another head to Feeder to free its ACE, or connect another unit. Until then this head has no slots to select.",
       "set_filament": "Filament",
       "feeder_set_filament": "Set this feeder head’s filament colour/material",
       "bg": "BG",
@@ -866,6 +867,8 @@
     "head_ace_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change which ACE feeds it",
     "head_feeder_combo_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change its feeder combo tap",
     "head_feeder_combo_needs_ace": "[multiACE] Head {head} is not ACE-driven - wire it with ACE_SET_HEAD_ACE first, then enable the feeder combo tap",
+    "head_feeder_combo_ace_absent": "[multiACE] Head {head} is wired to ACE {ace}, which is not connected ({count} ACE unit(s) detected). Wire this head to a connected ACE with ACE_SET_HEAD_ACE HEAD={head} ACE=<n> first, then enable the feeder combo tap.",
+    "head_ace_absent": "[multiACE] Warning: head {head} is now wired to ACE {ace}, which is not connected ({count} ACE unit(s) detected). This head will have no ACE slots to load until a matching ACE is connected or you rewire it.",
     "spool_head_not_feeder": "[multiACE] Head {head} is ACE-driven - its spool follows the slot it loads from. Bind the spool to the ACE slot instead; a head binding is for feeder/manual heads."
   }
 }
