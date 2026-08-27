@@ -196,6 +196,15 @@ html.rail-tight .rail-brand-sub {
   font-size: 1rem; padding: .7rem 1.4rem; font-weight: 600;
 }
 .monitor-panel { display: flex; flex-direction: column; gap: 1rem; max-width: 1100px; }
+.monitor-panel h2 { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.monitor-restart-actions { display: inline-flex; gap: .5rem; margin-left: auto; }
+.restart-btn { font-size: .78rem; font-weight: 400; padding: .3rem .7rem;
+               border-radius: 4px; border: 1px solid var(--border); background: transparent;
+               color: var(--muted); cursor: pointer; }
+.restart-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.restart-btn.warn:hover:not(:disabled) { color: #fff; background: var(--danger); border-color: var(--danger); }
+.restart-btn:disabled { opacity: .4; cursor: not-allowed; }
+.retry-restart-hint { color: var(--muted); font-size: .78rem; }
 /* Camera and print control side by side - both are things you watch
    WHILE a print runs, so neither should cost a click to reach. Wraps
    below the camera on narrow viewports rather than squeezing both into
@@ -222,6 +231,14 @@ html.rail-tight .rail-brand-sub {
    overflow-y:auto instead of being clipped by it, and stays anchored
    just outside the rail at any width (expanded or collapsed). */
 .lang-dd { position: relative; width: 100%; }
+/* .rail has padding-right:0 on purpose - the nav items are flush against
+   the tube hairline by design (see .rail-item's square right corners).
+   This bordered, all-corners-rounded dropdown button isn't part of that
+   design and was sitting with its border touching the rail's own right
+   edge/hairline with zero gap. Inset it instead of touching the
+   container's own padding, which every rail-nav item still depends on
+   being 0. */
+.lang-dd.rail-lang { width: calc(100% - .5rem); }
 .lang-dd-btn {
   display: flex; align-items: center; gap: .5rem; width: 100%;
   background: transparent; color: var(--fg);
@@ -2101,9 +2118,9 @@ html.rail-tight { --rail-w: 56px; }
   transition: transform .15s ease, background-color .25s linear;
 }
 .rail-item, .rail-collapse {
-  display: flex; align-items: center; gap: .6rem; width: 100%;
+  display: flex; align-items: center; gap: .6rem; width: calc(100% - .4rem);
   height: var(--rail-item-h, 40px); padding: 0 .55rem;
-  background: transparent; border: 0; border-radius: 4px 0 0 4px;
+  background: transparent; border: 0; border-radius: 4px;
   color: var(--muted); cursor: pointer; text-align: left;
   font-family: inherit; font-size: .72rem; font-weight: 600;
   text-transform: uppercase; letter-spacing: .07em;

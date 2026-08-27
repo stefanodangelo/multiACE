@@ -25,6 +25,7 @@ NOZZLE_CONFIG_POSTFIX = "_nozzle_config.json"
 VALID_NOZZLE_DIAMETERS = [0.2, 0.4, 0.6, 0.8]
 NOZZLE_CONFIG_DEFAULT = {
     "diameter": 0.4,
+    "volume_type": "standard",
 }
 
 class ExtruderSwitchRecorder:
@@ -401,6 +402,12 @@ class PrinterExtruder:
         self.nozzle_config_info = self.printer.load_snapmaker_config_file(
             self.nozzle_config_path, NOZZLE_CONFIG_DEFAULT)
         self.nozzle_diameter = self.nozzle_config_info['diameter']
+        # Stock print_task_config.py and flow_calibrator.py (e.g.
+        # FLOW_RESET_K) read this off every extruder object unconditionally,
+        # with no getattr guard - stock extruder.py sets it, this fork never
+        # did, so FLOW_RESET_K crashed Klipper into shutdown on every boot
+        # once it ran.
+        self.nozzle_volume_type = self.nozzle_config_info['volume_type']
 
         pheaters = self.printer.load_object(config, 'heaters')
         gcode_id = 'T%d' % (extruder_num,)

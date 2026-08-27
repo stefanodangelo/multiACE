@@ -334,6 +334,11 @@
     <button class="retry-now" @click="aceRescan" :disabled="aceRescanBusy">
       {{ t('ui.ace_startup.rescan') }}
     </button>
+    <span class="retry-restart-hint muted small">{{ t('ui.ace_startup.restart_hint') }}</span>
+    <button class="retry-now" @click="restartFirmware" :disabled="isPrinting"
+            :title="isPrinting ? t('ui.dashboard.blocked_printing') : t('ui.restart.firmware_msg')">
+      {{ t('ui.restart.firmware_btn') }}
+    </button>
   </div>
   <!-- Auto-retry banner. Full width under the header on purpose: a load
        can be started from the dashboard, a macro or the print itself, so
@@ -359,7 +364,19 @@
          of the old ACE/toolhead tab (now "Loadout") so watching the print
          and driving a swap are not fighting for the same screen. -->
     <section v-show="tab==='monitor'" class="monitor-panel">
-      <h2>{{ t('ui.tabs.monitor') }}</h2>
+      <h2>
+        {{ t('ui.tabs.monitor') }}
+        <span class="monitor-restart-actions">
+          <button class="restart-btn" @click="restartFirmware" :disabled="isPrinting"
+                  :title="isPrinting ? t('ui.dashboard.blocked_printing') : t('ui.restart.firmware_msg')">
+            {{ t('ui.restart.firmware_btn') }}
+          </button>
+          <button class="restart-btn warn" @click="restartPrinter" :disabled="isPrinting"
+                  :title="isPrinting ? t('ui.dashboard.blocked_printing') : t('ui.restart.printer_msg')">
+            {{ t('ui.restart.printer_btn') }}
+          </button>
+        </span>
+      </h2>
       <!-- Camera + live print control side by side: both are things you
            watch WHILE a print runs, so neither should be a click away
            behind a tab. Console (below, full width) is read less often
