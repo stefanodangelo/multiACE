@@ -2373,12 +2373,23 @@ class FilamentFeed:
                                         logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
                                                      unload_attempt + 1, unload_max, precool_temp)
 
-                                    self.gcode.run_script_from_command("M109 S%d\r\n"
-                                        % (max(filament_feed_temp_db, filament_unload_temp)))
+                                    _reheat_temp = max(
+                                        filament_feed_temp_db, filament_unload_temp)
+                                    try:
+                                        _ovfn = getattr(
+                                            self.ace, 'tipform_unload_temp_for', None)
+                                        if _ovfn is not None and _ovfn(
+                                                self.filament_ch[ch],
+                                                soft=bool(filament_soft)) is not None:
+
+                                            _reheat_temp = filament_unload_temp
+                                    except Exception:
+                                        pass
+                                    self.gcode.run_script_from_command(
+                                        "M109 S%d\r\n" % _reheat_temp)
                                     self.toolhead.wait_moves()
                                     self.ace._run_tipform(
-                                        self.filament_ch[ch],
-                                        max(filament_feed_temp_db, filament_unload_temp),
+                                        self.filament_ch[ch], _reheat_temp,
                                         int(filament_soft),
                                         self.toolhead.get_extruder().nozzle_diameter)
                                     self.toolhead.wait_moves()
@@ -2676,12 +2687,23 @@ class FilamentFeed:
                                         logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
                                                      unload_attempt + 1, unload_max, precool_temp)
 
-                                    self.gcode.run_script_from_command("M109 S%d\r\n"
-                                        % (max(filament_feed_temp_db, filament_unload_temp)))
+                                    _reheat_temp = max(
+                                        filament_feed_temp_db, filament_unload_temp)
+                                    try:
+                                        _ovfn = getattr(
+                                            self.ace, 'tipform_unload_temp_for', None)
+                                        if _ovfn is not None and _ovfn(
+                                                self.filament_ch[ch],
+                                                soft=bool(filament_soft)) is not None:
+
+                                            _reheat_temp = filament_unload_temp
+                                    except Exception:
+                                        pass
+                                    self.gcode.run_script_from_command(
+                                        "M109 S%d\r\n" % _reheat_temp)
                                     self.toolhead.wait_moves()
                                     self.ace._run_tipform(
-                                        self.filament_ch[ch],
-                                        max(filament_feed_temp_db, filament_unload_temp),
+                                        self.filament_ch[ch], _reheat_temp,
                                         int(filament_soft),
                                         self.toolhead.get_extruder().nozzle_diameter)
                                     self.toolhead.wait_moves()
