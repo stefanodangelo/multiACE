@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "True Estimate"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "4ed8cc9"
+MULTIACE_BUILD_TAG = "457ee5d"
 MULTIACE_BUNDLE_SHA1 = "0841c1a"
 
 def _load_i18n_catalog(i18n_dir, lang):
