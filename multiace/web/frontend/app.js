@@ -4619,6 +4619,32 @@ createApp({
       preflight.slicerSwaps = realSwapCount(
         (preflight.report && preflight.report.events) || [],
         _slicerEffectiveMapping());
+      recalcEstimate("slicer", {mapping: _slicerEffectiveMapping()});
+    }
+    // Re-run the §1 time/cost estimate for the given plan against the
+    // user's edited mapping/assignment - the money/time counterpart of the
+    // swap-count recompute above, which only ever touched `swaps`. Only the
+    // Pyodide (local) preflight keeps the estimate ctx needed for this
+    // (captured per-job in the worker); the server-fallback path still
+    // shows the estimate for the original mapping, same as before this.
+    // Superseded requests are dropped by sequence number so a burst of
+    // dropdown clicks can't let a stale reply land after a newer one.
+    let _estimateReqSeq = 0;
+    async function recalcEstimate(planKey, payload) {
+      const plan = preflight.report && preflight.report.plans
+                 && preflight.report.plans[planKey];
+      if (!plan || !preflight.local || !preflightWorker || !preflightJobId) return;
+      const seq = ++_estimateReqSeq;
+      try {
+        const msg = await runPreflightWorker("estimate", Object.assign(
+          {jobId: preflightJobId}, payload));
+        if (seq !== _estimateReqSeq) return;
+        if (msg.estimate !== undefined) plan.estimate = msg.estimate;
+        if (msg.timeline !== undefined) plan.timeline = msg.timeline;
+      } catch (_) {
+        // Informational only - leave the previous numbers on a worker hiccup
+        // rather than erroring the whole preflight over the estimate.
+      }
     }
     function slicerSwapsDisplay() {
       if (preflight.slicerSwaps !== null) return preflight.slicerSwaps;
@@ -4752,6 +4778,7 @@ createApp({
       preflight.headSwaps = headSwapCount(
         (preflight.report && preflight.report.events) || [],
         _headEffectiveAssignment());
+      recalcEstimate("loadout", {targetIds: _headEffectiveAssignment()});
     }
     function headSwapsDisplay() {
       if (preflight.headSwaps !== null) return preflight.headSwaps;
@@ -5273,7 +5300,8 @@ createApp({
             return;
           }
           if ((type === "analyze" && msg.type === "analyze-done")
-              || (type === "rewrite" && msg.type === "rewrite-done")) {
+              || (type === "rewrite" && msg.type === "rewrite-done")
+              || (type === "estimate" && msg.type === "estimate-done")) {
             worker.removeEventListener("message", onMsg);
             resolve(msg);
           }

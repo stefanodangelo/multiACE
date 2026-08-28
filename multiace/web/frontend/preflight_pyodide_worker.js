@@ -20,6 +20,8 @@
  *   <- {type:"rewrite", jobId, file, liveSlots, headCtx, mode, remapOverride,
  *                        headAssignment, headPlan}
  *   -> {type:"rewrite-done", jobId, text}               (+ {type:"progress"})
+ *   <- {type:"estimate", jobId, mapping, targetIds}
+ *   -> {type:"estimate-done", jobId, estimate, timeline}
  *   <- {type:"clear", jobId}        ->  {type:"cleared", jobId}
  *
  * liveSlots / headCtx are produced by the main thread from /multiace/api/state
@@ -84,6 +86,10 @@ import sys, json
 sys.path.insert(0, "/multiace")
 import post_process_virtual_toolheads as _pp
 import preflight_core as _core
+# Per-job estimate capture (SwapCostModel + header + colours/materials),
+# populated by doAnalyze and consumed by a later "estimate" recompute -
+# see preflight_core.recompute_estimate.
+_captures = {}
 `);
       ready = true;
     })();
@@ -109,11 +115,13 @@ async function doAnalyze(jobId, file, liveSlots, headCtx, spoolPrices) {
   py.globals.set("_cost", JSON.stringify(costParams || {}));
   py.globals.set("_calib", JSON.stringify(calibration || {}));
   py.globals.set("_prices", JSON.stringify(spoolPrices || {}));
+  py.globals.set("_job_id", jobId);
   const reportJson = py.runPython(`
 _live_slots = json.loads(_live)
 _head_ctx   = json.loads(_hctx)
 _colors, _types, _naces, _used, _plan, _meta, _hdr = _core.parse_meta(
     _pp, _gtext.splitlines(True), with_header=True)
+_capture = {}
 _report = _core.build_report(
     _pp,
     slicer_colors=_colors, slicer_types=_types, num_aces=_naces,
@@ -121,13 +129,30 @@ _report = _core.build_report(
     token="", filename=_fname, size=int(_fsize),
     header_text=_hdr, cost_params=json.loads(_cost),
     calibration=json.loads(_calib), meta=_meta,
-    spool_prices=json.loads(_prices))
+    spool_prices=json.loads(_prices), estimate_capture=_capture)
+_captures[_job_id] = _capture
 json.dumps(_report)
 `);
   // free the big string from the Python globals
   py.runPython("del _gtext, _plan, _hdr\n");
   progress(jobId, "done", 100);
   return JSON.parse(reportJson);
+}
+
+// Estimate: recompute {estimate, timeline} for an edited mapping/target
+// assignment, reusing the ctx captured by doAnalyze - no gcode re-parse.
+async function doEstimate(jobId, mapping, targetIds) {
+  const py = pyodide;
+  py.globals.set("_job_id", jobId);
+  py.globals.set("_mapping", JSON.stringify(mapping || null));
+  py.globals.set("_target_ids", JSON.stringify(targetIds || null));
+  const resultJson = py.runPython(`
+_result = _core.recompute_estimate(
+    _captures.get(_job_id),
+    mapping=json.loads(_mapping), target_ids=json.loads(_target_ids))
+json.dumps(_result)
+`);
+  return JSON.parse(resultJson);
 }
 
 // Rewrite: run the full pipeline in MEMFS, return the print-ready gcode text.
@@ -208,10 +233,23 @@ self.onmessage = async (ev) => {
       self.postMessage({type: "rewrite-done", jobId, text});
       return;
     }
+    if (msg.type === "estimate") {
+      await ensureInit(msg);
+      const r = await doEstimate(jobId, msg.mapping, msg.targetIds);
+      self.postMessage({
+        type: "estimate-done", jobId,
+        estimate: r && r.estimate, timeline: r && r.timeline,
+      });
+      return;
+    }
     if (msg.type === "clear") {
       files.delete(jobId);
       slotsByJob.delete(jobId);
       ctxByJob.delete(jobId);
+      if (pyodide) {
+        pyodide.globals.set("_job_id", jobId);
+        pyodide.runPython(`_captures.pop(_job_id, None)`);
+      }
       self.postMessage({type: "cleared", jobId});
       return;
     }

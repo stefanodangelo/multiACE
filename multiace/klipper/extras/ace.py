@@ -17,8 +17,8 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.99.10b"
-MULTIACE_CODENAME = "Resupply Run"
+MULTIACE_VERSION = "0.99.14b"
+MULTIACE_CODENAME = "True Estimate"
 
 ACE_API_VERSION = 1
 

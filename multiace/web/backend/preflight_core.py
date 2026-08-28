@@ -247,6 +247,36 @@ def ctx_timeline(ctx, events, assignment):
         colors=ctx["colors"], materials=ctx["materials"])
 
 
+def recompute_estimate(capture, *, mapping=None, target_ids=None):
+    """Recompute {estimate, timeline} for a user-edited mapping/assignment,
+    reusing the estimate ctx captured at analyze time (see `estimate_capture`
+    on `build_report`/`head_mode_preview`).
+
+    This is the money/time counterpart of the live swap-count recalc the
+    frontend already runs on every mapping-dropdown change - without it,
+    editing a filament mapping in the preflight left the estimate showing
+    numbers for the ORIGINAL mapping. Returns None when no ctx was captured
+    (no estimate to begin with - an older post-processor, or the file's
+    header didn't parse), matching attach_estimate's soft-degrade.
+    """
+    ctx = (capture or {}).get("ctx")
+    if not ctx:
+        return None
+    if target_ids is not None:
+        assignment = assignment_from_target_ids(
+            target_ids, capture.get("targets") or [])
+        # attach_estimate prices each row from plan["mapping"]; head-mode
+        # rows are the flat {kind, head, ace, slot} shape _mapping_row_price
+        # expects, so build them straight from the assignment entries.
+        price_mapping = [dict(e, t=t) for t, e in assignment.items()]
+    else:
+        assignment = assignment_from_mapping(mapping or [])
+        price_mapping = mapping or []
+    plan = {"feasible": True, "mapping": price_mapping}
+    attach_estimate(ctx, plan, capture.get("events") or [], assignment)
+    return {"estimate": plan.get("estimate"), "timeline": plan.get("timeline")}
+
+
 def make_purge_callback(cost_params, slicer_colors, slicer_types,
                         purge_dest=None):
     """A (head, ace, slot, from_t, to_t) -> mm callback for the rewrite.
@@ -650,7 +680,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
                       slicer_types, head_ctx, ace_slots, plan_proxy,
                       fuzzy=DEFAULT_FUZZY, header_text=None,
                       cost_params=None, calibration=None, meta=None,
-                      spool_prices=None) -> dict:
+                      spool_prices=None, estimate_capture=None) -> dict:
     """The head-mode preflight preview: THREE plans, mirroring multi:
       loadout  - match against the currently-loaded feeders + ACE slots (editable)
       optimize - swap-minimal proposed loadout (free, Belady per ACE head)
@@ -684,6 +714,10 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         pp, header_text, cost_params=cost_params, calibration=calibration,
         slicer_colors=slicer_colors, slicer_types=slicer_types,
         event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices)
+    if estimate_capture is not None:
+        estimate_capture["ctx"] = estimate_ctx
+        estimate_capture["events"] = events
+        estimate_capture["targets"] = targets
 
     nz_groups, nz_mixed = nozzle_context(pp, meta, head_ctx)
     try:
@@ -779,7 +813,8 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
                  live_slots, head_ctx, token, filename, size,
                  fuzzy=DEFAULT_FUZZY, header_text=None, cost_params=None,
-                 calibration=None, meta=None, spool_prices=None) -> dict:
+                 calibration=None, meta=None, spool_prices=None,
+                 estimate_capture=None) -> dict:
     """Build the full preflight report dict (the /api/preflight payload).
 
     Refuses an ALREADY-PROCESSED file (the "; multiACE processed:" /
@@ -815,7 +850,8 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
             pp, token, filename, size, slicer_colors, slicer_types,
             head_ctx, live_slots, plan_proxy, fuzzy=fuzzy,
             header_text=header_text, cost_params=cost_params,
-            calibration=calibration, meta=meta, spool_prices=spool_prices)
+            calibration=calibration, meta=meta, spool_prices=spool_prices,
+            estimate_capture=estimate_capture)
 
     missing_mats = pp.check_material_availability(slicer_types, live_slots)
 
@@ -865,6 +901,9 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
             pp, header_text, cost_params=cost_params, calibration=calibration,
             slicer_colors=slicer_colors, slicer_types=slicer_types,
             event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices)
+        if estimate_capture is not None:
+            estimate_capture["ctx"] = estimate_ctx
+            estimate_capture["events"] = out["events"]
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
                 pp, mode, result, mapping,
