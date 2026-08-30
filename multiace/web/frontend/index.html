@@ -519,7 +519,11 @@
           <button type="submit" :disabled="consoleBusy || !consoleInput.trim()">⏎</button>
         </form>
       </div>
-      <div class="monitor-start">
+      <!-- Plain-printer fallback: with no ACE hardware there is no Loadout
+           tab to carry this button, so it stays reachable here for that
+           mode. Every other mode gets it on the Loadout tab instead - see
+           .monitor-start below. -->
+      <div class="monitor-start" v-if="state.mode === 'normal'">
         <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
                class="upload-input" @change="onUploadGcode($event.target.files)">
         <button class="upload-btn primary start-print-btn" @click="triggerUpload()"
@@ -544,6 +548,21 @@
                 :title="t('ui.dashboard.show_display_hint')">
           {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
         </button>
+        <!-- The Loadout tab is where a session starts, so the print action
+             lives here as the default CTA rather than tucked in Dashboard.
+             v-if (not just the section's v-show) keeps this the only mounted
+             uploadInput when mode is 'normal' - see the fallback above,
+             which shares that ref name and must be the sole instance then. -->
+        <div class="monitor-start status-row-cta" v-if="state.mode !== 'normal'">
+          <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
+                 class="upload-input" @change="onUploadGcode($event.target.files)">
+          <button class="upload-btn primary start-print-btn" @click="triggerUpload()"
+                  :disabled="uploading"
+                  :title="t('ui.upload.tooltip')">
+            <span v-if="!uploading">⬆ {{ t('ui.upload.button') }}</span>
+            <span v-else>{{ t('ui.upload.in_progress') }}</span>
+          </button>
+        </div>
       </div>
       <!-- COLLAPSIBLE PANEL. Collapsing changes density, never awareness:
            the collapsed header still carries a chip per filament lane, so
@@ -610,11 +629,6 @@
                         :class="{active: dryPanelOpen(ace.idx), running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
-                <button class="ace-overrides-btn"
-                        v-if="configForm.perAce[ace.idx]"
-                        :class="{active: overridesPanelOpen(ace.idx)}"
-                        @click="toggleOverridesPanel(ace.idx)"
-                        :title="t('ui.config.per_ace')">⚙</button>
                 <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)"
                         :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load_all') }}</button>
               </span>
@@ -747,88 +761,6 @@
                 </div>
               </div>
             </transition>
-            <transition name="dry-fade">
-              <div v-if="overridesPanelOpen(ace.idx) && configForm.perAce[ace.idx]"
-                   class="dry-panel override-panel" @click.stop>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.dryer_temp_override') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_temp"
-                           min="0" max="80" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_temp')"> °C
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.dryer_duration_override') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_duration"
-                           min="0" max="600" step="5"
-                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_duration')"> min
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feed_speed') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].feed_speed"
-                           min="1" max="500" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'feed_speed')"> mm/s
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.retract_speed') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_speed"
-                           min="1" max="500" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'retract_speed')"> mm/s
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.load_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].load_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'load_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.retract_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'retract_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.swap_retract_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].swap_retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'swap_retract_length')"> mm
-                  </label>
-                </div>
-                <details class="per-slot-block">
-                  <summary>{{ t('ui.config.per_slot_overrides') }}</summary>
-                  <table class="per-slot-table">
-                    <thead>
-                      <tr>
-                        <th>Slot</th>
-                        <th>{{ t('ui.config.load_length') }}</th>
-                        <th>{{ t('ui.config.retract_length') }}</th>
-                        <th>{{ t('ui.config.swap_retract_length') }}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="s in 4" :key="s-1">
-                        <td>{{ dispIdx(s-1) }}</td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].load_length"
-                                   min="0" max="5000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'load_length')"></td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].retract_length"
-                                   min="0" max="5000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'retract_length')"></td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].swap_retract_length"
-                                   min="0" max="2000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'swap_retract_length')"></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </details>
-                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
-              </div>
-            </transition>
           </article>
         </div>
         <h3 class="th-section-head">
@@ -851,11 +783,6 @@
                 <span class="th-color"
                       v-if="t_.color && !t_.feeder && !t_.manual && t_.head_source_known && !toolheadOps[t_.idx]"
                       :style="{background: t_.color}"></span>
-                <button class="ace-overrides-btn"
-                        v-if="configForm.perFeeder[t_.idx]"
-                        :class="{active: feederOverridesPanelOpen(t_.idx)}"
-                        @click="toggleFeederOverridesPanel(t_.idx)"
-                        :title="t('ui.config.per_feeder')">⚙</button>
               </span>
             </h2>
             <!-- The tile is a SIBLING of the title, not inside it: in the h2
@@ -971,33 +898,6 @@
                 <span>{{ t('ui.dashboard.bg') }}</span>
               </label>
             </div>
-            <transition name="dry-fade">
-              <div v-if="feederOverridesPanelOpen(t_.idx) && configForm.perFeeder[t_.idx]"
-                   class="dry-panel override-panel" @click.stop>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_load_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].load_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'load_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_retract_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'retract_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_swap_retract_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].swap_retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'swap_retract_length')"> mm
-                  </label>
-                </div>
-                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
-              </div>
-            </transition>
           </article>
         </div>
       </div>

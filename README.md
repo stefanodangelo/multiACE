@@ -8,6 +8,15 @@
 - Starting the ACE 2 Pro dryer directly above 50 °C can trigger a `ptc_error` in the ACE firmware, requiring a power cycle. Firmware limitation, hit by automatic humidity control whenever it restarts the heater at a stored higher target. Next release works around it with a soft ramp (50 °C, then raise to target after a few minutes).
 - Per-pair purge in the Web UI shows as unchecked even when active. Enable via `ACE_SET_PURGE MATRIX=1` in the Fluidd console; WebUI fix planned.
 
+## What's new in 0.99.15b "Clean Sweep" (since 0.99.14b)
+
+- **Combo (ACE + feeder) mode fully stripped out for now**, not just gated off — the per-head feeder-park-length setting, the `_ace_present` non-connected-ACE guard, and the associated config/UI/tests are removed rather than left dormant. Will come back together once the underlying spool-tracking bug is fixed.
+- **Per-ACE, per-slot, and per-feeder config overrides removed** — dryer temp/duration, feed/retract speed, and load/retract/swap-retract lengths are global-only now (Config tab). Simpler config surface, fewer combinations to reason about.
+- Reverted the PLA tip-forming choreography and snapped-tip purge recovery added alongside combo mode back to a plain temperature-only tip form; they weren't reliable enough to keep in this cut.
+- **Start-print CTA moved to the Loadout tab** (where a session actually starts), with the Dashboard-tab button kept only as a fallback for plain-printer setups with no Loadout tab.
+- The swap-cost estimate no longer goes silent for a tool with no spool price bound — it's now priced at a flagged default (€20/kg) so the headline total stays a real estimate instead of omitting that tool.
+- Fixed the browser-side (Pyodide) preflight estimate using stale cost params/calibration from whenever the tab was opened instead of the printer's current Settings.
+
 ## What's new in 0.99.14b "True Estimate" (since 0.99.13b)
 
 > **Combo mode is temporarily disabled** while a spool-tracking bug is worked out (assigning a spool to a head sourced from its feeder tap silently failed to book usage instead of erroring). Disabled at the source — config load, persisted-state restore, and `ACE_SET_HEAD_FEEDER_COMBO ENABLE=1` all refuse to turn it on, and the checkbox is hidden in the web UI. Two related fixes landed anyway, kept for when combo mode returns: feeder PRELOAD on a combo head now stops at the Y-splitter instead of the toolhead sensor, and a bare `FEED_AUTO LOAD=1` now checks the feeder inlet sensor to resolve the source instead of guessing.

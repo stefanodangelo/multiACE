@@ -189,9 +189,10 @@ html.rail-tight .rail-brand-sub {
 }
 .upload-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .upload-btn:disabled { opacity: .5; cursor: progress; }
-/* Prominent CTA in the new Dashboard (monitor) tab - bigger than the
-   compact chrome button it replaced, since it is now the primary action
-   on that tab rather than a corner affordance. */
+/* Prominent CTA on the Loadout tab (and, for plain-printer setups with no
+   Loadout tab, on the Dashboard/monitor tab instead) - bigger than the
+   compact chrome button it replaced, since it is the primary action there
+   rather than a corner affordance. */
 .start-print-btn {
   font-size: 1rem; padding: .7rem 1.4rem; font-weight: 600;
 }
@@ -214,6 +215,9 @@ html.rail-tight .rail-brand-sub {
                   border-radius: 6px; overflow: hidden;
                   flex: 1 1 420px; min-width: 280px; }
 .monitor-start { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+/* On the Loadout tab the CTA rides inline with the status pills, pinned
+   to the right edge of the row instead of stacking above it. */
+.status-row-cta { margin-left: auto; }
 /* Circular flag "coin": fixed square clipped to a circle, so an emoji
    flag (roughly 4:3) crops to a coin instead of stretching, and an
    unknown language's text-initials fallback (langFlagGlyph) still reads
@@ -443,16 +447,6 @@ header h1 .hl { color: var(--accent); }
   color: var(--ok); border-color: var(--ok);
   animation: dry-pulse 1.6s ease-in-out infinite;
 }
-/* Not scoped to .ace-card h2: the same gear affordance opens the
-   per-toolhead feeder overrides on .toolhead-card h2 too. */
-.ace-overrides-btn {
-  background: transparent; color: var(--muted); border: 1px solid var(--border);
-  width: 1.7rem; height: 1.7rem; border-radius: 999px; cursor: pointer;
-  font-size: .85rem; line-height: 1; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.ace-overrides-btn:hover  { color: var(--accent); border-color: var(--accent); }
-.ace-overrides-btn.active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
 @keyframes dry-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(80, 220, 100, 0); }
   50%      { box-shadow: 0 0 0 4px rgba(80, 220, 100, .25); }
@@ -797,30 +791,6 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
               margin-right: .4rem; max-width: 14ch; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap;
               display: inline-block; vertical-align: middle; }
-.per-ace-row { margin-bottom: .35rem; font-size: .85rem; color: var(--muted); }
-.per-ace-row label { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
-.per-ace-row input[type=number] {
-  width: 4.5rem; padding: .25rem .45rem;
-  background: #111; color: var(--fg);
-  border: 1px solid var(--border); border-radius: 3px;
-}
-.per-ace-row input[type=number]:focus { outline: none; border-color: var(--accent); }
-.per-ace-row input[type=checkbox] { accent-color: var(--accent); }
-.per-slot-block { margin-top: .55rem; }
-.per-slot-block summary { cursor: pointer; color: var(--accent); font-size: .8rem;
-                          padding: .25rem 0; user-select: none; }
-.per-slot-block summary::marker { color: var(--accent); }
-.per-slot-table { width: 100%; border-collapse: collapse; margin-top: .35rem;
-                  font-size: .75rem; }
-.per-slot-table th, .per-slot-table td { padding: .25rem .35rem; text-align: left;
-                                          color: var(--muted); }
-.per-slot-table th { font-weight: 500; border-bottom: 1px solid var(--border); }
-.per-slot-table input[type=number] {
-  width: 4rem; padding: .2rem .3rem;
-  background: #111; color: var(--fg);
-  border: 1px solid var(--border); border-radius: 3px;
-}
-.per-slot-table input[type=number]:focus { outline: none; border-color: var(--accent); }
 .config-row input, .config-row select {
   padding: .4rem .6rem; background: #111; color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px; font-size: .9rem;

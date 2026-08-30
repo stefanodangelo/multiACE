@@ -3227,73 +3227,11 @@ createApp({
       if (dryOpenAces.has(aceIdx)) dryOpenAces.delete(aceIdx);
       else dryOpenAces.add(aceIdx);
     }
-    // Per-ACE overrides live on the dashboard card now (behind the gear
-    // icon) instead of buried in Settings -> Config; same open-set pattern
-    // as the dry panel above so multiple cards can be open independently.
-    const overridesOpenAces = reactive(new Set());
-    function overridesPanelOpen(aceIdx) { return overridesOpenAces.has(aceIdx); }
-    function toggleOverridesPanel(aceIdx) {
-      if (overridesOpenAces.has(aceIdx)) overridesOpenAces.delete(aceIdx);
-      else overridesOpenAces.add(aceIdx);
-    }
-    // Same gear-icon pattern, one toolhead card instead of one ACE card -
-    // per-head feeder length overrides (feeder_*_length_N in the config).
-    const feederOverridesOpenHeads = reactive(new Set());
-    function feederOverridesPanelOpen(headIdx) { return feederOverridesOpenHeads.has(headIdx); }
-    function toggleFeederOverridesPanel(headIdx) {
-      if (feederOverridesOpenHeads.has(headIdx)) feederOverridesOpenHeads.delete(headIdx);
-      else feederOverridesOpenHeads.add(headIdx);
-    }
-    // Placeholders for the override panels above: show what actually
-    // applies when a field is left blank, instead of a bare "-". Mirrors
-    // the fallback chains in ace.py's get_load_length/get_retract_length/
-    // get_swap_retract_length (per-slot -> per-ACE -> global) and
-    // feeder_load_length_for/feeder_retract_length_for/
-    // get_feeder_swap_retract_length (per-head -> global).
-    const DRYER_TEMP_DEFAULT = 55;
-    const DRYER_DURATION_DEFAULT = 240;
-    const SWAP_RETRACT_LENGTH_DEFAULT = 0;
-    const FEEDER_LOAD_LENGTH_DEFAULT = 1100;
-    const FEEDER_SWAP_RETRACT_LENGTH_DEFAULT = 150;
-    function globalSwapRetractLengthEffective() {
-      return configForm.swap_retract_length !== ''
-        ? configForm.swap_retract_length : SWAP_RETRACT_LENGTH_DEFAULT;
-    }
+    // Placeholder for the global feeder_retract_length Settings field: what
+    // actually applies when left blank (falls back to retract_length).
     function feederRetractLengthEffective() {
       return configForm.feeder_retract_length !== ''
         ? configForm.feeder_retract_length : configForm.retract_length;
-    }
-    function perAcePlaceholder(aceIdx, field) {
-      const p = configForm.perAce[aceIdx];
-      if (p && p[field] !== '') return p[field];
-      switch (field) {
-        case 'dryer_temp':
-          return configForm.dryer_temp !== '' ? configForm.dryer_temp : DRYER_TEMP_DEFAULT;
-        case 'dryer_duration':
-          return configForm.dryer_duration !== '' ? configForm.dryer_duration : DRYER_DURATION_DEFAULT;
-        case 'feed_speed': return configForm.feed_speed;
-        case 'retract_speed': return configForm.retract_speed;
-        case 'load_length': return configForm.load_length;
-        case 'retract_length': return configForm.retract_length;
-        case 'swap_retract_length': return globalSwapRetractLengthEffective();
-        default: return '';
-      }
-    }
-    function perSlotPlaceholder(aceIdx, slotIdx, field) {
-      const p = configForm.perAce[aceIdx];
-      const slot = p && p.perSlot[slotIdx];
-      if (slot && slot[field] !== '') return slot[field];
-      return perAcePlaceholder(aceIdx, field);
-    }
-    function perFeederPlaceholder(headIdx, field) {
-      const p = configForm.perFeeder[headIdx];
-      if (p && p[field] !== '') return p[field];
-      switch (field) {
-        case 'load_length': return FEEDER_LOAD_LENGTH_DEFAULT;
-        case 'retract_length': return feederRetractLengthEffective();
-        case 'swap_retract_length': return FEEDER_SWAP_RETRACT_LENGTH_DEFAULT;
-        default: return '';
-      }
     }
     function aceDrying(ace) {
       const d = ace && ace.dryer;
@@ -3521,41 +3459,14 @@ createApp({
       state_debug: false,
       usb_debug: false,
       fa_debug: false,
-      perAce: [],
-      // Fixed at 4 (T0-T3), same as the config file's commented-out
-      // feeder_*_length_0..3 placeholders - toolhead count, not ace count.
-      perFeeder: [0, 1, 2, 3].map(() => (
-        {load_length: '', retract_length: '', swap_retract_length: ''})),
     });
-    function _makePerAceEntry() {
-      const perSlot = [];
-      for (let s = 0; s < 4; s++) {
-        perSlot.push({load_length: '', retract_length: '', swap_retract_length: ''});
-      }
-      return {
-        dryer_temp: '', dryer_duration: '',
-        feed_speed: '', retract_speed: '',
-        load_length: '', retract_length: '', swap_retract_length: '',
-        perSlot,
-      };
-    }
-    function _ensurePerAceLength() {
-      const n = Math.max(0, Math.min(4, configForm.ace_device_count | 0));
-      while (configForm.perAce.length < n) {
-        configForm.perAce.push(_makePerAceEntry());
-      }
-      while (configForm.perAce.length > n) {
-        configForm.perAce.pop();
-      }
-    }
-    watch(() => configForm.ace_device_count, _ensurePerAceLength, {immediate: true});
     // True after a config save, which needs a full printer restart to take
     // effect (a bare Klipper restart misses USB/serial + PAXX boot-script
     // changes). Drives the prominent top reboot banner; cleared once a restart
     // actually starts (klippy down). Mode changes do NOT use this - crossing
     // 'normal' raises a backend reboot error that reaches the display too.
     const rebootNeeded = ref(false);
-    function paramsToForm(params, perAceParams) {
+    function paramsToForm(params) {
       if (!params) return;
       const num  = (k) => params[k] != null ? Number(params[k]) : configForm[k];
       const bool = (k) => params[k] != null ? params[k] === 'true' : configForm[k];
@@ -3586,36 +3497,6 @@ createApp({
       configForm.state_debug    = bool('state_debug');
       configForm.usb_debug      = bool('usb_debug');
       configForm.fa_debug       = bool('fa_debug');
-      _ensurePerAceLength();
-      const pa = perAceParams || {};
-      for (let i = 0; i < configForm.perAce.length; i++) {
-        const t = params[`dryer_temp_${i}`];
-        const d = params[`dryer_duration_${i}`];
-        configForm.perAce[i].dryer_temp     = numOrEmpty(t);
-        configForm.perAce[i].dryer_duration = numOrEmpty(d);
-        const aceSec = pa[i] || pa[String(i)] || {};
-        configForm.perAce[i].feed_speed     = numOrEmpty(aceSec.feed_speed);
-        configForm.perAce[i].retract_speed  = numOrEmpty(aceSec.retract_speed);
-        configForm.perAce[i].load_length    = numOrEmpty(aceSec.load_length);
-        configForm.perAce[i].retract_length = numOrEmpty(aceSec.retract_length);
-        configForm.perAce[i].swap_retract_length = numOrEmpty(aceSec.swap_retract_length);
-        for (let s = 0; s < 4; s++) {
-          configForm.perAce[i].perSlot[s].load_length    = numOrEmpty(aceSec[`load_length_${s}`]);
-          configForm.perAce[i].perSlot[s].retract_length = numOrEmpty(aceSec[`retract_length_${s}`]);
-          configForm.perAce[i].perSlot[s].swap_retract_length = numOrEmpty(aceSec[`swap_retract_length_${s}`]);
-        }
-      }
-      // feeder_*_length_N are [ace] main-section keys with a numeric
-      // suffix (same shape as dryer_temp_N above), not a per-ace
-      // sub-section - N here is the toolhead index, not an ACE index.
-      for (let i = 0; i < configForm.perFeeder.length; i++) {
-        configForm.perFeeder[i].load_length =
-          numOrEmpty(params[`feeder_load_length_${i}`]);
-        configForm.perFeeder[i].retract_length =
-          numOrEmpty(params[`feeder_retract_length_${i}`]);
-        configForm.perFeeder[i].swap_retract_length =
-          numOrEmpty(params[`feeder_swap_retract_length_${i}`]);
-      }
     }
     function formToCfgContent(content) {
       const lines = content.split('\n');
@@ -3648,33 +3529,6 @@ createApp({
         usb_debug:          configForm.usb_debug   ? 'true' : 'false',
         fa_debug:           configForm.fa_debug    ? 'true' : 'false',
       };
-      for (let i = 0; i < configForm.perAce.length; i++) {
-        const p = configForm.perAce[i];
-        mainRepl[`dryer_temp_${i}`]     = numStr(p.dryer_temp);
-        mainRepl[`dryer_duration_${i}`] = numStr(p.dryer_duration);
-      }
-      for (let i = 0; i < configForm.perFeeder.length; i++) {
-        const p = configForm.perFeeder[i];
-        mainRepl[`feeder_load_length_${i}`]  = numStr(p.load_length);
-        mainRepl[`feeder_retract_length_${i}`] = numStr(p.retract_length);
-        mainRepl[`feeder_swap_retract_length_${i}`] = numStr(p.swap_retract_length);
-      }
-      const perAceRepl = {};
-      for (let i = 0; i < configForm.perAce.length; i++) {
-        const p = configForm.perAce[i];
-        const sec = {};
-        sec.feed_speed     = numStr(p.feed_speed);
-        sec.retract_speed  = numStr(p.retract_speed);
-        sec.load_length    = numStr(p.load_length);
-        sec.retract_length = numStr(p.retract_length);
-        sec.swap_retract_length = numStr(p.swap_retract_length);
-        for (let s = 0; s < 4; s++) {
-          sec[`load_length_${s}`]    = numStr(p.perSlot[s].load_length);
-          sec[`retract_length_${s}`] = numStr(p.perSlot[s].retract_length);
-          sec[`swap_retract_length_${s}`] = numStr(p.perSlot[s].swap_retract_length);
-        }
-        perAceRepl[i] = sec;
-      }
       const keyRegex = /^\s*#?\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/;
       const sectionRegex = /^\s*\[(.+?)\]\s*$/;
       const out = [];
@@ -3717,19 +3571,6 @@ createApp({
             out.push(`${key}: ${val}`);
             continue;
           }
-        } else if (typeof curSection === 'number') {
-          const sec = perAceRepl[curSection];
-          if (sec) {
-            const m = raw.match(keyRegex);
-            if (m && (m[1] in sec)) {
-              const key = m[1];
-              const val = sec[key];
-              seenSet(curSection).add(key);
-              if (val === '' || val == null) continue;
-              out.push(`${key}: ${val}`);
-              continue;
-            }
-          }
         }
         out.push(raw);
       }
@@ -3753,38 +3594,7 @@ createApp({
         }
       };
       insertMissing('[ace]', mainRepl, seenSet('ace'));
-      for (let i = 0; i < configForm.perAce.length; i++) {
-        insertMissing(`[ace ${i}]`, perAceRepl[i], seenSet(i));
-      }
-      // Drop any [ace N] section header that ends up with no content.
-      // When the user clears all per-ACE overrides, the keyed lines get
-      // filtered out by the value=='' rule above, leaving a bare header.
-      // Klipper refuses to load an empty section, so strip it here.
-      const cleaned = [];
-      for (let i = 0; i < out.length; i++) {
-        const m = out[i].match(/^\s*\[ace\s+\d+\]\s*$/);
-        if (!m) { cleaned.push(out[i]); continue; }
-        let j = i + 1;
-        let hasContent = false;
-        while (j < out.length && !/^\s*\[.+\]\s*$/.test(out[j])) {
-          const s = out[j].trim();
-          if (s !== '' && !s.startsWith('#') && !s.startsWith(';')) {
-            hasContent = true;
-          }
-          j++;
-        }
-        if (hasContent) {
-          cleaned.push(out[i]);
-          continue;
-        }
-        // Drop header + intervening lines; also strip one trailing blank
-        // line from cleaned so we don't pile up separators.
-        if (cleaned.length && cleaned[cleaned.length - 1].trim() === '') {
-          cleaned.pop();
-        }
-        i = j - 1;
-      }
-      return cleaned.join('\n');
+      return out.join('\n');
     }
     const updateState = reactive({
       current: "",
@@ -3947,7 +3757,7 @@ createApp({
         config.params = j.params || {};
         // Revision token for the lost-update guard (see saveConfigForm).
         config.sha1 = j.sha1 || "";
-        paramsToForm(j.params, j.per_ace_params || {});
+        paramsToForm(j.params);
       } catch (e) {
         configLoadError.value = t("ui.log.config_load_failed", {error: e});
       }
@@ -5405,6 +5215,10 @@ createApp({
           jobId: preflightJobId, file: f,
           liveSlots: vp || live.live_slots, headCtx: live.head_ctx,
           spoolPrices: live.spool_prices,
+          // Fresh every run (not just at worker init) so a swap_retract_length
+          // / swap_purge_length edit in Settings shows up without reloading
+          // the page - the worker itself outlives many preflight runs.
+          costParams: live.cost_params, calibration: live.calibration,
         }, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -6039,6 +5853,9 @@ createApp({
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
+        // Same reasoning as the analyze payload above: re-read ace.cfg now
+        // rather than trust whatever the worker last cached.
+        payload.costParams = live.cost_params;
         const j = await runPreflightWorker("rewrite", payload, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -6091,6 +5908,9 @@ createApp({
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
+        // Same reasoning as the analyze payload above: re-read ace.cfg now
+        // rather than trust whatever the worker last cached.
+        payload.costParams = live.cost_params;
         const j = await runPreflightWorker("rewrite", payload, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -7107,9 +6927,6 @@ createApp({
       spoolExport, spoolImport, triggerSpoolImport,
       isPrinting,
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
-      overridesPanelOpen, toggleOverridesPanel,
-      feederOverridesPanelOpen, toggleFeederOverridesPanel,
-      perAcePlaceholder, perSlotPlaceholder, perFeederPlaceholder,
       feederRetractLengthEffective,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,

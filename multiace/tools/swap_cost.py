@@ -84,6 +84,13 @@ MATERIAL_DENSITY = {
 DEFAULT_DENSITY = 1.24
 DEFAULT_DIAMETER_MM = 1.75
 
+#: €/kg assumed for a tool whose colour has no priced spool bound (no spool
+#: at all, or one added before the price field existed) - same default
+#: ACE_SPOOL_ADD and _spool_prices_from_state already apply, so the
+#: headline number is always a real estimate the user can correct in
+#: Settings -> Spools rather than silently going quiet for that tool.
+DEFAULT_PRICE_PER_KG = 20.0
+
 #: Conservative default max volumetric flow (mm3/s). Purging faster than
 #: the hotend can melt grinds the filament flat and can pop the PTFE
 #: coupler (§13.2), so purge time is rate-limited by THIS, never by a raw
@@ -807,7 +814,7 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     totals_mm = 0.0
     totals_g = 0.0
     totals_price = 0.0
-    any_price_known = False
+    defaulted_g = 0.0
     tools = sorted(used_tools) if used_tools else sorted(
         set(list(per_tool_purge_mm.keys())
             + list(range(len(header.per_tool_mm) if header else 0))))
@@ -828,12 +835,24 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                               / 1000.0, 2),
         }
         price_per_kg = prices.get(t)
-        if price_per_kg is not None:
-            row_price = tool_total_g / 1000.0 * price_per_kg
-            row["price_eur"] = _round(row_price, 2)
-            totals_price += row_price
-            any_price_known = True
+        if price_per_kg is None:
+            price_per_kg = DEFAULT_PRICE_PER_KG
+            defaulted_g += tool_total_g
+        row_price = tool_total_g / 1000.0 * price_per_kg
+        row["price_eur"] = _round(row_price, 2)
+        totals_price += row_price
         per_color.append(row)
+    any_price_known = bool(tools)
+
+    # Grams priced at the DEFAULT_PRICE_PER_KG guess rather than a spool the
+    # user actually bound - the total is still shown (better than silently
+    # going quiet for that tool), but flagged so it isn't mistaken for a
+    # real number.
+    if defaulted_g > 0:
+        assumptions.append(
+            "%.1f g has no spool bound and is priced at the default "
+            "€%.0f/kg - bind a spool in Settings -> Spools to price it "
+            "exactly" % (defaulted_g, DEFAULT_PRICE_PER_KG))
 
     purge_g_total = sum(model.purge_grams(mm, materials.get(t))
                         for t, mm in per_tool_purge_mm.items())

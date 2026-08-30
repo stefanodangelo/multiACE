@@ -141,17 +141,6 @@ FEED_UNLOAD_TRIGGER_SETTLE                          = 0.5
 
 FEED_UNLOAD_PROBE_RETRACT                           = 150
 
-# Snapped-tip recovery. When the short probe-retract pulls its FULL commanded
-# length (the ACE free-wheeled) yet the inlet sensor still reads present, the
-# filament has snapped and a fragment is stranded ABOVE the extruder gear where
-# no ACE-side retract can reach it. The only actuator that can move it is the
-# extruder itself, so we feed the fragment DOWN through the gear and purge it
-# out the nozzle (over the discard bin) before the next hot re-unload retry.
-# _SPAN_FRAC: fraction of the short retract the decoder must have spanned to
-# count as a free-wheel/snap (vs a genuine stall, which spans very little).
-FEED_UNLOAD_SNAP_PURGE                              = 50
-FEED_UNLOAD_SNAP_SPAN_FRAC                          = 0.85
-
 UNLOAD_DECODER_DIAG                                 = True
 
 class FeedLight:
@@ -633,24 +622,6 @@ class FilamentFeed:
             return self._feed_load_counts_max
         return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
 
-    def _preload_counts_max_for(self, ch):
-        """Per-channel PRELOAD wheel-count ceiling. A combo head
-        (head_feeder_combo) must stop its stock-feeder insert well short of
-        the toolhead sensor, at the Y-splitter entrance - ace.py's
-        feeder_park_length[_N] - instead of the module-wide preload_length
-        every plain feeder head still uses. Reaching this ceiling is treated
-        as a successful preload (see the FEED_ACT_PRELOAD loop), exactly
-        like reaching the toolhead sensor is for a plain head."""
-        if self.ace is not None:
-            try:
-                head = self.filament_ch[ch]
-                if self.ace.head_has_feeder_tap(head):
-                    length = self.ace.feeder_park_length_for(head)
-                    return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
-            except Exception:
-                pass
-        return self._feed_preload_counts
-
     def _runout_evt_handle(self, extruder, present):
         if present == True:
             return
@@ -1069,10 +1040,6 @@ class FilamentFeed:
                     wheel_speed_err_max = FEED_PRELOAD_WHEEL_ERR_CNT_MAX
                     motor_speed_err_max = FEED_PRELOAD_MOTOR_ERR_CNT_MAX
                     if arrive_runout_sensor == False:
-                        # Combo head: this ceiling is feeder_park_length, not
-                        # preload_length - reaching it here (splitter
-                        # entrance) is the intended stop, not a fallback.
-                        _preload_ceiling = self._preload_counts_max_for(ch)
                         while 1:
                             wheel_cnt_a_2 = self.wheel[ch].get_counts()
                             wheel_cnt_b_2 = self.wheel_2[ch].get_counts()
@@ -1090,8 +1057,8 @@ class FilamentFeed:
                                 self.channel_error[ch] = FEED_ERR_NO_FILAMENT
                                 self.exception_code[ch] = 13
                                 break
-                            if (wheel_cnt_a_2 - wheel_cnt_a_1) / self.wheel[ch].ppr > _preload_ceiling or\
-                                    (wheel_cnt_b_2 - wheel_cnt_b_1) / self.wheel_2[ch].ppr > _preload_ceiling:
+                            if (wheel_cnt_a_2 - wheel_cnt_a_1) / self.wheel[ch].ppr > self._feed_preload_counts or\
+                                    (wheel_cnt_b_2 - wheel_cnt_b_1) / self.wheel_2[ch].ppr > self._feed_preload_counts:
                                 self.channel_error[ch] = FEED_OK
                                 break
                             if motor_speed < FEED_PRELOAD_MOTOR_MIN_SPEED:
@@ -2339,52 +2306,6 @@ class FilamentFeed:
                                         "retry %d/%d - hot re-unload",
                                         self.filament_ch[ch],
                                         unload_attempt + 1, unload_max)
-                                    _snap = False
-                                    try:
-                                        _snap = (abs(_usp[0]) >= _short_retract
-                                                 * FEED_UNLOAD_SNAP_SPAN_FRAC)
-                                    except Exception:
-                                        _snap = False
-                                    if _snap and bool(getattr(
-                                            self.ace, 'unload_snap_recovery', True)):
-
-                                        try:
-                                            self.gcode.run_script_from_command(
-                                                "MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
-                                            self.gcode.run_script_from_command(
-                                                'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
-                                                % (self.toolhead.get_extruder().get_name(),
-                                                   filament_unload_temp))
-                                            self.gcode.run_script_from_command("M83\r\n")
-                                            self.gcode.run_script_from_command(
-                                                "G1 E%d F120\r\n" % FEED_UNLOAD_SNAP_PURGE)
-                                            self.toolhead.wait_moves()
-                                            logging.info(
-                                                "[feed][unload] head %d SNAP recovery: "
-                                                "span %s ~ short %d (free-wheel) + sensor "
-                                                "present - pushed %dmm to purge the "
-                                                "stranded fragment out the nozzle",
-                                                self.filament_ch[ch], _usp[0],
-                                                _short_retract, FEED_UNLOAD_SNAP_PURGE)
-                                        except Exception:
-                                            logging.info("[feed][unload] snap-recovery "
-                                                         "purge push failed")
-                                        self.reactor.pause(self.reactor.monotonic()
-                                                           + FEED_UNLOAD_TRIGGER_SETTLE)
-                                        if not self.runout_sensor[ch].get_status(
-                                                0)['filament_detected']:
-                                            logging.info(
-                                                "[feed][unload] head %d SNAP recovery "
-                                                "cleared the sensor (attempt %d/%d)",
-                                                self.filament_ch[ch],
-                                                unload_attempt + 1, unload_max)
-                                            try:
-                                                self.runout_sensor[ch].runout_helper\
-                                                    .note_filament_present(False, True)
-                                            except Exception:
-                                                pass
-                                            unload_ok = True
-                                            break
                                 else:
 
                                     try:
@@ -2452,23 +2373,12 @@ class FilamentFeed:
                                         logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
                                                      unload_attempt + 1, unload_max, precool_temp)
 
-                                    _reheat_temp = max(
-                                        filament_feed_temp_db, filament_unload_temp)
-                                    try:
-                                        _ovfn = getattr(
-                                            self.ace, 'tipform_unload_temp_for', None)
-                                        if _ovfn is not None and _ovfn(
-                                                self.filament_ch[ch],
-                                                soft=bool(filament_soft)) is not None:
-
-                                            _reheat_temp = filament_unload_temp
-                                    except Exception:
-                                        pass
-                                    self.gcode.run_script_from_command(
-                                        "M109 S%d\r\n" % _reheat_temp)
+                                    self.gcode.run_script_from_command("M109 S%d\r\n"
+                                        % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
                                     self.ace._run_tipform(
-                                        self.filament_ch[ch], _reheat_temp,
+                                        self.filament_ch[ch],
+                                        max(filament_feed_temp_db, filament_unload_temp),
                                         int(filament_soft),
                                         self.toolhead.get_extruder().nozzle_diameter)
                                     self.toolhead.wait_moves()
@@ -2699,52 +2609,6 @@ class FilamentFeed:
                                         "retry %d/%d - hot re-unload",
                                         self.filament_ch[ch],
                                         unload_attempt + 1, unload_max)
-                                    _snap = False
-                                    try:
-                                        _snap = (abs(_usp[0]) >= _short_retract
-                                                 * FEED_UNLOAD_SNAP_SPAN_FRAC)
-                                    except Exception:
-                                        _snap = False
-                                    if _snap and bool(getattr(
-                                            self.ace, 'unload_snap_recovery', True)):
-
-                                        try:
-                                            self.gcode.run_script_from_command(
-                                                "MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
-                                            self.gcode.run_script_from_command(
-                                                'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
-                                                % (self.toolhead.get_extruder().get_name(),
-                                                   filament_unload_temp))
-                                            self.gcode.run_script_from_command("M83\r\n")
-                                            self.gcode.run_script_from_command(
-                                                "G1 E%d F120\r\n" % FEED_UNLOAD_SNAP_PURGE)
-                                            self.toolhead.wait_moves()
-                                            logging.info(
-                                                "[feed][unload] head %d SNAP recovery: "
-                                                "span %s ~ short %d (free-wheel) + sensor "
-                                                "present - pushed %dmm to purge the "
-                                                "stranded fragment out the nozzle",
-                                                self.filament_ch[ch], _usp[0],
-                                                _short_retract, FEED_UNLOAD_SNAP_PURGE)
-                                        except Exception:
-                                            logging.info("[feed][unload] snap-recovery "
-                                                         "purge push failed")
-                                        self.reactor.pause(self.reactor.monotonic()
-                                                           + FEED_UNLOAD_TRIGGER_SETTLE)
-                                        if not self.runout_sensor[ch].get_status(
-                                                0)['filament_detected']:
-                                            logging.info(
-                                                "[feed][unload] head %d SNAP recovery "
-                                                "cleared the sensor (attempt %d/%d)",
-                                                self.filament_ch[ch],
-                                                unload_attempt + 1, unload_max)
-                                            try:
-                                                self.runout_sensor[ch].runout_helper\
-                                                    .note_filament_present(False, True)
-                                            except Exception:
-                                                pass
-                                            unload_ok = True
-                                            break
                                 else:
 
                                     try:
@@ -2812,23 +2676,12 @@ class FilamentFeed:
                                         logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
                                                      unload_attempt + 1, unload_max, precool_temp)
 
-                                    _reheat_temp = max(
-                                        filament_feed_temp_db, filament_unload_temp)
-                                    try:
-                                        _ovfn = getattr(
-                                            self.ace, 'tipform_unload_temp_for', None)
-                                        if _ovfn is not None and _ovfn(
-                                                self.filament_ch[ch],
-                                                soft=bool(filament_soft)) is not None:
-
-                                            _reheat_temp = filament_unload_temp
-                                    except Exception:
-                                        pass
-                                    self.gcode.run_script_from_command(
-                                        "M109 S%d\r\n" % _reheat_temp)
+                                    self.gcode.run_script_from_command("M109 S%d\r\n"
+                                        % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
                                     self.ace._run_tipform(
-                                        self.filament_ch[ch], _reheat_temp,
+                                        self.filament_ch[ch],
+                                        max(filament_feed_temp_db, filament_unload_temp),
                                         int(filament_soft),
                                         self.toolhead.get_extruder().nozzle_diameter)
                                     self.toolhead.wait_moves()
@@ -3298,19 +3151,6 @@ class FilamentFeed:
                 else:
                     logging.info("[feed] FEED_AUTO LOAD skipped: channel[%d] runout_sensor disabled or None", channel)
                     return
-
-            # A bare FEED_AUTO LOAD=1 carries no source of its own - only
-            # ambiguous for a combo head, and only when nothing has already
-            # resolved it (_in_internal_load_head is set for the exact
-            # duration of ace.py's own internal FEED_AUTO call, once it has
-            # already set _head_source explicitly - see ace.py's
-            # cmd_ACE_LOAD_HEAD/resolve_ambiguous_combo_load).
-            if (self.ace is not None
-                    and not getattr(self.ace, '_in_internal_load_head', False)):
-                _head = self.filament_ch[channel]
-                if self.ace.head_has_feeder_tap(_head):
-                    self.ace.resolve_ambiguous_combo_load(
-                        gcmd, _head, self._port[channel].get_filament_detected())
 
             try:
                 if machine_state_manager is not None:

@@ -15,10 +15,11 @@
  *   <- {type:"init", pyodideIndexURL, postprocessSrc, coreSrc, swapCostSrc,
  *                        costParams, calibration}
  *   -> {type:"ready"}                                   (or {type:"error"})
- *   <- {type:"analyze", jobId, file, liveSlots, headCtx, spoolPrices}
+ *   <- {type:"analyze", jobId, file, liveSlots, headCtx, spoolPrices,
+ *                        costParams, calibration}
  *   -> {type:"analyze-done", jobId, report}             (+ {type:"progress"})
  *   <- {type:"rewrite", jobId, file, liveSlots, headCtx, mode, remapOverride,
- *                        headAssignment, headPlan}
+ *                        headAssignment, headPlan, costParams}
  *   -> {type:"rewrite-done", jobId, text}               (+ {type:"progress"})
  *   <- {type:"estimate", jobId, mapping, targetIds}
  *   -> {type:"estimate-done", jobId, estimate, timeline}
@@ -40,9 +41,14 @@ const files = new Map();
 const slotsByJob = new Map();
 const ctxByJob = new Map();
 
-// The section-1 cost model's inputs, handed over at init from
+// The section-1 cost model's inputs. Seeded at init from
 // /api/preflight/pysrc so the browser estimate uses the printer's real
-// ace.cfg rather than the shipped defaults.
+// ace.cfg rather than the shipped defaults, then REFRESHED on every
+// "analyze"/"rewrite" message (from /api/preflight/livedata, already
+// re-fetched there each run) - the worker and its Pyodide runtime outlive
+// many preflight runs in one tab, so without this a swap_retract_length /
+// swap_purge_length edit in Settings would silently keep using whatever
+// was true when the tab first opened the preflight dialog.
 let costParams = null;
 let calibration = null;
 
@@ -98,7 +104,10 @@ _captures = {}
 }
 
 // Analyze: meta-parse + build the report (multi or head-mode preview).
-async function doAnalyze(jobId, file, liveSlots, headCtx, spoolPrices) {
+async function doAnalyze(jobId, file, liveSlots, headCtx, spoolPrices,
+                         freshCostParams, freshCalibration) {
+  if (freshCostParams !== undefined) costParams = freshCostParams;
+  if (freshCalibration !== undefined) calibration = freshCalibration;
   files.set(jobId, file);
   slotsByJob.set(jobId, liveSlots);
   ctxByJob.set(jobId, headCtx);
@@ -162,6 +171,7 @@ async function doRewrite(jobId, msg) {
   const headCtx = ctxByJob.get(jobId) || msg.headCtx || {mode: "multi"};
   const mode = msg.mode || "slicer";
   if (!file) throw new Error("missing file");
+  if (msg.costParams !== undefined) costParams = msg.costParams;
 
   progress(jobId, "analyze", 2);
   const text = await file.text();
@@ -172,6 +182,11 @@ async function doRewrite(jobId, msg) {
   py.globals.set("_live", JSON.stringify(liveSlots));
   py.globals.set("_hctx", JSON.stringify(headCtx));
   py.globals.set("_mode", mode);
+  // Re-set here rather than trust whatever doAnalyze left behind: the
+  // rewrite (purge amount injected into the gcode) must use the SAME
+  // fresh config the estimate just showed the user, not a stale copy from
+  // whenever this job was last analyzed.
+  py.globals.set("_cost", JSON.stringify(costParams || {}));
   py.globals.set("_remap", JSON.stringify(msg.remapOverride || null));
   py.globals.set("_hassign", JSON.stringify(msg.headAssignment || null));
   py.globals.set("_hplan", msg.headPlan || "loadout");
@@ -223,7 +238,8 @@ self.onmessage = async (ev) => {
     if (msg.type === "analyze") {
       await ensureInit(msg);
       const report = await doAnalyze(
-        jobId, msg.file, msg.liveSlots, msg.headCtx, msg.spoolPrices);
+        jobId, msg.file, msg.liveSlots, msg.headCtx, msg.spoolPrices,
+        msg.costParams, msg.calibration);
       self.postMessage({type: "analyze-done", jobId, report});
       return;
     }
