@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Clean Sweep"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "4ca517b"
+MULTIACE_BUILD_TAG = "5af9d74"
 MULTIACE_BUNDLE_SHA1 = "9ba7849"
 
 def _load_i18n_catalog(i18n_dir, lang):
