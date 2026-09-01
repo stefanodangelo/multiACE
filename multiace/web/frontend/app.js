@@ -5402,7 +5402,7 @@ createApp({
     // multiACE's plan actually print", which the swim-lane timeline above
     // already answers without needing any geometry.
     // =================================================================
-    const GPREVIEW_SPEEDS = [1, 2, 4];
+    const GPREVIEW_SPEEDS = [1, 5, 10, 100];
     const GPREVIEW_AUTO_MAX_BYTES = 350 * 1024 * 1024;
     const gpreview = reactive({
       // idle: dialog open, parse not started yet. parsing: worker running.
@@ -5692,12 +5692,16 @@ createApp({
       if (step >= 1) {
         gpreviewMoveAcc -= step;
         if (gpreview.move + step >= gpreview.moveMax) {
-          // roll onto the next layer - the print building itself, as today
           if (gpreview.layerHi >= gpreview.totalLayers - 1) {
-            gpreview.layerHi = Math.max(gpreview.layerLo, 0);
-          } else {
-            gpreview.layerHi += 1;
+            // last layer fully shown - stop rather than looping back to
+            // the start of the range, so play settles on the finished part.
+            gpreview.move = gpreview.moveMax;
+            gpreview.playing = false;
+            gpreviewPlayRaf = 0;
+            return;
           }
+          // roll onto the next layer - the print building itself, as today
+          gpreview.layerHi += 1;
           gpreview.move = 0;
         } else {
           gpreview.move += step;

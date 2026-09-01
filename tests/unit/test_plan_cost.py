@@ -67,6 +67,16 @@ class TestBackwardsCompatibility:
     def test_the_window_is_derived_when_a_model_is_supplied(self, model):
         assert pp._model_bg_window(model) > pp.BG_UNLOAD_MIN_WINDOW_MIN
 
+    def test_an_older_model_without_purge_mm_for_still_purges(self):
+        """A post-processor newer than the installed swap_cost.py (no
+        purge_mm_for yet) must fall back to purge_mm, not lose purge."""
+        class OldModel:
+            def purge_mm(self, *a, **kw):
+                return 42.0
+        got = pp._model_purge_mm(OldModel(), "#000000", "#ffffff", None,
+                                 from_t=0, to_t=1, flush_matrix=[[0, 1]])
+        assert got == 42.0
+
 
 class TestTimeline:
     """§3.2's per-event trace: the thing the plan editor draws and the
@@ -149,6 +159,24 @@ class TestTimeline:
             cost_model=m, colors={0: "#000000", 1: "#ffffff"})
         swap = [e for e in tl if e["kind"] == "same_ace"][-1]
         assert swap["purge_mm"] > 20
+
+    def test_a_flush_matrix_supplies_the_real_purge_number(self, model):
+        """The slicer already computed exactly how much T0->T1 needs -
+        that has to win over the colour-distance guess (which is 0 mm here,
+        purge_color_aware being off in CFG)."""
+        matrix = [[0, 150], [90, 0]]
+        tl = pp.build_swap_timeline(
+            [0, 1], {0: ace(0, 0, 0), 1: ace(0, 0, 1)},
+            cost_model=model, flush_matrix=matrix)
+        swap = [e for e in tl if e["kind"] == "same_ace"][-1]
+        assert swap["purge_mm"] == pytest.approx(
+            sc.mm3_to_mm(150, sc.DEFAULT_DIAMETER_MM), abs=0.1)
+
+    def test_no_flush_matrix_keeps_the_old_behaviour(self, model):
+        tl = pp.build_swap_timeline(
+            [0, 1], {0: ace(0, 0, 0), 1: ace(0, 0, 1)}, cost_model=model)
+        swap = [e for e in tl if e["kind"] == "same_ace"][-1]
+        assert swap["purge_mm"] == 0.0
 
 
 class TestPlacementBeatsSwapCount:

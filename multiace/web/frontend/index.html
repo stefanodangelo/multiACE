@@ -2281,8 +2281,9 @@ reboot</pre>
 
           <template v-if="!gpreview.collapsed">
             <!-- Sequential-move scrub within the top visible layer. Play
-                 drives it; 2x/4x only show up while playing (plan section
-                 4), so a paused viewer keeps an uncluttered control row. -->
+                 drives it; 5x/10x/100x only show up while playing (plan
+                 section 4), so a paused viewer keeps an uncluttered control
+                 row. -->
             <div class="gpreview-controls">
               <button @click="gpreviewTogglePlay" :disabled="gpreview.phase !== 'ready'"
                       :aria-pressed="gpreview.playing">
@@ -2290,7 +2291,7 @@ reboot</pre>
               </button>
               <span class="gpv-speed" v-if="gpreview.playing" role="group"
                     :aria-label="t('ui.gpreview.speed')">
-                <button v-for="s in [1, 2, 4]" :key="'sp-'+s"
+                <button v-for="s in [1, 5, 10, 100]" :key="'sp-'+s"
                         :class="{sel: gpreview.speed === s}"
                         :aria-pressed="gpreview.speed === s"
                         @click="gpreviewSetSpeed(s)">{{ s }}x</button>

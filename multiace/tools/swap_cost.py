@@ -352,6 +352,14 @@ def mm_to_mm3(length_mm, diameter_mm=DEFAULT_DIAMETER_MM):
     return 3.141592653589793 * r * r * float(length_mm or 0.0)
 
 
+def mm3_to_mm(volume_mm3, diameter_mm=DEFAULT_DIAMETER_MM):
+    """Inverse of mm_to_mm3 - the slicer's flush matrix is in mm3, the cost
+    model's purge lengths are in mm of filament."""
+    r = (diameter_mm or DEFAULT_DIAMETER_MM) / 2.0
+    area = 3.141592653589793 * r * r
+    return (float(volume_mm3 or 0.0) / area) if area else 0.0
+
+
 def mm_to_grams(length_mm, diameter_mm=DEFAULT_DIAMETER_MM,
                 density=DEFAULT_DENSITY):
     return mm_to_mm3(length_mm, diameter_mm) * (density or DEFAULT_DENSITY) \
@@ -642,6 +650,9 @@ class SwapCostModel(object):
         configured `swap_purge_length`. With it on, interpolate between
         swap_purge_min and swap_purge_max on the direction-aware transition
         severity, floored by the material-pair minimum.
+
+        This is a GUESS, used only when nothing better is available - see
+        `purge_mm_for` for the slicer-supplied number that supersedes it.
         """
         floor = self._material_floor(material)
         if not self.purge_color_aware:
@@ -655,6 +666,35 @@ class SwapCostModel(object):
         if hi < lo:
             lo, hi = hi, lo
         return max(lo + (hi - lo) * severity, floor)
+
+    def purge_mm_for(self, from_t, to_t, flush_matrix=None, from_color=None,
+                     to_color=None, material=None):
+        """Millimetres to purge for one swap, preferring the SLICER'S OWN
+        number over the colour-distance guess.
+
+        `flush_matrix` is the slicer's `flush_volumes_matrix` (mm3,
+        row-major NxN, row = from-tool) - parsed straight out of the gcode
+        by `parse_flush_matrix`/`parse_flush_matrix_from_file`. The slicer
+        already computed exactly how much this specific transition needs;
+        guessing a volume from colour distance ON TOP of a real number the
+        file already carries would be strictly worse, not additive. Falls
+        back to `purge_mm` when there is no matrix, no prior tool (first
+        load - nothing to flush), or the pair falls outside it.
+
+        The matrix value still goes through `clamp_purge_mm` - the file may
+        have been sliced against a different machine, and a purge-bin
+        ceiling exists precisely to catch that regardless of source.
+        """
+        if (flush_matrix is not None and from_t is not None
+                and to_t is not None
+                and 0 <= from_t < len(flush_matrix)
+                and 0 <= to_t < len(flush_matrix[from_t])):
+            mm3 = flush_matrix[from_t][to_t]
+            if mm3:
+                mm = mm3_to_mm(mm3, self.filament_diameter)
+                applied, _reason = self.clamp_purge_mm(mm)
+                return max(applied, self._material_floor(material))
+        return self.purge_mm(from_color, to_color, material)
 
     def _material_floor(self, material):
         if not material:

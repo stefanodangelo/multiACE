@@ -18,6 +18,28 @@ except ImportError:                     # pragma: no cover - install layouts
         import swap_cost as _swap_cost
     except ImportError:
         _swap_cost = None
+        # Neither the package import nor a flat sibling module resolved -
+        # e.g. running the backend straight out of a checkout (uvicorn's
+        # cwd is multiace/web/backend, which is neither on sys.path as
+        # "multiace"'s parent nor next to tools/swap_cost.py). Fall back to
+        # loading it by file path, same trick main.py's _load_post_processor
+        # / _load_job_history already use for exactly this reason.
+        try:
+            import importlib.util
+            from pathlib import Path
+            for _cand in (
+                Path("/home/lava/printer_data/config/tools/swap_cost.py"),
+                Path(__file__).resolve().parents[2] / "tools" / "swap_cost.py",
+            ):
+                if _cand.is_file():
+                    _spec = importlib.util.spec_from_file_location(
+                        "multiace_swap_cost", _cand)
+                    _mod = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    _swap_cost = _mod
+                    break
+        except Exception:
+            _swap_cost = None
 
 _TOOLCHANGE_RE = re.compile(
     r"^;\s*Change Tool\s*(\d+)\s*->\s*Tool\s*(\d+)", re.MULTILINE)
@@ -149,13 +171,19 @@ def used_tool_indices(pp, gcode: str) -> set:
 
 def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
                       slicer_colors=None, slicer_types=None,
-                      event_times=None, bg_heads=None, spool_prices=None):
+                      event_times=None, bg_heads=None, spool_prices=None,
+                      flush_matrix=None):
     """Everything the per-plan estimate needs, built once per preflight.
 
     Returns None when the estimate cannot be produced (no swap_cost module,
     or a post-processor too old to build a timeline). Every caller treats
     None as "no estimate", so a preflight never fails over a number that is
     informational by definition.
+
+    `flush_matrix` is the slicer's own flush_volumes_matrix, when the
+    caller already parsed one (e.g. for the head-mode colour-objective
+    optimizer) - passing it through here makes the timeline's purge_mm use
+    the slicer's real number instead of guessing one from colour distance.
     """
     if _swap_cost is None or not hasattr(pp, "build_swap_timeline"):
         return None
@@ -183,6 +211,7 @@ def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
         "event_times": event_times,
         "bg_heads":    list(bg_heads or []),
         "prices":      dict(spool_prices or {}),
+        "flush_matrix": flush_matrix,
     }
 
 
@@ -241,10 +270,19 @@ def attach_estimate(ctx, plan, events, assignment):
 
 
 def ctx_timeline(ctx, events, assignment):
-    return ctx["_pp"].build_swap_timeline(
-        events, assignment, event_times=ctx["event_times"],
-        bg_heads=ctx["bg_heads"], cost_model=ctx["model"],
-        colors=ctx["colors"], materials=ctx["materials"])
+    pp = ctx["_pp"]
+    kwargs = dict(event_times=ctx["event_times"], bg_heads=ctx["bg_heads"],
+                  cost_model=ctx["model"], colors=ctx["colors"],
+                  materials=ctx["materials"])
+    try:
+        return pp.build_swap_timeline(
+            events, assignment, flush_matrix=ctx.get("flush_matrix"),
+            **kwargs)
+    except TypeError:
+        # An older installed post-processor has no flush_matrix kwarg yet -
+        # soft-degrade to its colour-distance guess rather than lose the
+        # timeline entirely.
+        return pp.build_swap_timeline(events, assignment, **kwargs)
 
 
 def recompute_estimate(capture, *, mapping=None, target_ids=None):
@@ -710,10 +748,23 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     event_times, bg_heads, bg_available = _bg_context(
         pp, head_ctx, plan_proxy, events)
 
+    # Parsed here (not down by the optimizer calls below) so the estimate
+    # ctx - and therefore every plan's timeline, including 'loadout' - gets
+    # the slicer's real purge numbers too, not just the colour-objective
+    # optimizer.
+    flush_matrix = None
+    _pfm = getattr(pp, "parse_flush_matrix", None)
+    if _pfm is not None:
+        try:
+            flush_matrix = _pfm(plan_proxy)
+        except Exception:
+            flush_matrix = None
+
     estimate_ctx = make_estimate_ctx(
         pp, header_text, cost_params=cost_params, calibration=calibration,
         slicer_colors=slicer_colors, slicer_types=slicer_types,
-        event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices)
+        event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices,
+        flush_matrix=flush_matrix)
     if estimate_capture is not None:
         estimate_capture["ctx"] = estimate_ctx
         estimate_capture["events"] = events
@@ -752,13 +803,6 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 
     num_slots = 4
 
-    flush_matrix = None
-    _pfm = getattr(pp, "parse_flush_matrix", None)
-    if _pfm is not None:
-        try:
-            flush_matrix = _pfm(plan_proxy)
-        except Exception:
-            flush_matrix = None
     plans["optimize"] = _head_proposal_plan(
         pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
         num_slots, None, event_times=event_times, bg_heads=bg_heads,
@@ -897,10 +941,22 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         out["events"] = list(result.get("events") or [])
         ev_times, bg_heads, _bg_av = _bg_context(
             pp, head_ctx, proxy_remapped, out["events"])
+        # events/mapping are keyed by the ORIGINAL slicer T (the "; Change
+        # Tool" comments survive the remap - see parse_toolchanges), which
+        # is exactly how flush_volumes_matrix is indexed too, so it is safe
+        # to read straight off plan_proxy here.
+        flush_matrix = None
+        _pfm = getattr(pp, "parse_flush_matrix", None)
+        if _pfm is not None:
+            try:
+                flush_matrix = _pfm(plan_proxy)
+            except Exception:
+                flush_matrix = None
         estimate_ctx = make_estimate_ctx(
             pp, header_text, cost_params=cost_params, calibration=calibration,
             slicer_colors=slicer_colors, slicer_types=slicer_types,
-            event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices)
+            event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices,
+            flush_matrix=flush_matrix)
         if estimate_capture is not None:
             estimate_capture["ctx"] = estimate_ctx
             estimate_capture["events"] = out["events"]

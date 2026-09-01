@@ -1991,7 +1991,7 @@ body:has(.panel) .overlay .dialog {
 }
 .gpreview-controls { display: flex; align-items: center; gap: .6rem;
                      flex-wrap: wrap; margin: .4rem 0; }
-/* 1x/2x/4x, shown only while playing - a paused viewer keeps today's
+/* 1x/5x/10x/100x, shown only while playing - a paused viewer keeps today's
    uncluttered control row. */
 .gpv-speed { display: inline-flex; border: 1px solid var(--border);
              border-radius: 4px; overflow: hidden; }

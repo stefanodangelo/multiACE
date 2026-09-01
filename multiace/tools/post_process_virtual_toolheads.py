@@ -1072,9 +1072,24 @@ def _model_cost(cost_model, kind, ace=None, slot=None,
     return float(BG_SWAP_COST_INLINE_S)
 
 
-def _model_purge_mm(cost_model, from_color, to_color, material):
+def _model_purge_mm(cost_model, from_color, to_color, material,
+                    from_t=None, to_t=None, flush_matrix=None):
+    """Millimetres to purge for one swap, model-first, constants otherwise.
+
+    Prefers `purge_mm_for` (slicer flush-matrix aware) when the installed
+    swap_cost.py has it; an older installed copy without that method still
+    gets its own `purge_mm` guess rather than silently losing purge -
+    matches this module's usual version-skew tolerance.
+    """
     if cost_model is None:
         return 0.0
+    fn = getattr(cost_model, "purge_mm_for", None)
+    if fn is not None:
+        try:
+            return float(fn(from_t, to_t, flush_matrix, from_color, to_color,
+                            material))
+        except Exception:
+            pass
     try:
         return float(cost_model.purge_mm(from_color, to_color, material))
     except Exception:
@@ -1082,7 +1097,8 @@ def _model_purge_mm(cost_model, from_color, to_color, material):
 
 
 def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
-                        cost_model=None, colors=None, materials=None):
+                        cost_model=None, colors=None, materials=None,
+                        flush_matrix=None):
     """Per-toolchange trace of what the plan actually costs and why (§3.2).
 
     One entry per toolchange that needs a filament change; a toolchange to a
@@ -1093,9 +1109,13 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
     Entry shape:
       {i, t, from_t, head, ace, slot, kind, window_min, seconds, purge_mm,
        note}
-    where `kind` is one of swap_cost.SWAP_KINDS. Returns [] rather than
-    raising on anything it cannot classify - an estimate is never worth
-    failing a preflight over.
+    where `kind` is one of swap_cost.SWAP_KINDS. `flush_matrix` is the
+    slicer's own flush_volumes_matrix (mm3, row-major NxN, from parse_
+    flush_matrix/_from_file) - when given, `purge_mm` uses the SLICER'S
+    real number for that (from_t, to_t) pair instead of the colour-distance
+    guess (see swap_cost.SwapCostModel.purge_mm_for). Returns [] rather
+    than raising on anything it cannot classify - an estimate is never
+    worth failing a preflight over.
     """
     colors = colors or {}
     materials = materials or {}
@@ -1193,7 +1213,8 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 cost_model, kind, e.get('ace'), e.get('slot'),
                 from_color, to_color, material), 1),
             'purge_mm': round(_model_purge_mm(
-                cost_model, from_color, to_color, material), 1),
+                cost_model, from_color, to_color, material,
+                from_t=from_t, to_t=t, flush_matrix=flush_matrix), 1),
             'note': note})
 
         head_key[head] = key
