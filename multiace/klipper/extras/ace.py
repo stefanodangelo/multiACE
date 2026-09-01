@@ -671,7 +671,7 @@ class MultiAce:
         self._v2_assist_confirm_time = config.getfloat(
             'v2_assist_confirm_time', 0.5, minval=0.0, maxval=5.0)
 
-        self._update_repo = config.get('update_repo', 'decay71/multiACE').strip()
+        self._update_repo = config.get('update_repo', 'stefanodangelo/multiACE').strip()
         self._update_prerelease = config.getboolean('update_prerelease', False)
 
         self._update_url_base = config.get('update_url_base', '').strip()

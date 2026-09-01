@@ -1766,7 +1766,7 @@ def _read_update_cfg() -> dict[str, str]:
     ace.cfg so the Web backend uses the same source as the gcode
     ACE_UPDATE_* commands. Falls back to defaults if the cfg isn't
     parseable or keys are missing."""
-    repo = "decay71/multiACE"
+    repo = "stefanodangelo/multiACE"
     prerelease = "0"
     url_base = ""
     try:
