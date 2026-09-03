@@ -190,7 +190,7 @@ html.rail-tight .rail-brand-sub {
 .upload-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .upload-btn:disabled { opacity: .5; cursor: progress; }
 /* Prominent CTA on the Loadout tab (and, for plain-printer setups with no
-   Loadout tab, on the Dashboard/monitor tab instead) - bigger than the
+   Loadout tab, on the Control/monitor tab instead) - bigger than the
    compact chrome button it replaced, since it is the primary action there
    rather than a corner affordance. */
 .start-print-btn {
@@ -1752,8 +1752,8 @@ body:has(.panel) .overlay .dialog {
 }
 
 /* ============================================================
-   DASHBOARD: print control (beside the camera) + console (below)
-   Lives on the Dashboard tab only (tab==='monitor' - "Dashboard" is
+   CONTROL: print control (beside the camera) + console (below)
+   Lives on the Control tab only (tab==='monitor' - "Control" is
    that tab's label; the tab keyed 'dashboard' is the separate
    "Loadout" page). Both are always on screen there, not behind a tab
    switch: print control sits beside the camera because you watch both
@@ -1894,6 +1894,7 @@ body:has(.panel) .overlay .dialog {
                  margin: .3rem 0; }
 .history-swaps td { padding: .1rem .6rem .1rem 0; }
 .history-table .swatch { margin-right: 2px; }
+.reprint-btn { font-size: .8rem; padding: .2rem .5rem; }
 
 /* --- Plan timeline (plan section 3.2 / 3.3) --------------------------- */
 /* Inline swaps are a solid stall block: the print is WAITING. Background

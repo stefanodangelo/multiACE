@@ -567,6 +567,15 @@ class MultiAce:
             if _sv is not None:
                 self._confirm_commands = bool(_sv)
 
+        _cfg_remember_filament = config.getboolean('remember_filament', True)
+        self._remember_filament = _cfg_remember_filament
+        self._remember_filament_cfg = _cfg_remember_filament
+        if self.save_variables:
+            _sv = self.save_variables.allVariables.get(
+                'ace__remember_filament', None)
+            if _sv is not None:
+                self._remember_filament = bool(_sv)
+
         self.auto_dry_default = {
             'enabled': config.getboolean('auto_dry', False),
 
@@ -1167,6 +1176,11 @@ class MultiAce:
             'ACE_SET_CONFIRM_COMMANDS',
             self.cmd_ACE_SET_CONFIRM_COMMANDS,
             desc='[multiACE] Toggle web load/unload confirmation (ENABLE=0|1), live + persist')
+        self.gcode.register_command(
+            'ACE_SET_REMEMBER_FILAMENT',
+            self.cmd_ACE_SET_REMEMBER_FILAMENT,
+            desc='[multiACE] Keep a slot\'s color/material label and spool '
+                 'binding across physical removal (ENABLE=0|1), live + persist')
         self.gcode.register_command(
             'ACE_FW_RELEASE',
             self.cmd_ACE_FW_RELEASE,
@@ -6264,7 +6278,8 @@ class MultiAce:
                     if (gate_list[i] == GATE_EMPTY
                             and self._connected_per_ace.get(idx, False)
                             and not self._reconnecting_per_ace.get(idx, False)
-                            and not self._slot_still_feeds_filament(idx, i)):
+                            and not self._slot_still_feeds_filament(idx, i)
+                            and not getattr(self, '_remember_filament', True)):
                         self._spool_release_slot(
                             idx, i,
                             'slot went empty' if _gate_prev == GATE_AVAILABLE
@@ -8363,6 +8378,24 @@ class MultiAce:
                                shadow_attr='_confirm_commands_cfg',
                                shadow_val=enable)
         self.log_always('[multiACE] Confirm commands %s%s'
+                        % ('ON' if enable else 'OFF', sfx))
+
+    cmd_ACE_SET_REMEMBER_FILAMENT_help = (
+        '[multiACE] Keep a slot\'s manual color/material label and spool '
+        'binding when its filament is physically removed, so re-inserting '
+        'the same (or another untagged) filament there needs no '
+        're-entry (ENABLE=0|1). A freshly read RFID chip always wins over '
+        'a remembered label. Live + write-through (writes the '
+        'remember_filament config line; PERSIST=0 = until restart).')
+
+    def cmd_ACE_SET_REMEMBER_FILAMENT(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self._remember_filament = enable
+        sfx = self._wt_persist(gcmd, 'remember_filament',
+                               _wt_fmt_bool(enable), 'ace__remember_filament',
+                               shadow_attr='_remember_filament_cfg',
+                               shadow_val=enable)
+        self.log_always('[multiACE] Remember last filament %s%s'
                         % ('ON' if enable else 'OFF', sfx))
 
     cmd_ACE_SET_AIRPRINT_DETECTION_help = (
@@ -15631,6 +15664,7 @@ class MultiAce:
             'mode': getattr(self, '_ace_mode', 'normal'),
             'pickup_cleaning': getattr(self, '_pickup_cleaning', False),
             'confirm_commands': bool(getattr(self, '_confirm_commands', False)),
+            'remember_filament': bool(getattr(self, '_remember_filament', True)),
             'spoolman_url': getattr(self, 'spoolman_url', '') or '',
             'spoolman_auto': bool(getattr(self, 'spoolman_auto', False)),
 
@@ -15654,6 +15688,9 @@ class MultiAce:
                 ('confirm_commands',
                  getattr(self, '_confirm_commands', None),
                  getattr(self, '_confirm_commands_cfg', None)),
+                ('remember_filament',
+                 getattr(self, '_remember_filament', None),
+                 getattr(self, '_remember_filament_cfg', None)),
                 ('language', getattr(self, '_language', None),
                  getattr(self, '_language_cfg', None)),
                 ('spoolman_url', getattr(self, 'spoolman_url', None),

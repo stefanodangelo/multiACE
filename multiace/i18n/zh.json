@@ -17,7 +17,8 @@
       "dry": "烘干",
       "config": "配置",
       "display": "显示屏",
-      "history": "历史"
+      "history": "历史",
+      "queue": "队列"
     },
     "common": {
       "active": "当前",
@@ -110,6 +111,9 @@
       "mode_change_pending": "需要重启 Klipper 才能应用模式变更",
       "mode_locked_title": "无法切换模式",
       "mode_locked_msg": "切换到或离开普通模式前请先卸载所有挤出头。仍已装载：{heads}。",
+      "remember_filament": "记住上次的耗材",
+      "remember_filament_label": "移除耗材后保留该槽位的标签和线材绑定",
+      "remember_filament_hint": "从 ACE 槽位中拔出无 RFID 芯片的耗材时，手动设置的颜色/材料标签以及线材库绑定将被保留而不会清除，并在再次插入耗材时自动重新应用——仍可随时通过槽位选择器更改。新读取到的 RFID 芯片始终优先于记忆的标签。默认开启。",
       "update_title": "multiACE 更新",
       "update_intro": "拉取最新的 multiACE 版本并安装。",
       "update_current": "已安装",
@@ -262,16 +266,32 @@
       "est_swaps": "{inline} 次内联 / {bg} 次后台换料",
       "est_per_color": "按颜色",
       "est_purge": "清料",
-      "download": "下载重写后的 G-code",
-      "download_hint": "保存 multiACE 将要打印的文件，而不是直接打印。",
-      "download_done": "已下载 {name}",
-      "download_local_only": "仅浏览器内预检支持下载。",
-      "timeline": "换料时间线"
+      "timeline": "换料时间线",
+      "stage_for_later": "暂存以待稍后打印",
+      "stage_for_later_hint": "将此方案改写后的 G-code 上传到打印机但不启动 - 之后可随时在队列标签页中启动，只要打印机空闲。"
     },
     "queue": {
       "send_all_tooltip": "将所有排队命令发送到打印机（之后可以关闭界面）",
       "send_all_done": "已向打印机发送 {count} 条命令",
-      "send_all_failed": "发送失败"
+      "send_all_failed": "发送失败",
+      "title": "打印队列",
+      "empty": "暂无暂存文件。在预检对话框中暂存一个方案即可在此看到。",
+      "staged_at": "暂存时间",
+      "file": "文件",
+      "mode": "方案",
+      "launch": "启动",
+      "delete": "删除",
+      "staged": "已暂存：{name}",
+      "drifted": "装载已变化",
+      "missing": "打印机上缺失",
+      "missing_hint": "此文件已不在打印机存储中（在 multiACE 之外被移除）- 启动已禁用。仍可删除此队列条目。",
+      "slot_empty": "空",
+      "drift_tooltip_line": "ACE {ace} / 卡槽 {slot}：原为 {was}，现为 {now}",
+      "launch_ok": "已开始打印：{name}",
+      "launch_drifted_title": "自暂存以来装载已发生变化",
+      "launch_drifted_msg": "自“{name}”暂存以来，此方案所依赖的一个或多个料卷已发生变化。仍要启动吗？",
+      "delete_title": "删除此暂存文件？",
+      "delete_msg": "从队列中移除“{name}”？这也会将其从打印机存储中删除。"
     },
     "sidebar": {
       "title": "面板",
@@ -354,7 +374,13 @@
       "no_multiace_record": "该任务没有 multiACE 记录 — 可能未经过预检，或在历史记录启用之前打印。",
       "ambiguous": "匹配不明确",
       "ambiguous_hint": "同一文件的两次打印在 90 秒内启动，multiACE 无法确定归属。宁可不关联，也不猜测。",
-      "open_printer_ui": "在打印机自带界面中打开"
+      "open_printer_ui": "在打印机自带界面中打开",
+      "reprint": "重新打印",
+      "reprint_hint": "按打印机上现有的文件原样再次打印 - 不进行预检或重写。",
+      "reprint_title": "重新打印该文件？",
+      "reprint_msg": "再次打印“{name}”？将直接使用打印机上现有的文件 - 不会重新检查装载或重新预检。",
+      "reprint_ok": "重新打印",
+      "reprint_started": "已开始重新打印：{name}"
     },
     "virtual": {
       "title": "假设装载（不影响打印机）",

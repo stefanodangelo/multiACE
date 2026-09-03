@@ -214,6 +214,7 @@ createApp({
       bg_swap: {available: false, enabled_heads: [], busy: [], version: null},
       pickup_cleaning: false,
       confirm_commands: false,
+      remember_filament: true,
       spoolman_url: "",
       spoolman_auto: false,
       spool_mode: "local",
@@ -310,6 +311,7 @@ createApp({
       state.mode          = s.mode || "normal";
       state.pickup_cleaning = !!s.pickup_cleaning;
       state.confirm_commands = !!s.confirm_commands;
+      state.remember_filament = s.remember_filament !== false;
       state.spoolman_url = s.spoolman_url || "";
       state.spoolman_auto = !!s.spoolman_auto;
       state.spool_mode = s.spool_mode || "local";
@@ -1595,6 +1597,17 @@ createApp({
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({name: "ACE_SET_CONFIRM_COMMANDS",
+                                args: {ENABLE: enable ? 1 : 0}}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    async function setRememberFilament(enable) {
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_REMEMBER_FILAMENT",
                                 args: {ENABLE: enable ? 1 : 0}}),
         });
       } catch (_) {}
@@ -4940,17 +4953,19 @@ createApp({
       r.head_mode ? startPreflightPrint("head", strategy.value)
                  : startPreflightPrint(strategy.value);
     }
+    // Same plan, same feasibility gate as Print - just uploaded with
+    // print=false into the queue instead of started immediately.
+    function stageSelected() {
+      const r = preflight.report;
+      if (!r) return;
+      r.head_mode ? startPreflightPrint("head", strategy.value, true)
+                 : startPreflightPrint(strategy.value, undefined, true);
+    }
     function applySelected() {
       const r = preflight.report;
       if (!r) return;
       r.head_mode ? applyLoadout("head", strategy.value)
                  : applyLoadout(strategy.value);
-    }
-    function downloadSelected() {
-      const r = preflight.report;
-      if (!r) return;
-      r.head_mode ? downloadRewrittenGcode("head", strategy.value)
-                 : downloadRewrittenGcode(strategy.value);
     }
     // Default tab on a new report: as-loaded, unless it is infeasible and
     // another tab is not - the dialog must never open on a dead end.
@@ -5059,11 +5074,18 @@ createApp({
     function ensurePreflightWorker() {
       if (!window.Worker) throw new Error(t("ui.preflight.local_worker_missing"));
       if (preflightWorker && preflightWorkerReady) return preflightWorkerReady;
-      preflightWorker = new Worker("preflight_pyodide_worker.js?v=pyodide-20260624");
+      preflightWorker = new Worker("preflight_pyodide_worker.js?v=pyodide-20260902-stream");
       preflightWorkerReady = (async () => {
         const r = await fetch(`${API}/preflight/pysrc`);
         if (!r.ok) throw new Error("pysrc " + r.status);
         const src = await r.json();
+        // Single source of truth for the size cap: the backend serves
+        // MULTIACE_PREFLIGHT_MAX_MB here so raising it moves both the
+        // server's cap and the browser's cutoff - instead of the browser
+        // keeping an independently hardcoded copy that silently drifts
+        // from the backend's.
+        const maxMb = Number(src.max_upload_mb);
+        if (maxMb > 0) preflightLocalMaxBytes = maxMb * 1024 * 1024;
         await new Promise((resolve, reject) => {
           const onMsg = (ev) => {
             const m = ev.data || {};
@@ -5100,10 +5122,17 @@ createApp({
       return new Promise((resolve, reject) => {
         const worker = preflightWorker;
         const jobId = payload.jobId;
+        // "rewrite" streams its output back as a series of Transferable
+        // ArrayBuffer chunks (see preflight_pyodide_worker.js) instead of
+        // one whole-file string, so it never has to be materialized as a
+        // single JS string here either - the chunks are handed straight to
+        // `new Blob([...chunks])` by the caller.
+        const chunks = [];
         const onMsg = (ev) => {
           const msg = ev.data || {};
           if (msg.jobId && msg.jobId !== jobId) return;
           if (msg.type === "progress") { if (onProgress) onProgress(msg); return; }
+          if (msg.type === "rewrite-chunk") { chunks.push(msg.chunk); return; }
           if (msg.type === "error") {
             worker.removeEventListener("message", onMsg);
             reject(new Error(msg.message || "worker error"));
@@ -5113,6 +5142,7 @@ createApp({
               || (type === "rewrite" && msg.type === "rewrite-done")
               || (type === "estimate" && msg.type === "estimate-done")) {
             worker.removeEventListener("message", onMsg);
+            if (type === "rewrite") msg.chunks = chunks;
             resolve(msg);
           }
         };
@@ -5150,6 +5180,16 @@ createApp({
       const m = /PreflightRejected:\s*([^\n]+)/.exec(msg || "");
       return m ? m[1].trim() : null;
     }
+    // Pyodide's ingestion/output paths now stream through MEMFS in chunks
+    // rather than materializing the whole file as a JS string (see
+    // preflight_pyodide_worker.js), which is what makes it survivable at
+    // the size this cap allows. It still shares ONE budget with the
+    // printer-side cap (main.py's _PREFLIGHT_MAX_SIZE /
+    // MULTIACE_PREFLIGHT_MAX_MB) - fetched from /api/preflight/pysrc's
+    // max_upload_mb in ensurePreflightWorker() and written into this `let`.
+    // The literal below is only the pre-fetch fallback for the very first
+    // file dropped in a fresh tab, before that fetch has resolved.
+    let preflightLocalMaxBytes = 500 * 1024 * 1024;
     // Entry point: try the browser path, offer the server fallback on failure.
     async function _runPreflight(f) {
       // Opened here (not inside _runLocalPreflight/_runServerPreflight) so
@@ -5159,6 +5199,15 @@ createApp({
       // failed parse can never delay or block the preflight itself.
       preflight.open = true;
       startGcodePreview(f);
+      if (f.size > preflightLocalMaxBytes) {
+        // Skip the browser path entirely: attempting it here has crashed the
+        // tab outright on real files (Pyodide OOM), so there is no local
+        // error to catch and fall back from - go straight to the printer,
+        // which enforces its own size cap and explains the slicer
+        // post-processing alternative.
+        await _runServerPreflight(f);
+        return;
+      }
       try {
         await _runLocalPreflight(f);
       } catch (e) {
@@ -5207,9 +5256,9 @@ createApp({
       try {
         await ensurePreflightWorker();
         const live = await loadLiveSlotsForPreflight();
-        // Analysis only. _startLocalPreflightPrint and
-        // downloadRewrittenGcode both re-fetch the live loadout before the
-        // rewrite, so an overlay cannot reach the file that gets printed.
+        // Analysis only. _startLocalPreflightPrint re-fetches the live
+        // loadout before the rewrite, so an overlay cannot reach the file
+        // that gets printed.
         const vp = virtualPayload();
         const j = await runPreflightWorker("analyze", {
           jobId: preflightJobId, file: f,
@@ -5247,23 +5296,54 @@ createApp({
       preflight.report  = null;
       preflight.error   = "";
       preflight.local   = false;
-      preflight.progress = null;
+      preflight.progress = {percent: 0, stage: "queued", running: true};
       uploading.value   = true;
       // Kept for the g-code preview, which needs nothing but this File
       // object and runs identically on the server-preflight path.
       preflightFile = f;
+      const FIRST_POLL_MS = 250;
+      const POLL_MS       = 500;
       try {
         const fd = new FormData();
         fd.append("file", f, f.name);
         const vp = virtualPayload();
         if (vp) fd.append("virtual_slots", JSON.stringify(vp));
-        const r = await fetch(`${API}/preflight`, {method: "POST", body: fd});
+        // The streamed-upload + async job/percent path (main.py's
+        // _run_preflight_analyze_job) - gives this a real, moving progress
+        // bar instead of one blocking POST with nothing to show while a
+        // large file is analysed.
+        const r = await fetch(`${API}/preflight/analyze`, {method: "POST", body: fd});
         if (!r.ok) {
           let msg = `${r.status} ${r.statusText}`;
           try { const j = await r.json(); if (j.detail) msg = j.detail; } catch (_) {}
           throw new Error(msg);
         }
-        preflight.report = await r.json();
+        const {job_id: jobId} = await r.json();
+        let last;
+        let pollDelay = FIRST_POLL_MS;
+        for (;;) {
+          await new Promise(res => setTimeout(res, pollDelay));
+          pollDelay = POLL_MS;
+          let sr;
+          try {
+            sr = await fetch(`${API}/preflight/analyze/status?job_id=${encodeURIComponent(jobId)}`);
+          } catch (_) {
+            continue;
+          }
+          if (!sr.ok) {
+            const sj = await sr.json().catch(() => ({}));
+            throw new Error(sj.detail || `${sr.status} ${sr.statusText}`);
+          }
+          last = await sr.json();
+          preflight.progress = {
+            percent: Number(last.percent || 0),
+            stage:   String(last.stage || ""),
+            running: !last.done,
+          };
+          if (last.done) break;
+        }
+        if (last.error) throw new Error(last.error);
+        preflight.report = last.report;
         preflight.slicerOverrides = {};
         preflight.slicerSwaps = null;
         preflight.headOverrides = {};
@@ -5273,6 +5353,7 @@ createApp({
       } finally {
         uploading.value = false;
         preflight.busy  = false;
+        preflight.progress = null;
       }
     }
     // =================================================================
@@ -5403,7 +5484,20 @@ createApp({
     // already answers without needing any geometry.
     // =================================================================
     const GPREVIEW_SPEEDS = [1, 5, 10, 100];
-    const GPREVIEW_AUTO_MAX_BYTES = 350 * 1024 * 1024;
+    // This preview worker still reads the whole file via file.text() (its
+    // own, separate memory cost - a JS string ~2x the file's byte size,
+    // plus its typed-array segment budget), and _runPreflight() starts it
+    // UNCONDITIONALLY in parallel with the preflight worker's own analyze.
+    // Now that preflight can legitimately be handling a file up to
+    // preflightLocalMaxBytes (shared config, default 500MB) in the other
+    // worker at the same time, this auto-start guard is kept well below
+    // that ceiling on purpose, so the two don't compound peak memory on
+    // exactly the large files this is meant to make safer. Above this size
+    // the box just shows its manual "Load preview" affordance instead -
+    // fully streaming this worker's own ingestion (matching what the
+    // preflight worker now does) is a reasonable follow-up but out of
+    // scope here.
+    const GPREVIEW_AUTO_MAX_BYTES = 150 * 1024 * 1024;
     const gpreview = reactive({
       // idle: dialog open, parse not started yet. parsing: worker running.
       // ready: renderer live. error: parse threw. skipped: too large / opted
@@ -5714,6 +5808,14 @@ createApp({
       if (gpreviewPlayRaf) { cancelAnimationFrame(gpreviewPlayRaf); gpreviewPlayRaf = 0; }
       gpreviewMoveAcc = 0;
       if (gpreview.playing) {
+        // The default (paused) view sits at the fully-built print - last
+        // layer, move at its max. Starting play from exactly that spot
+        // would hit the last-layer autostop on the very first tick, so
+        // restart from the top of the selected range instead.
+        if (gpreview.layerHi >= gpreview.totalLayers - 1 && gpreview.move >= gpreview.moveMax) {
+          gpreview.layerHi = gpreview.layerLo;
+          gpreview.move = 0;
+        }
         gpreviewPlayLast = performance.now();
         gpreviewPlayRaf = requestAnimationFrame(_gpreviewPlayStep);
       }
@@ -5796,24 +5898,12 @@ createApp({
       };
       return map[stage] || stage || "";
     }
-    // Mirror of the backend _prepend_print_prefs for the in-browser path: the
-    // prefs prepend lives in main.py (the I/O shell), not the shared core, so
-    // the local worker path applies it here before upload.
-    function _prependPrintPrefs(text) {
-      if (!preflight.bedMesh && !preflight.camera) return text || "";
-      const line = "SET_PRINT_PREFERENCES BED_LEVEL=" + (preflight.bedMesh ? 1 : 0)
-        + " FLOW_CALIBRATE=0 TIME_LAPSE_CAMERA=" + (preflight.camera ? 1 : 0)
-        + " FORCE=1";
-      const body = (text || "").replace(
-        /^(\s*SET_PRINT_PREFERENCES\b.*)$/gim, "; multiACE disabled: $1");
-      return "; multiACE preflight: print preferences\n" + line + "\n" + body;
-    }
-    async function startPreflightPrint(mode, headPlan) {
+    async function startPreflightPrint(mode, headPlan, stage) {
       if (preflight.busy || preflight.sending) return;
       const rep = preflight.report;
       if (!rep) return;
-      if (rep.local) { await _startLocalPreflightPrint(mode, headPlan); return; }
-      await _startServerPreflightPrint(mode, headPlan);
+      if (rep.local) { await _startLocalPreflightPrint(mode, headPlan, stage); return; }
+      await _startServerPreflightPrint(mode, headPlan, stage);
     }
 
     // The worker "rewrite" payload for a mode/plan - shared by "print" and
@@ -5844,7 +5934,15 @@ createApp({
     }
 
     // Browser path: rewrite in the worker, upload straight to Moonraker.
-    async function _startLocalPreflightPrint(mode, headPlan) {
+    // 32 lowercase hex chars, matching the backend's token/queue-id shape.
+    // Not crypto.randomUUID(): that requires a secure context, and this app
+    // is often reached over plain http on a LAN.
+    function _hexId32() {
+      let s = "";
+      for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
+      return s;
+    }
+    async function _startLocalPreflightPrint(mode, headPlan, stage) {
       const rep = preflight.report;
       if (!rep || !preflightFile || !preflightJobId) return;
       preflight.sending = (mode === "head") ? (headPlan || "loadout") : mode;
@@ -5854,6 +5952,12 @@ createApp({
       const MIN_VISIBLE_MS = 1500;
       try {
         const payload = _rewritePayload(mode, headPlan);
+        // The SET_PRINT_PREFERENCES prepend runs worker-side now (via the
+        // same preflight_core.prepend_print_prefs the backend uses),
+        // because the rewritten output is streamed back in chunks and is
+        // never assembled into one JS string here to run a .replace() on.
+        payload.bedMesh = !!preflight.bedMesh;
+        payload.camera  = !!preflight.camera;
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
@@ -5866,12 +5970,15 @@ createApp({
             stage:   String(msg.stage || ""), running: true};
         });
         preflight.progress = {percent: 90, stage: "upload", running: true};
+        const displayName = rep.filename || preflightFile.name;
+        const queueId = stage ? _hexId32() : "";
         const fd = new FormData();
         fd.append("root", "gcodes");
-        fd.append("print", "true");
+        fd.append("print", stage ? "false" : "true");
+        if (stage) fd.append("path", "multiace-queue");
         fd.append("file",
-          new Blob([_prependPrintPrefs(j.text)], {type: "application/octet-stream"}),
-          rep.filename || preflightFile.name);
+          new Blob(j.chunks || [], {type: "application/octet-stream"}),
+          stage ? `${queueId}-${displayName}` : displayName);
         const r = await fetch("/server/files/upload", {method: "POST", body: fd});
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -5879,11 +5986,27 @@ createApp({
             || `${r.status} ${r.statusText}`;
           throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
         }
+        if (stage) {
+          const rr = await fetch(`${API}/queue/register`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              id: queueId, filename: displayName,
+              relpath: `multiace-queue/${queueId}-${displayName}`,
+              mode, head_plan: (mode === "head") ? (headPlan || "loadout") : null,
+              resolved_slots: j.resolvedSlots || [],
+              live_slots: payload.liveSlots || [],
+            }),
+          });
+          const rj = await rr.json().catch(() => ({}));
+          if (!rr.ok) throw new Error(rj.detail || `${rr.status}`);
+        }
         preflight.progress = {percent: 100, stage: "done", running: true};
         const elapsed = Date.now() - startedAt;
         const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
         if (wait > 0) await new Promise(res => setTimeout(res, wait));
-        setMacroLog(t("ui.upload.started", {name: rep.filename || preflightFile.name}));
+        setMacroLog(stage ? t("ui.queue.staged", {name: displayName})
+                          : t("ui.upload.started", {name: displayName}));
         closePreflight();
       } catch (e) {
         preflight.error = e.message || String(e);
@@ -5893,57 +6016,7 @@ createApp({
       }
     }
 
-    // Download the rewritten g-code instead of printing it. The worker
-    // already holds the rewritten text, so this is the same pipeline with a
-    // Blob instead of an upload - useful offline (mock mode has no printer to
-    // print on) and on a real printer for slicer-side workflows.
-    async function downloadRewrittenGcode(mode, headPlan) {
-      const rep = preflight.report;
-      if (!rep || preflight.busy || preflight.sending) return;
-      if (!rep.local || !preflightFile || !preflightJobId) {
-        preflight.error = t("ui.preflight.download_local_only");
-        return;
-      }
-      preflight.sending = "download";
-      preflight.error = "";
-      preflight.progress = {percent: 0, stage: "queued", running: true};
-      try {
-        const payload = _rewritePayload(mode, headPlan);
-        const live = await loadLiveSlotsForPreflight();
-        payload.liveSlots = live.live_slots;
-        payload.headCtx   = live.head_ctx;
-        // Same reasoning as the analyze payload above: re-read ace.cfg now
-        // rather than trust whatever the worker last cached.
-        payload.costParams = live.cost_params;
-        const j = await runPreflightWorker("rewrite", payload, msg => {
-          preflight.progress = {
-            percent: Number(msg.percent || 0),
-            stage:   String(msg.stage || ""), running: true};
-        });
-        const base = (rep.filename || preflightFile.name || "print.gcode")
-          .replace(/\.(gcode|gco|g)$/i, "");
-        const suffix = (mode === "head") ? (headPlan || "loadout") : mode;
-        const url = URL.createObjectURL(
-          new Blob([j.text], {type: "text/plain"}));
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${base}.multiace-${suffix}.gcode`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        // Revoke late: Safari cancels the download if the URL dies first.
-        setTimeout(() => URL.revokeObjectURL(url), 30000);
-        preflight.progress = {percent: 100, stage: "done", running: false};
-        setMacroLog(t("ui.preflight.download_done", {name: a.download}));
-      } catch (e) {
-        preflight.error = e.message || String(e);
-      } finally {
-        preflight.sending = "";
-        if (preflight.progress) preflight.progress.running = false;
-      }
-    }
-
-    async function _startServerPreflightPrint(mode, headPlan) {
+    async function _startServerPreflightPrint(mode, headPlan, stage) {
       const rep = preflight.report;
       if (!rep || !rep.token) return;
       // For head mode the button identity is the head plan (loadout/optimize/
@@ -5956,7 +6029,7 @@ createApp({
       const FIRST_POLL_MS  = 250;
       const POLL_MS        = 500;
       try {
-        const body = {token: rep.token, mode,
+        const body = {token: rep.token, mode, stage: !!stage,
                       bed_mesh: !!preflight.bedMesh, camera: !!preflight.camera};
         if (mode === "slicer") {
           // Send the (possibly user-edited) slot assignment verbatim so the
@@ -6025,7 +6098,8 @@ createApp({
         if (wait > 0) {
           await new Promise(res => setTimeout(res, wait));
         }
-        setMacroLog(t("ui.upload.started", {name: rep.filename}));
+        setMacroLog(last.queued ? t("ui.queue.staged", {name: rep.filename})
+                                : t("ui.upload.started", {name: rep.filename}));
         closePreflight();
       } catch (e) {
         preflight.error = e.message || String(e);
@@ -6136,7 +6210,7 @@ createApp({
     // printer's own 1024x600 panel, where 168px is worth reclaiming.
     // =================================================================
     const RAIL_ICONS = {dashboard: "▤", monitor: "▣", history: "◷",
-                        spools: "◍", config: "⚙", plugin: "◫"};
+                        queue: "☰", spools: "◍", config: "⚙", plugin: "◫"};
     const railCollapsed = ref(localStorage.getItem("multiace.rail") === "1");
     function toggleRail() { railCollapsed.value = !railCollapsed.value; }
     // The class goes on <html>, not on .shell, because --rail-w has to
@@ -6161,6 +6235,8 @@ createApp({
                   label: t("ui.tabs.spools")});
       items.push({key: "history", icon: RAIL_ICONS.history,
                   label: t("ui.tabs.history")});
+      items.push({key: "queue", icon: RAIL_ICONS.queue,
+                  label: t("ui.tabs.queue")});
       items.push({key: "config", icon: RAIL_ICONS.config,
                   label: t("ui.tabs.config")});
       for (const p of plugins.items) {
@@ -6398,7 +6474,7 @@ createApp({
     // =================================================================
     const history = reactive({
       loaded: false, busy: false, error: "", jobs: [], printerUi: "",
-      detail: null,
+      detail: null, reprinting: "",
     });
 
     async function loadHistory() {
@@ -6439,18 +6515,216 @@ createApp({
       return {predicted: est.total_s, actual, pct};
     }
     watch(() => tab.value, v => { if (v === "history" && !history.loaded) loadHistory(); });
+    // Reprint: start the file exactly as it already sits on the printer -
+    // no preflight, no rewrite. The swaps baked into it from its first run
+    // still apply; a stale loadout since then is the user's call, not ours.
+    function reprintJob(row) {
+      if (!row || !row.filename || history.reprinting) return;
+      confirm({
+        title: t("ui.history.reprint_title"),
+        message: t("ui.history.reprint_msg", {name: row.filename}),
+        okLabel: t("ui.history.reprint_ok"),
+        onOk: () => _doReprint(row),
+      });
+    }
+    async function _doReprint(row) {
+      history.reprinting = row.id || row.job_id || row.filename;
+      history.error = "";
+      try {
+        const r = await fetch(`${API}/history/reprint`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({filename: row.filename}),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        setMacroLog(t("ui.history.reprint_started", {name: row.filename}));
+      } catch (e) {
+        history.error = e.message || String(e);
+      } finally {
+        history.reprinting = "";
+      }
+    }
+
+    // =================================================================
+    // Print queue: staged, already-rewritten gcode waiting to be launched
+    // (staged from the preflight dialog's "stage for later" action).
+    // =================================================================
+    const queue = reactive({
+      loaded: false, busy: false, error: "", jobs: [], launching: "", deleting: "",
+    });
+    async function loadQueue() {
+      queue.busy = true;
+      queue.error = "";
+      try {
+        const r = await fetch(`${API}/queue`);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        queue.jobs = j.jobs || [];
+        queue.loaded = true;
+      } catch (e) {
+        queue.error = e.message || String(e);
+      } finally {
+        queue.busy = false;
+      }
+    }
+    watch(() => tab.value, v => { if (v === "queue" && !queue.loaded) loadQueue(); });
+
+    function queueDriftTooltip(row) {
+      const d = row && row.drift;
+      if (!d || !d.changed || !d.slots) return "";
+      return d.slots.map(s => {
+        const fmt = (v) => (v && (v.material || v.color))
+          ? `${v.material || "?"} ${v.color || ""}`.trim() : t("ui.queue.slot_empty");
+        return t("ui.queue.drift_tooltip_line", {
+          ace: dispIdx(s.ace), slot: dispIdx(s.slot),
+          was: fmt(s.was), now: fmt(s.now)});
+      }).join("\n");
+    }
+
+    async function _doLaunchQueued(row) {
+      queue.launching = row.id;
+      queue.error = "";
+      try {
+        const r = await fetch(`${API}/queue/${row.id}/launch`, {method: "POST"});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        setMacroLog(t("ui.queue.launch_ok", {name: row.filename}));
+        await loadQueue();
+      } catch (e) {
+        queue.error = e.message || String(e);
+      } finally {
+        queue.launching = "";
+      }
+    }
+    function launchQueued(row) {
+      if (!row || queue.launching || row.missing_on_printer) return;
+      if (row.drift && row.drift.changed) {
+        confirm({
+          title:   t("ui.queue.launch_drifted_title"),
+          message: t("ui.queue.launch_drifted_msg", {name: row.filename}),
+          okLabel: t("ui.queue.launch"),
+          onOk:    () => _doLaunchQueued(row),
+        });
+      } else {
+        _doLaunchQueued(row);
+      }
+    }
+
+    async function _doDeleteQueued(row) {
+      queue.deleting = row.id;
+      queue.error = "";
+      try {
+        const r = await fetch(`${API}/queue/${row.id}`, {method: "DELETE"});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        await loadQueue();
+      } catch (e) {
+        queue.error = e.message || String(e);
+      } finally {
+        queue.deleting = "";
+      }
+    }
+    function deleteQueued(row) {
+      if (!row || queue.deleting) return;
+      confirm({
+        title:   t("ui.queue.delete_title"),
+        message: t("ui.queue.delete_msg", {name: row.filename}),
+        okLabel: t("ui.queue.delete"),
+        onOk:    () => _doDeleteQueued(row),
+      });
+    }
 
     const webcam = reactive({
       loaded: false, available: false, reason: "", name: "",
+      service: "", webrtc_url: "", connFailed: false,
       // Cache-buster: an MJPEG <img> that was torn down keeps its old
       // connection cached, so re-opening the pane shows a frozen frame
       // until the src actually changes.
       nonce: 0,
     });
+    const webcamVideo = ref(null);
     const webcamShown = computed(() =>
       !panelMode && tab.value === "monitor");
     const webcamSrc = computed(() =>
       webcam.available ? `${API}/webcam/stream?n=${webcam.nonce}` : "");
+    let webcamPc = null;
+    function stopWebrtc() {
+      if (webcamPc) { webcamPc.close(); webcamPc = null; }
+    }
+    // camera-streamer's handshake is reversed from a typical WHIP/WHEP
+    // flow: the SERVER makes the offer (it knows the video track) and
+    // the browser answers, over two plain POSTs of JSON-wrapped SDP.
+    async function startWebrtc() {
+      stopWebrtc();
+      webcam.connFailed = false;
+      await nextTick();
+      const video = webcamVideo.value;
+      if (!video) return;
+      const signalUrl = `${API}/webcam/webrtc-signal`;
+      const pc = new RTCPeerConnection();
+      webcamPc = pc;
+      pc.addTransceiver("video", {direction: "recvonly"});
+      pc.addEventListener("track", (evt) => {
+        if (pc === webcamPc && evt.track.kind === "video") video.srcObject = evt.streams[0];
+      });
+      // "track" fires as soon as the recvonly transceiver is negotiated,
+      // before any media actually arrives - it is not proof the camera is
+      // reachable. connectionState is: some LAN cameras' ICE stacks never
+      // resolve Chrome's mDNS-obfuscated host candidates, so the peer
+      // connection can sit in "new"/"checking" forever with no "failed"
+      // event to react to. A flat timeout is what actually catches that.
+      const connectTimeout = setTimeout(() => {
+        if (pc === webcamPc && pc.connectionState !== "connected") {
+          webcam.reason = "connection timed out";
+          webcam.connFailed = true;
+        }
+      }, 10000);
+      pc.addEventListener("connectionstatechange", () => {
+        if (pc !== webcamPc) return;
+        if (pc.connectionState === "connected") {
+          clearTimeout(connectTimeout);
+          webcam.connFailed = false;
+        } else if (["failed", "disconnected"].includes(pc.connectionState)) {
+          clearTimeout(connectTimeout);
+          webcam.connFailed = true;
+          if (webcamShown.value) {
+            setTimeout(() => { if (pc === webcamPc) startWebrtc(); }, 1000);
+          }
+        }
+      });
+      try {
+        const offerRes = await fetch(signalUrl, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({type: "request"}),
+        });
+        const offer = await offerRes.json();
+        await pc.setRemoteDescription(offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === "complete") { resolve(); return; }
+          const check = () => {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", check);
+              resolve();
+            }
+          };
+          pc.addEventListener("icegatheringstatechange", check);
+        });
+        if (pc !== webcamPc) return;
+        await fetch(signalUrl, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({type: pc.localDescription.type, id: offer.id,
+                                 sdp: pc.localDescription.sdp}),
+        });
+      } catch (e) {
+        if (pc === webcamPc) {
+          webcam.reason = e.message || String(e);
+          webcam.connFailed = true;
+        }
+      }
+    }
     async function loadWebcam() {
       try {
         const r = await fetch(`${API}/webcam/info`);
@@ -6458,17 +6732,30 @@ createApp({
         webcam.available = !!j.available;
         webcam.reason = j.reason || "";
         webcam.name = j.name || "";
+        webcam.service = j.service || "";
+        webcam.webrtc_url = j.webrtc_url || "";
       } catch (e) {
         webcam.available = false;
         webcam.reason = String(e);
+        webcam.service = "";
+        webcam.webrtc_url = "";
       } finally {
         webcam.loaded = true;
         webcam.nonce++;
+        if (webcamShown.value && webcam.available && webcam.service === "webrtc") startWebrtc();
+        else stopWebrtc();
       }
     }
     watch(webcamShown, (shown) => {
-      if (shown) { if (!webcam.loaded) loadWebcam(); else webcam.nonce++; }
+      if (shown) {
+        if (!webcam.loaded) loadWebcam();
+        else if (webcam.service === "webrtc") startWebrtc();
+        else webcam.nonce++;
+      } else {
+        stopWebrtc();
+      }
     });
+    onUnmounted(stopWebrtc);
 
     const CONSOLE_MAX = 400;
     const consoleLines = ref([]);
@@ -6910,7 +7197,7 @@ createApp({
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setRememberFilament, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
       spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
@@ -6939,7 +7226,7 @@ createApp({
       tipform, loadTipform, tipformAddRow, tipformRemoveRow, saveTipform, tipformRestartPending, tipformNameOptions,
       TIPFORM_STEP_TYPES, tipformToggleBuilder, tipformAddStep, tipformRemoveStep, tipformStepsToTable, tipformStepPlaceholder, tipformInsertStock,
       preflight, closePreflight, startPreflightPrint, applyLoadout, stageLabel,
-      downloadRewrittenGcode, fmtDuration, estimateDelta, wastePercent,
+      fmtDuration, estimateDelta, wastePercent,
       gpreview, gpreviewCanvasEl, startGcodePreview, closeGcodePreview,
       gpreviewToggleCollapse, gpreviewSetAutoStart, gpreviewAutoEnabled, whatifRerun,
       gpreviewTogglePlay, gpreviewSetSpeed, gpreviewLegend, gpreviewFeatureLegend,
@@ -6961,7 +7248,7 @@ createApp({
       headSlicerMat, headProposalLabel,
       cmapDetails, colorMapRows, cmapBands, cmapSummary, cmapEdited, cmapResetAuto, cmapPick,
       strategy, strategyTabs, selectedPlan, loadoutMoves,
-      canPrint, canApplyLoadout, printSelected, applySelected, downloadSelected,
+      canPrint, canApplyLoadout, printSelected, stageSelected, applySelected,
       updateState, updateCheck, updateApply,
       debugState, debugEnable, debugDisable, debugReboot,
       plugins, refreshPlugins, pluginIframeSrc,
@@ -6987,8 +7274,9 @@ createApp({
       printCtlSlide, printCtlRelease, printCtlReset, printCtlCancel,
       sendPrintControl,
       history, loadHistory, openHistoryDetail, historyColors,
-      historyAccuracy,
-      webcam, webcamShown, webcamSrc, loadWebcam,
+      historyAccuracy, reprintJob,
+      queue, loadQueue, launchQueued, deleteQueued, queueDriftTooltip,
+      webcam, webcamShown, webcamSrc, webcamVideo, loadWebcam, startWebrtc,
       consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,
       consoleShown, sendConsole, consoleTime, loadConsole,
       retryState, retryBusy, retryPct, retryControl,

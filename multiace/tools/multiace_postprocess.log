@@ -33,3 +33,32 @@ Layer-only swap analysis:
 ============================================================
 Rewrite: 9 active ACE_SWAP_HEAD, 554 skipped, 2 swap-backs inserted
 Auto-load: injected ACE_SWAP_HEAD for 4 head(s) before first T command
+=== 2026-09-02 19:03:05  C:\Users\Stefano\Downloads\Moro_PLA_1d18h27m.gcode ===
+============================================================
+multiACE plan
+============================================================
+Colors: 6   Toolchanges: 2430   Mid-print swaps: 348 (~1322.4 min)
+
+Slicer Loadout:
+  ACE 0 Slot 0  T0   Green (#01a96a RGB(1,169,106))  (576x)
+  ACE 0 Slot 1  T1   DarkGray (#342623ff RGB(52,38,35))  (551x)
+  ACE 0 Slot 2  T2   LightGray (#d3d4d6ff RGB(211,212,214))  (1021x)
+  ACE 0 Slot 3  T3   Brown (#a9434eff RGB(169,67,78))  (95x)
+  ACE 1 Slot 0  T4   Brown (#808000 RGB(128,128,0))  (48x)
+  ACE 1 Slot 1  T5   Gray (#808080 RGB(128,128,128))  (139x)
+
+--- OPTIMIZER: 110 swaps possible (238 fewer, 68% less) ---
+Optimized Print Loadout:
+  ACE 0 Slot 0  T0   Green (#01a96a RGB(1,169,106))  (primary, 576x)
+  ACE 0 Slot 1  T1   DarkGray (#342623ff RGB(52,38,35))  (primary, 551x)
+  ACE 0 Slot 2  T2   LightGray (#d3d4d6ff RGB(211,212,214))  (primary, 1021x)
+  ACE 0 Slot 3  T5   Gray (#808080 RGB(128,128,128))  (primary, 139x)
+  ACE 1 Slot 0  T3   Brown (#a9434eff RGB(169,67,78))  (swap, 95x)
+  ACE 1 Slot 1  T4   Brown (#808000 RGB(128,128,0))  (swap, 48x)
+
+Layer-only swap analysis:
+  Layers: 1295   Max colors/layer: 5
+  Feasible: NO  (>4 distinct colors in some layer - needs mid-layer swaps)
+============================================================
+Rewrite: 348 active ACE_SWAP_HEAD, 13 skipped, 174 swap-backs inserted
+Auto-load: injected ACE_SWAP_HEAD for 4 head(s) before first T command

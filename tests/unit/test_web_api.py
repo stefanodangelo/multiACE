@@ -5,12 +5,15 @@ stubbed out, so these cover the request/response contract the Vue app
 codes against - including the one that matters most: a save must never
 restart more (or less) than the change actually needs.
 """
+import asyncio
 import importlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +43,7 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MULTIACE_OVERRIDE_FILE", str(tmp_path / "overrides.json"))
     monkeypatch.setenv("MULTIACE_VIRTUAL_LOADOUT_FILE",
                         str(tmp_path / "virtual_loadout.json"))
+    monkeypatch.setenv("MULTIACE_QUEUE_FILE", str(tmp_path / "print_queue.json"))
     monkeypatch.setenv("MULTIACE_MOCK_DIR", str(ROOT / "tests" / "fixtures"))
     monkeypatch.setenv("MULTIACE_WEB_VERSION", "test")
     # Every other MULTIACE_* path this fixture cares about is pinned above;
@@ -60,6 +64,10 @@ def app_env(tmp_path, monkeypatch):
     # it just returns a different (head-mode) plan shape, failing whatever
     # assertion assumed "slicer/optimize/layer" and zero swaps.
     monkeypatch.delenv("MULTIACE_MOCK_STATE_FILE", raising=False)
+    # Same hazard: a leftover MULTIACE_PREFLIGHT_MAX_MB from a dev session
+    # in the same shell would silently change the default-cap assertions
+    # below out from under the test.
+    monkeypatch.delenv("MULTIACE_PREFLIGHT_MAX_MB", raising=False)
     monkeypatch.syspath_prepend(str(BACKEND))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
@@ -317,6 +325,11 @@ class TestConsoleEndpoint:
 
 class TestWebcamResolution:
     def _cams(self, main, monkeypatch, cams):
+        # These tests exercise the Moonraker webcams-list path; the
+        # WebRTC override (a fixed camera URL) takes priority over it
+        # in real deployments, so disable it here.
+        monkeypatch.setattr(main, "WEBRTC_URL", "")
+
         async def fake_get(path):
             assert path == "/server/webcams/list"
             return {"result": {"webcams": cams}}
@@ -367,8 +380,54 @@ class TestWebcamResolution:
         async def boom(path):
             raise RuntimeError("moonraker down")
         c, main, cfg, calls = client
+        monkeypatch.setattr(main, "WEBRTC_URL", "")
         monkeypatch.setattr(main, "_mr_get", boom)
         assert c.get("/api/webcam/info").json()["available"] is False
+
+    def test_webrtc_override_short_circuits_moonraker(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "WEBRTC_URL", "http://192.168.178.82/webcam/webrtc")
+        j = c.get("/api/webcam/info").json()
+        assert j["available"] is True
+        assert j["service"] == "webrtc"
+        assert j["webrtc_url"] == "http://192.168.178.82/webcam/webrtc"
+        assert j["signal_path"] == "/api/webcam/webrtc-signal"
+        assert "proxy_path" not in j
+
+
+class TestWebrtcSignal:
+    """The SDP handshake is relayed server-side rather than fetched by the
+    browser directly: camera-streamer sends no CORS headers and 501s on
+    OPTIONS, so a cross-origin browser POST can never reach it."""
+
+    def test_rejected_when_no_webrtc_camera_configured(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "WEBRTC_URL", "")
+        self_cams = []
+
+        async def fake_get(path):
+            return {"result": {"webcams": self_cams}}
+        monkeypatch.setattr(main, "_mr_get", fake_get)
+        r = c.post("/api/webcam/webrtc-signal", json={"type": "request"})
+        assert r.status_code == 503
+
+    def test_rejected_for_a_plain_mjpeg_camera(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "WEBRTC_URL", "")
+
+        async def fake_get(path):
+            return {"result": {"webcams": [
+                {"name": "cam", "service": "mjpegstreamer",
+                 "stream_url": "/webcam/?action=stream"}]}}
+        monkeypatch.setattr(main, "_mr_get", fake_get)
+        r = c.post("/api/webcam/webrtc-signal", json={"type": "request"})
+        assert r.status_code == 503
+
+    def test_unavailable_in_mock_mode(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "WEBRTC_URL", "http://192.168.178.82/webcam/webrtc")
+        r = c.post("/api/webcam/webrtc-signal?mock=1", json={"type": "request"})
+        assert r.status_code == 503
 
 
 class TestMockMode:
@@ -471,7 +530,7 @@ class TestMockPreflight:
         r = c.post("/api/preflight/print?mock=1",
                    json={"token": "0" * 32, "mode": "slicer"})
         assert r.status_code == 503
-        assert "Download" in r.json()["detail"]
+        assert "no printer" in r.json()["detail"]
 
     def test_pysrc_serves_the_third_module(self, client):
         """The worker writes exactly the files this dict names - if
@@ -486,6 +545,125 @@ class TestMockPreflight:
         c, main, cfg, calls = client
         j = c.get("/api/preflight/pysrc").json()
         assert j["cost_params"]["main"]["load_length"] == 2000
+
+
+class TestPreflightLargeFiles:
+    """Large-file support: uploads stream to disk instead of buffering the
+    whole thing in RAM, analyze runs off the event loop, the async
+    job/percent path lets the UI show real progress, and the size cap is
+    served to the browser instead of being a second hardcoded copy there."""
+
+    class _FakeUpload:
+        """Minimal stand-in for FastAPI's UploadFile - just async read()."""
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
+            self.max_chunk_seen = 0
+
+        async def read(self, size=-1):
+            if not self._chunks:
+                return b""
+            chunk = self._chunks.pop(0)
+            self.max_chunk_seen = max(self.max_chunk_seen, len(chunk))
+            return chunk
+
+    def test_stream_upload_writes_all_chunks_without_buffering_them_whole(
+            self, app_env, tmp_path):
+        main, cfg, calls = app_env
+        dest = tmp_path / "out.gcode"
+        fake = self._FakeUpload([b"a" * 10, b"b" * 10, b"c" * 10])
+        size = asyncio.run(
+            main._stream_upload_to_path(fake, dest, max_size=1024))
+        assert size == 30
+        assert dest.read_bytes() == b"a" * 10 + b"b" * 10 + b"c" * 10
+        # Each read() call handed back one small chunk at a time - never
+        # the whole file at once - which is the point of streaming.
+        assert fake.max_chunk_seen == 10
+
+    def test_oversized_upload_is_rejected_partway_and_cleans_up(
+            self, app_env, tmp_path):
+        main, cfg, calls = app_env
+        dest = tmp_path / "out.gcode"
+        fake = self._FakeUpload([b"a" * 10, b"b" * 10, b"c" * 10])
+        with pytest.raises(main.HTTPException) as exc:
+            asyncio.run(main._stream_upload_to_path(fake, dest, max_size=15))
+        assert exc.value.status_code == 413
+        assert not dest.exists(), "a rejected upload must not leave a partial file"
+
+    def test_empty_upload_is_rejected(self, app_env, tmp_path):
+        main, cfg, calls = app_env
+        dest = tmp_path / "out.gcode"
+        with pytest.raises(main.HTTPException) as exc:
+            asyncio.run(
+                main._stream_upload_to_path(self._FakeUpload([]), dest,
+                                            max_size=1024))
+        assert exc.value.status_code == 400
+        assert not dest.exists()
+
+    def test_sync_endpoint_runs_cpu_work_off_the_event_loop(
+            self, client, monkeypatch):
+        """A large-file analyze must not block the event loop, or every
+        other client's status polling/WebSocket traffic stalls behind it -
+        the rewrite/print path already gets this treatment via to_thread."""
+        c, main, cfg, calls = client
+        seen = []
+        real_to_thread = asyncio.to_thread
+
+        async def spy_to_thread(func, *a, **kw):
+            seen.append(func)
+            return await real_to_thread(func, *a, **kw)
+
+        monkeypatch.setattr(main.asyncio, "to_thread", spy_to_thread)
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        with path.open("rb") as f:
+            r = c.post("/api/preflight?mock=1",
+                       files={"file": ("sample_4color.gcode", f, "text/plain")})
+        assert r.status_code == 200
+        assert main.preflight_core.parse_meta in seen
+        assert main.preflight_core.build_report in seen
+
+    def test_analyze_job_reports_progress_and_matches_sync_report_shape(
+            self, client):
+        """The async job path is the same work as POST /api/preflight, just
+        pollable - the UI needs a real percent instead of nothing to show
+        during a large file's analyze."""
+        c, main, cfg, calls = client
+        path = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        with path.open("rb") as f:
+            r = c.post("/api/preflight/analyze?mock=1",
+                       files={"file": ("sample_4color.gcode", f, "text/plain")})
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+
+        status = None
+        for _ in range(200):
+            status = c.get(
+                f"/api/preflight/analyze/status?job_id={job_id}").json()
+            if status["done"]:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("analyze job never completed")
+
+        assert status["error"] is None
+        report = status["report"]
+        assert report["mock"] is True
+        assert set(report["plans"]) == {"slicer", "optimize", "layer"}
+
+    def test_analyze_status_404s_for_an_unknown_job(self, client):
+        c, main, cfg, calls = client
+        r = c.get("/api/preflight/analyze/status?job_id=" + "0" * 32)
+        assert r.status_code == 404
+
+    def test_max_upload_mb_is_served_and_matches_the_cap(self, client):
+        """The browser's local/Pyodide size gate reads this instead of
+        keeping its own hardcoded copy that can drift from the backend's."""
+        c, main, cfg, calls = client
+        j = c.get("/api/preflight/pysrc").json()
+        assert j["max_upload_mb"] == main._PREFLIGHT_MAX_SIZE // (1024 * 1024)
+
+    def test_default_cap_is_500mb(self, app_env):
+        main, cfg, calls = app_env
+        assert main._PREFLIGHT_MAX_SIZE == 500 * 1024 * 1024
 
 
 class TestVirtualLoadout:
@@ -738,6 +916,28 @@ class TestHistoryEndpoints:
         assert c.request("DELETE", "/api/history/x").status_code == 403
         assert c.post("/api/history/clear").status_code == 403
 
+    def test_reprint_starts_the_file_already_on_the_printer(self, client):
+        """No preflight, no rewrite - just Moonraker's own print/start on
+        whatever filename the history row carries."""
+        c, main, cfg, calls = client
+        r = c.post("/api/history/reprint", json={"filename": "vase.gcode"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "filename": "vase.gcode"}
+        assert calls == ["/printer/print/start"]
+
+    def test_reprint_needs_a_filename(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/history/reprint", json={"filename": " "})
+        assert r.status_code == 400
+        assert calls == []
+
+    def test_reprint_in_mock_mode_never_touches_moonraker(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/history/reprint?mock=1", json={"filename": "vase.gcode"})
+        assert r.status_code == 200
+        assert r.json()["mock"] is True
+        assert calls == []
+
 
 class TestPrinterIdleGuard:
     """§13.4: applying an update mid-print aborts the job, cuts the heaters
@@ -928,3 +1128,364 @@ class TestVirtualLoadoutStore:
         Path(main.VIRTUAL_LOADOUT_FILE).parent.mkdir(parents=True, exist_ok=True)
         Path(main.VIRTUAL_LOADOUT_FILE).write_text("{not json")
         assert c.get("/api/virtual-loadout").json() == {"enabled": False, "slots": []}
+
+
+class TestPrintQueue:
+    """Stage a preflight plan instead of printing it immediately: upload
+    with print=false into multiace-queue/, keep a registry entry recording
+    which physical ACE slots the plan depends on, and let the Queue tab
+    launch or delete it later. See docs/plan for "Print Queue"."""
+
+    def _seed_token(self, main, token, name="vase.gcode"):
+        main._PREFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
+        src = ROOT / "tests" / "fixtures" / "sample_4color.gcode"
+        (main._PREFLIGHT_DIR / f"{token}.gcode").write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8")
+        (main._PREFLIGHT_DIR / f"{token}.name").write_text(
+            name, encoding="utf-8")
+
+    def _run_stage_pipeline(self, main, monkeypatch, job_id, token,
+                            resolved_slots, live_slots, name="vase.gcode"):
+        """Drive _run_preflight_pipeline(stage=True) directly - staging a
+        real file end-to-end through the HTTP layer would also need a live
+        Moonraker for the state query, which unit tests don't have."""
+        main._PREFLIGHT_JOBS[job_id] = {
+            "stage": "queued", "percent": 0.0, "done": False, "error": None,
+            "filename": name, "mode": "slicer", "ts": 0.0,
+        }
+        seen = {}
+
+        def fake_rewrite(pp, *, src_path, **kw):
+            return src_path, resolved_slots
+
+        async def fake_upload(name_, data, ctype, start_print, dest_path=None):
+            seen.update(name=name_, start_print=start_print, dest_path=dest_path)
+            return {"ok": True, "filename": name_, "moonraker": {"item": {}}}
+
+        monkeypatch.setattr(main.preflight_core, "rewrite_pipeline", fake_rewrite)
+        monkeypatch.setattr(main, "_upload_to_moonraker", fake_upload)
+        monkeypatch.setattr(main, "_live_slots_async",
+                            lambda: _async_value(live_slots))
+        monkeypatch.setattr(main, "_query_state_gated", lambda: _async_value({}))
+        monkeypatch.setattr(main, "_parse_state", lambda s: {})
+        asyncio.run(main._run_preflight_pipeline(
+            job_id, token, "slicer", name, stage=True))
+        return seen
+
+    def _seed_entry(self, main, id_, **overrides):
+        entry = {
+            "id": id_, "filename": f"{id_}.gcode",
+            "relpath": f"multiace-queue/{id_}-{id_}.gcode",
+            "mode": "slicer", "head_plan": None, "staged_at": 1.0,
+            "referenced_slots": [], "slot_snapshot": {},
+        }
+        entry.update(overrides)
+        main._queue[id_] = entry
+        return entry
+
+    def test_stage_is_refused_in_mock_mode(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/preflight/print?mock=1",
+                   json={"token": "0" * 32, "mode": "slicer", "stage": True})
+        assert r.status_code == 503
+        assert "stage" in r.json()["detail"]
+
+    def test_register_is_refused_in_mock_mode(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/queue/register?mock=1", json={
+            "id": "a" * 32, "filename": "x.gcode",
+            "relpath": "multiace-queue/" + "a" * 32 + "-x.gcode",
+            "mode": "slicer",
+        })
+        assert r.status_code == 503
+
+    def test_staging_uploads_with_print_false_into_the_queue_folder(
+            self, client, monkeypatch):
+        c, main, cfg, calls = client
+        token, job_id = "a" * 32, "b" * 32
+        self._seed_token(main, token)
+        seen = self._run_stage_pipeline(
+            main, monkeypatch, job_id, token,
+            [{"ace": 0, "slot": 1}],
+            [{"ace": 0, "slot": 1, "material": "PLA", "color": "#c21b17"}])
+        assert seen["start_print"] is False
+        assert seen["dest_path"] == "multiace-queue"
+        assert job_id in main._queue
+        entry = main._queue[job_id]
+        assert entry["referenced_slots"] == [{"ace": 0, "slot": 1}]
+        assert entry["slot_snapshot"] == {
+            "0:1": {"material": "PLA", "color": "#c21b17"}}
+        assert main._PREFLIGHT_JOBS[job_id]["queued"] is True
+        assert main._PREFLIGHT_JOBS[job_id]["queue_id"] == job_id
+
+    def test_registry_persists_atomically_to_disk(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        token, job_id = "c" * 32, "d" * 32
+        self._seed_token(main, token)
+        self._run_stage_pipeline(
+            main, monkeypatch, job_id, token, [{"ace": 0, "slot": 0}],
+            [{"ace": 0, "slot": 0, "material": "PETG", "color": "#111111"}])
+        on_disk = json.loads(Path(main.QUEUE_FILE).read_text(encoding="utf-8"))
+        assert on_disk[job_id]["filename"] == "vase.gcode"
+        assert on_disk[job_id]["slot_snapshot"]["0:0"]["material"] == "PETG"
+
+    def test_staging_is_refused_once_the_queue_is_full(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "QUEUE_MAX", 1)
+        self._seed_entry(main, "existing")
+        r = c.post("/api/preflight/print",
+                   json={"token": "e" * 32, "mode": "slicer", "stage": True})
+        assert r.status_code == 409
+        assert "existing" in main._queue  # untouched
+
+    def test_list_flags_drift_when_a_slot_changed(self, client):
+        c, main, cfg, calls = client
+        # tests/fixtures/mock_state.json's ACE 0 / slot 0 is PLA #d94040 - a
+        # snapshot recorded as PETG can never match it.
+        self._seed_entry(main, "j1",
+                         referenced_slots=[{"ace": 0, "slot": 0}],
+                         slot_snapshot={"0:0": {"material": "PETG",
+                                                "color": "#000000"}})
+        j = c.get("/api/queue?mock=1").json()
+        assert j["mock"] is True
+        row = next(r for r in j["jobs"] if r["id"] == "j1")
+        assert row["drift"]["changed"] is True
+        assert row["drift"]["slots"][0]["was"] == {
+            "material": "PETG", "color": "#000000"}
+
+    def test_list_reports_no_drift_when_the_snapshot_still_matches(self, client):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j2",
+                         referenced_slots=[{"ace": 0, "slot": 0}],
+                         slot_snapshot={"0:0": {"material": "PLA",
+                                                "color": "#d94040"}})
+        j = c.get("/api/queue?mock=1").json()
+        row = next(r for r in j["jobs"] if r["id"] == "j2")
+        assert row["drift"]["changed"] is False
+
+    def test_list_flags_a_file_missing_on_the_printer(self, client, monkeypatch):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j3")
+
+        async def fake_get(path):
+            if path == "/server/files/list?root=gcodes":
+                return {"result": [{"path": "other.gcode"}]}
+            raise AssertionError(f"unexpected GET {path}")
+
+        monkeypatch.setattr(main, "_live_slots_async",
+                            lambda: _async_value([]))
+        monkeypatch.setattr(main, "_mr_get", fake_get)
+        j = c.get("/api/queue").json()
+        row = next(r for r in j["jobs"] if r["id"] == "j3")
+        assert row["missing_on_printer"] is True
+
+    def test_list_degrades_gracefully_when_moonraker_is_unreachable(
+            self, client, monkeypatch):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j4")
+
+        async def boom(path):
+            raise httpx.ConnectError("no route")
+
+        monkeypatch.setattr(main, "_live_slots_async",
+                            lambda: _async_value([]))
+        monkeypatch.setattr(main, "_mr_get", boom)
+        r = c.get("/api/queue")
+        assert r.status_code == 200
+        row = next(j for j in r.json()["jobs"] if j["id"] == "j4")
+        assert row["missing_on_printer"] is False
+
+    def test_launch_starts_the_staged_file_and_drops_it_from_the_queue(
+            self, client):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j5")
+        r = c.post("/api/queue/j5/launch")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "filename": "j5.gcode"}
+        assert calls == ["/printer/print/start"]
+        assert "j5" not in main._queue
+
+    def test_launch_in_mock_mode_never_touches_moonraker(self, client):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j6")
+        r = c.post("/api/queue/j6/launch?mock=1")
+        assert r.status_code == 200
+        assert r.json()["mock"] is True
+        assert calls == []
+        assert "j6" in main._queue  # a pretend launch leaves it staged
+
+    def test_launch_of_an_unknown_id_is_404(self, client):
+        c, main, cfg, calls = client
+        assert c.post("/api/queue/nope/launch").status_code == 404
+
+    def test_launch_failure_leaves_the_job_staged_for_a_retry(
+            self, client, monkeypatch):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j7")
+
+        async def fail_post(path, body=None, timeout=30.0):
+            req = httpx.Request("POST", "http://printer" + path)
+            resp = httpx.Response(500, text="klippy busy", request=req)
+            raise httpx.HTTPStatusError("500", request=req, response=resp)
+
+        monkeypatch.setattr(main, "_mr_post", fail_post)
+        r = c.post("/api/queue/j7/launch")
+        assert r.status_code == 500
+        assert "j7" in main._queue
+
+    def test_delete_removes_the_moonraker_file_and_the_registry_row(
+            self, client, monkeypatch):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j8")
+        deleted = {}
+
+        async def fake_delete(path):
+            deleted["path"] = path
+
+        monkeypatch.setattr(main, "_mr_delete", fake_delete)
+        r = c.delete("/api/queue/j8")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "deleted": "j8"}
+        assert deleted["path"] == "/server/files/gcodes/multiace-queue/j8-j8.gcode"
+        assert "j8" not in main._queue
+
+    def test_delete_is_idempotent_when_moonraker_already_lost_the_file(
+            self, client, monkeypatch):
+        c, main, cfg, calls = client
+        self._seed_entry(main, "j9")
+
+        async def fake_delete(path):
+            req = httpx.Request("DELETE", "http://printer" + path)
+            resp = httpx.Response(404, text="not found", request=req)
+            raise httpx.HTTPStatusError("404", request=req, response=resp)
+
+        monkeypatch.setattr(main, "_mr_delete", fake_delete)
+        r = c.delete("/api/queue/j9")
+        assert r.status_code == 200
+        assert "j9" not in main._queue
+
+    def test_delete_of_an_unknown_id_is_a_no_op(self, client):
+        c, main, cfg, calls = client
+        r = c.delete("/api/queue/nope")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "deleted": "nope"}
+
+
+def _raw_ace_status(*, slot0_status="ready", slot0_gate=1, slot0_rfid=0,
+                    slot0_color=None, remember_filament=None):
+    """Minimal raw moonraker-shaped status dict for _parse_state(): one
+    ACE, four slots, slot 0 is the one under test."""
+    def _slot(idx, status="empty", rfid=0, color=None):
+        return {"index": idx, "status": status, "rfid": rfid,
+                "material": "PLA" if status != "empty" else "",
+                "brand": "Generic" if status != "empty" else "",
+                "sku": "", "subtype": "",
+                "color": color if color is not None else [0, 0, 0]}
+
+    gate_status = [slot0_gate, 0, 0, 0]
+    ace_obj = {
+        "device_count": 1, "active_device": 0,
+        "head_source": {}, "head_manual": {}, "head_feeder": {},
+        "head_feeder_combo": {}, "head_reader_spool": {},
+        "aces": [{
+            "idx": 0, "connected": True, "protocol": "v2",
+            "status": "ready", "temp": 25,
+            "gate_status": gate_status,
+            "slots": [
+                _slot(0, slot0_status, slot0_rfid,
+                      slot0_color or [217, 64, 64]),
+                _slot(1), _slot(2), _slot(3),
+            ],
+        }],
+        "gate_status": gate_status,
+        "pickup_cleaning": False, "confirm_commands": False,
+        "airprint_detection": False, "quad_replenish": False,
+        "purge_matrix": True, "quad_first": False,
+    }
+    if remember_filament is not None:
+        ace_obj["remember_filament"] = remember_filament
+    return {
+        "ace": ace_obj,
+        "filament_feed left": {}, "filament_feed right": {},
+        "ace_bg_swap": {}, "ace_tipform": {},
+        "print_task_config": {},
+        "save_variables": {"variables": {}},
+        "print_stats": {"state": "standby"},
+        "idle_timeout": {"state": "Idle"},
+    }
+
+
+class TestRememberFilament:
+    """Slot 0's manual override (color/material) should survive a
+    physical eject when ace.remember_filament is on (the default), and
+    keep being dropped when it's explicitly off - matching the toggle
+    added for auto-reassigning a slot's identity on reinsertion."""
+
+    def _seed_override(self, main):
+        key = "0_0"
+        main._slot_overrides[key] = {
+            "ace": 0, "slot": 0, "material": "PLA",
+            "brand": "Generic", "subtype": "", "color": "#3f7fd0",
+        }
+        main._save_overrides_to_disk()
+
+    def test_defaults_to_true_when_firmware_omits_the_field(self, app_env):
+        main, cfg, calls = app_env
+        parsed = main._parse_state(_raw_ace_status())
+        assert parsed["remember_filament"] is True
+
+    def test_reports_false_when_firmware_says_so(self, app_env):
+        main, cfg, calls = app_env
+        parsed = main._parse_state(_raw_ace_status(remember_filament=False))
+        assert parsed["remember_filament"] is False
+
+    def test_override_survives_eject_when_remembering(self, app_env):
+        main, cfg, calls = app_env
+        self._seed_override(main)
+
+        main._parse_state(_raw_ace_status(
+            slot0_status="empty", slot0_gate=0, remember_filament=True))
+        import time
+        time.sleep(main.EJECT_DEBOUNCE_S + 0.1)
+        main._parse_state(_raw_ace_status(
+            slot0_status="empty", slot0_gate=0, remember_filament=True))
+
+        assert "0_0" in main._slot_overrides
+
+        parsed = main._parse_state(_raw_ace_status(
+            slot0_status="ready", slot0_gate=1, remember_filament=True))
+        slot0 = parsed["aces"][0]["slots"][0]
+        assert slot0["material"] == "PLA"
+        assert slot0["color"] == "#3f7fd0"
+
+    def test_override_is_dropped_on_eject_when_not_remembering(self, app_env):
+        main, cfg, calls = app_env
+        self._seed_override(main)
+
+        main._parse_state(_raw_ace_status(
+            slot0_status="empty", slot0_gate=0, remember_filament=False))
+        import time
+        time.sleep(main.EJECT_DEBOUNCE_S + 0.1)
+        main._parse_state(_raw_ace_status(
+            slot0_status="empty", slot0_gate=0, remember_filament=False))
+
+        assert "0_0" not in main._slot_overrides
+
+    def test_fresh_rfid_read_clears_a_stale_override(self, app_env):
+        main, cfg, calls = app_env
+        self._seed_override(main)
+
+        # First poll never saw a chip (rfid=0) - override still governs.
+        parsed = main._parse_state(_raw_ace_status(
+            slot0_status="ready", slot0_gate=1, slot0_rfid=0,
+            remember_filament=True))
+        assert parsed["aces"][0]["slots"][0]["color"] == "#3f7fd0"
+
+        # A different, chipped spool gets read into the same slot.
+        parsed = main._parse_state(_raw_ace_status(
+            slot0_status="ready", slot0_gate=1, slot0_rfid=2,
+            slot0_color=[0, 255, 0], remember_filament=True))
+        assert "0_0" not in main._slot_overrides
+        slot0 = parsed["aces"][0]["slots"][0]
+        assert slot0["source"] == "rfid"
+        assert slot0["color"] == "#00ff00"

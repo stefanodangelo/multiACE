@@ -980,9 +980,18 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                      remap_override=None, head_assignment=None,
                      head_plan="loadout", fuzzy=DEFAULT_FUZZY,
                      set_stage=None, stage_cb=None, cost_params=None,
-                     meta=None) -> str:
+                     meta=None) -> tuple:
     """Run the rewrite pipeline on src_path, ping-ponging between tmp_a/tmp_b,
-    and return the path holding the final print-ready gcode.
+    and return (path, resolved_slots): the path holding the final print-ready
+    gcode, plus the sorted, deduplicated list of {"ace", "slot"} dicts the
+    chosen plan actually depends on.
+
+    resolved_slots exists for staging (plan §"Print Queue"): a plan queued
+    for later needs to know which physical spools it assumed, so a caller can
+    detect drift if those spools change before the file is launched. It is
+    computed here rather than by the caller because for optimize/layer/
+    head-optimize/head-layer/head-color the assignment is computed INSIDE
+    this function and never otherwise surfaces.
 
     Pure: operates only on file paths (real temp files in the backend, MEMFS
     paths under Pyodide) + the post-processor primitives. The caller handles
@@ -1133,7 +1142,11 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
             pp.inject_auto_load_to_file(
                 str(cur), str(nxt), stage_cb(70.0, 12.0), set(ace_heads))
         cur, nxt = nxt, cur
-        return str(cur)
+        resolved = sorted({
+            (e["ace"], e["slot"]) for e in assignment.values()
+            if e.get("kind") == "ace" and e.get("slot") != "feeder"
+            and e.get("ace") is not None})
+        return str(cur), [{"ace": a, "slot": s} for a, s in resolved]
 
     if mode == "slicer":
         if remap_override is not None:
@@ -1189,4 +1202,39 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
     set_stage("inject_auto_load", 75.0)
     pp.inject_auto_load_to_file(str(cur), str(nxt), stage_cb(75.0, 10.0))
     cur, nxt = nxt, cur
-    return str(cur)
+    full_remap = {t: remap.get(t, t) for t in range(len(slicer_colors))}
+    resolved = sorted({(v // 4, v % 4) for v in full_remap.values()})
+    return str(cur), [{"ace": a, "slot": s} for a, s in resolved]
+
+def print_prefs_line(bed_mesh: bool, camera: bool) -> str:
+    """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
+    FORCE=1 is required: the line is the first line of the uploaded file, which
+    already runs with print_stats.state == 'printing', and stock rejects a
+    non-forced preference change there (error 531). FORCE=1 bypasses that gate
+    (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
+    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
+    intentionally left off here (separate topic)."""
+    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
+            "TIME_LAPSE_CAMERA=%d FORCE=1"
+            % (1 if bed_mesh else 0, 1 if camera else 0))
+
+def prepend_print_prefs(in_path: str, out_path: str,
+                        bed_mesh: bool = False, camera: bool = False) -> None:
+    """Stream-copy in_path to out_path with the print-preference line
+    prepended at the very top (before the start gcode's calibration).
+    Any SET_PRINT_PREFERENCES the slicer already emits is commented out
+    so it can't override ours from further down the file.
+
+    Shared, streaming, file-to-file - one implementation both the backend
+    (real temp files) and the browser's Pyodide worker (MEMFS paths) call,
+    instead of the worker re-porting the same regex/replace rule over a
+    JS string it would otherwise have to hold in memory whole."""
+    with open(out_path, "w", encoding="utf-8", errors="replace") as out:
+        out.write("; multiACE preflight: print preferences\n")
+        out.write(print_prefs_line(bed_mesh, camera) + "\n")
+        with open(in_path, "r", encoding="utf-8", errors="replace") as src:
+            for line in src:
+                if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
+                    out.write("; multiACE disabled: " + line.lstrip())
+                    continue
+                out.write(line)

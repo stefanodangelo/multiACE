@@ -78,6 +78,14 @@ Covers everything merged across 0.99.9b–0.99.13b. (0.99.11b was pulled for ins
 
 See it in action: https://youtu.be/9uLE1uydWmo
 
+## Tabs in action
+
+| Loadout tab | Preflight tab |
+|---|---|
+| ![Loadout tab — ACEs, toolheads, and saved loadouts](docs/assets/loadout.png) | ![Preflight tab — G-code preview, colour mapping, and time/cost estimate](docs/assets/preflight.png) |
+| Assign slots to toolheads, load/unload, and save/apply loadouts. | Upload G-code, map colours to loaded spools, and preview the estimated swaps, time, and cost before printing. |
+| ![Loadout tab demo](docs/assets/loadout.gif) | ![Preflight tab demo](docs/assets/preflight.gif) |
+
 ## ACE Pro 2 support
 
 Up to 4 units, or mixed with ACE Pro (V1) units — 4 total regardless of type. Requires ACE Pro 2 firmware **1.1.31**.

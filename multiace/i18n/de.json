@@ -13,11 +13,12 @@
     },
     "tabs": {
       "dashboard": "Beladung",
-      "monitor": "Dashboard",
+      "monitor": "Control",
       "dry": "Trocknen",
       "config": "Konfiguration",
       "display": "Display",
       "history": "Verlauf",
+      "queue": "Warteschlange",
       "spools": "Spulen"
     },
     "common": {
@@ -179,6 +180,9 @@
       "confirm_commands": "Befehle bestätigen",
       "confirm_commands_label": "Vor Laden/Entladen im Web-UI nachfragen",
       "confirm_commands_hint": "Rückfrage vor jeder Aktion, die Filament bewegt (Laden, Entladen, Alle laden, Alle entladen). Nur Web-UI - gcode, Display und Druck sind nie betroffen. Gilt sofort (kein Speichern nötig) und wird auf dem Drucker gespeichert, also auf jedem Gerät.",
+      "remember_filament": "Letztes Filament merken",
+      "remember_filament_label": "Beschriftung und Spulen-Zuordnung eines Slots beim Entfernen des Filaments behalten",
+      "remember_filament_hint": "Wird ein Filament ohne RFID-Chip aus einem ACE-Slot entnommen, bleiben die manuell zugewiesene Farbe/das Material sowie die Verknüpfung zur Spule erhalten, statt gelöscht zu werden, und werden beim erneuten Einlegen automatisch wieder angeboten - über den Slot-Picker lässt sich jederzeit etwas anderes wählen. Ein frisch gelesener RFID-Chip hat immer Vorrang vor einer gemerkten Beschriftung. Standardmäßig aktiviert.",
       "pickup_cleaning_label": "Düse nach Tool-Pickups ohne Reinigungs-Move wischen",
       "pickup_cleaning_hint": "Nach einem gleichfarbigen Tool-Pickup ohne Swap/Flush entfernt ein kurzer Düsen-Wisch an der Discard-Position den Ooze-Faden des geparkten Kopfes (echte Swaps und Hintergrund-Ankünfte wischen bereits). Kostet einen Discard-Ausflug pro Pickup; wirkt auf den nächsten preflighteten Druck.",
       "airprint_detection": "Air-Print Detection",
@@ -413,10 +417,6 @@
       "est_swaps": "{inline} inline / {bg} Hintergrund-Wechsel",
       "est_per_color": "Pro Farbe",
       "est_purge": "Purge",
-      "download": "Umgeschriebenen G-Code herunterladen",
-      "download_hint": "Die Datei speichern, die multiACE drucken würde, statt sie zu drucken.",
-      "download_done": "{name} heruntergeladen",
-      "download_local_only": "Download gibt es nur für den Browser-Preflight.",
       "timeline": "Wechsel-Zeitleiste",
       "rejected_title": "Datei bereits verarbeitet",
       "forca_detected": "FOrcaSlicer-Datei",
@@ -433,12 +433,32 @@
       "forca_undeclared": "die Datei nennt keine Duese - im Slicer zuordnen",
       "forca_dia_absent": "braucht eine {dia}-mm-Duese - kein Kopf hat eine",
       "forca_no_head": "kein passender Kopf",
-      "forca_no_head_hint": "diese Farben koennen so nicht auf diesem Drucker gedruckt werden"
+      "forca_no_head_hint": "diese Farben koennen so nicht auf diesem Drucker gedruckt werden",
+      "stage_for_later": "Für später vormerken",
+      "stage_for_later_hint": "Lädt den umgeschriebenen G-Code dieser Anordnung auf den Drucker hoch, ohne zu starten - über den Warteschlange-Tab jederzeit startbar, sobald der Drucker frei ist."
     },
     "queue": {
       "send_all_tooltip": "Alle Queue-Befehle an den Drucker senden (UI darf danach geschlossen werden)",
       "send_all_done": "{count} Befehle an den Drucker gesendet",
-      "send_all_failed": "Senden fehlgeschlagen"
+      "send_all_failed": "Senden fehlgeschlagen",
+      "title": "Druck-Warteschlange",
+      "empty": "Keine vorgemerkten Dateien. Im Preflight-Dialog eine Anordnung vormerken, um sie hier zu sehen.",
+      "staged_at": "Vorgemerkt",
+      "file": "Datei",
+      "mode": "Anordnung",
+      "launch": "Starten",
+      "delete": "Löschen",
+      "staged": "Vorgemerkt: {name}",
+      "drifted": "Belegung geändert",
+      "missing": "fehlt auf dem Drucker",
+      "missing_hint": "Diese Datei ist nicht mehr im Speicher des Druckers (außerhalb von multiACE entfernt) - Starten ist deaktiviert. Der Eintrag kann trotzdem gelöscht werden.",
+      "slot_empty": "leer",
+      "drift_tooltip_line": "ACE {ace} / Slot {slot}: war {was}, jetzt {now}",
+      "launch_ok": "Druck gestartet: {name}",
+      "launch_drifted_title": "Belegung hat sich seit dem Vormerken geändert",
+      "launch_drifted_msg": "Ein oder mehrere Spulen, auf die sich diese Anordnung stützt, haben sich seit dem Vormerken von \"{name}\" geändert. Trotzdem starten?",
+      "delete_title": "Diese vorgemerkte Datei löschen?",
+      "delete_msg": "\"{name}\" aus der Warteschlange entfernen? Dies löscht die Datei auch vom Speicher des Druckers."
     },
     "sidebar": {
       "title": "Bereiche",
@@ -521,7 +541,13 @@
       "no_multiace_record": "Kein multiACE-Datensatz für diesen Job - er wurde ohne Preflight gedruckt, oder bevor der Verlauf aufgezeichnet wurde.",
       "ambiguous": "mehrdeutige Zuordnung",
       "ambiguous_hint": "Zwei Drucke dieser Datei starteten innerhalb von 90 s, multiACE kann den Datensatz nicht sicher zuordnen. Wird ungejoint gezeigt statt geraten.",
-      "open_printer_ui": "In der Drucker-Oberfläche öffnen"
+      "open_printer_ui": "In der Drucker-Oberfläche öffnen",
+      "reprint": "Erneut drucken",
+      "reprint_hint": "Diese Datei erneut drucken, genau wie sie auf dem Drucker liegt - kein Preflight, kein Umschreiben.",
+      "reprint_title": "Diese Datei erneut drucken?",
+      "reprint_msg": "\"{name}\" erneut drucken? Es wird die Datei verwendet, wie sie bereits auf dem Drucker liegt - Beladung und Preflight werden nicht erneut geprüft.",
+      "reprint_ok": "Erneut drucken",
+      "reprint_started": "Erneuter Druck gestartet: {name}"
     },
     "virtual": {
       "title": "Was-wäre-wenn-Bestückung (rührt den Drucker nicht an)",
