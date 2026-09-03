@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Second Take"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "ec9dc95"
+MULTIACE_BUILD_TAG = "ba1f3fe"
 MULTIACE_BUNDLE_SHA1 = "9ba7849"
 
 def _load_i18n_catalog(i18n_dir, lang):
