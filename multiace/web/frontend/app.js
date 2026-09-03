@@ -5942,6 +5942,60 @@ createApp({
       for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
       return s;
     }
+    // fetch() has no upload-progress event (only download), so a large
+    // upload has nothing to show but a frozen percent for however long it
+    // takes - which is exactly what looked like a hang for a 200+ MB print.
+    // XMLHttpRequest's upload.onprogress is the one thing that gives real
+    // bytes-sent progress for a browser-originated upload, cross-browser
+    // (including Safari, unlike a streaming fetch request body).
+    function xhrUpload(url, formData, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url);
+        xhr.upload.onprogress = (ev) => {
+          if (onProgress) onProgress(ev.loaded, ev.lengthComputable ? ev.total : 0);
+        };
+        xhr.onload = () => {
+          let body = {};
+          try { body = JSON.parse(xhr.responseText); } catch (_) {}
+          resolve({ok: xhr.status >= 200 && xhr.status < 300,
+                   status: xhr.status, statusText: xhr.statusText, body});
+        };
+        xhr.onerror = () => reject(new Error("network error"));
+        xhr.onabort = () => reject(new Error("upload aborted"));
+        xhr.send(formData);
+      });
+    }
+    function _formatEta(seconds) {
+      if (!isFinite(seconds) || seconds < 0) return "";
+      if (seconds < 1) return "<1s";
+      if (seconds < 60) return `${Math.ceil(seconds)}s`;
+      const m = Math.floor(seconds / 60);
+      const s = Math.round(seconds % 60);
+      return `${m}m ${s.toString().padStart(2, "0")}s`;
+    }
+    // Bytes-sent -> {percent within [base,base+span], eta label} tracker for
+    // an upload progress bar. Smooths the instantaneous rate with an EMA so
+    // the ETA doesn't jump around on every progress tick (those can arrive
+    // in uneven bursts depending on the network stack).
+    function _uploadEtaTracker(base, span) {
+      let lastLoaded = 0, lastT = Date.now(), speed = 0;
+      return (loaded, total) => {
+        const now = Date.now();
+        const dt = (now - lastT) / 1000;
+        if (dt > 0.15) {
+          const inst = Math.max(0, (loaded - lastLoaded) / dt);
+          speed = speed ? (speed * 0.7 + inst * 0.3) : inst;
+          lastLoaded = loaded; lastT = now;
+        }
+        const frac = total > 0 ? Math.min(1, loaded / total) : 0;
+        const remaining = total > 0 && speed > 0 ? (total - loaded) / speed : null;
+        return {
+          percent: base + frac * span,
+          eta: remaining != null ? _formatEta(remaining) : "",
+        };
+      };
+    }
     async function _startLocalPreflightPrint(mode, headPlan, stage) {
       const rep = preflight.report;
       if (!rep || !preflightFile || !preflightJobId) return;
@@ -5969,7 +6023,7 @@ createApp({
             percent: Number(msg.percent || 0),
             stage:   String(msg.stage || ""), running: true};
         });
-        preflight.progress = {percent: 90, stage: "upload", running: true};
+        preflight.progress = {percent: 90, stage: "upload", running: true, eta: ""};
         const displayName = rep.filename || preflightFile.name;
         const queueId = stage ? _hexId32() : "";
         const fd = new FormData();
@@ -5979,8 +6033,12 @@ createApp({
         fd.append("file",
           new Blob(j.chunks || [], {type: "application/octet-stream"}),
           stage ? `${queueId}-${displayName}` : displayName);
-        const r = await fetch("/server/files/upload", {method: "POST", body: fd});
-        const body = await r.json().catch(() => ({}));
+        const trackUpload = _uploadEtaTracker(90, 9);
+        const r = await xhrUpload("/server/files/upload", fd, (loaded, total) => {
+          const {percent, eta} = trackUpload(loaded, total);
+          preflight.progress = {percent, stage: "upload", running: true, eta};
+        });
+        const body = r.body || {};
         if (!r.ok) {
           const detail = body.error || body.detail || body.message
             || `${r.status} ${r.statusText}`;
@@ -6001,7 +6059,7 @@ createApp({
           const rj = await rr.json().catch(() => ({}));
           if (!rr.ok) throw new Error(rj.detail || `${rr.status}`);
         }
-        preflight.progress = {percent: 100, stage: "done", running: true};
+        preflight.progress = {percent: 100, stage: "done", running: true, eta: ""};
         const elapsed = Date.now() - startedAt;
         const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
         if (wait > 0) await new Promise(res => setTimeout(res, wait));
@@ -6088,11 +6146,12 @@ createApp({
             percent: Number(last.percent || 0),
             stage:   String(last.stage || ""),
             running: !last.done,
+            eta:     last.eta_s != null ? _formatEta(Number(last.eta_s)) : "",
           };
           if (last.done) break;
         }
         if (last.error) throw new Error(last.error);
-        preflight.progress = {percent: 100, stage: "done", running: true};
+        preflight.progress = {percent: 100, stage: "done", running: true, eta: ""};
         const elapsed = Date.now() - startedAt;
         const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
         if (wait > 0) {

@@ -249,6 +249,7 @@
       "stage_print_prefs": "设置打印首选项",
       "stage_upload": "正在上传到打印机",
       "stage_done": "完成",
+      "eta_remaining": "剩余约 {eta}",
       "skip_calibration": "跳过热床调平、流量校准和延时摄影",
       "swaps_label": "次换料",
       "not_feasible": "不可行",

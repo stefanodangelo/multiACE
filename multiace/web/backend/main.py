@@ -1505,6 +1505,57 @@ def _stage_progress(state: dict, base: float, span: float):
         state["ts"] = time.time()
     return cb
 
+class _ProgressFileReader:
+    """Wraps an open binary file so httpx's multipart encoder streams it
+    straight from disk - never buffering the whole thing in RAM the way a
+    plain fh.read() would - while a per-chunk callback drives upload
+    percent/ETA. httpx's multipart encoder reads a file-like object in
+    fixed-size chunks via .read(size), which this just forwards."""
+    def __init__(self, f, on_read):
+        self._f = f
+        self._on_read = on_read
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._f.read(size)
+        if chunk and self._on_read is not None:
+            self._on_read(len(chunk))
+        return chunk
+
+    def seek(self, *a, **kw):
+        return self._f.seek(*a, **kw)
+
+    def tell(self):
+        return self._f.tell()
+
+def _upload_progress_tracker(state: dict, base: float, span: float, total: int):
+    """Bytes-read -> (state["percent"] within [base,base+span], state["eta_s"])
+    tracker for the Moonraker upload stage, fed by _ProgressFileReader's
+    per-chunk callback. A large upload used to sit frozen on one percent
+    value (and, before that, block on a whole-file fh.read() first) for
+    however long the transfer took - indistinguishable from a hang.
+    Mirrors the frontend's _uploadEtaTracker (app.js) so both upload paths
+    (browser-direct and server-side) behave the same way."""
+    # "done" accumulates every call; "sample_done"/"sample_t" only advance
+    # when a speed sample is taken (>=0.15s apart), so the instantaneous
+    # rate is measured over that interval rather than over every single
+    # (much smaller, much noisier) chunk callback.
+    t = {"done": 0, "sample_done": 0, "sample_t": time.time(), "bps": 0.0}
+    def cb(nbytes: int) -> None:
+        t["done"] = min(total, t["done"] + nbytes)
+        now = time.time()
+        dt = now - t["sample_t"]
+        if dt > 0.15:
+            inst = max(0.0, (t["done"] - t["sample_done"]) / dt)
+            t["bps"] = (t["bps"] * 0.7 + inst * 0.3) if t["bps"] else inst
+            t["sample_done"] = t["done"]
+            t["sample_t"] = now
+        frac = (t["done"] / total) if total > 0 else 0.0
+        state["percent"] = max(state.get("percent", 0.0), base + span * frac)
+        state["ts"] = now
+        state["eta_s"] = (max(0.0, (total - t["done"]) / t["bps"])
+                          if total > 0 and t["bps"] > 0 else None)
+    return cb
+
 # _print_prefs_line / _prepend_print_prefs moved to preflight_core (shared,
 # streaming file-to-file) so the browser's Pyodide worker runs the SAME
 # implementation instead of re-porting the regex/replace rule over a JS
@@ -1589,12 +1640,16 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                 "staged job first")
 
         _set_stage(state, "upload", 85.0)
+        state["eta_s"] = None
         queue_relname = f"{job_id}-{safe_name}" if stage else safe_name
-        with open(cur, "rb") as fh:
-            result = await _upload_to_moonraker(
-                queue_relname, fh.read(), "application/octet-stream",
-                start_print=not stage,
-                dest_path="multiace-queue" if stage else None)
+        upload_total = cur.stat().st_size
+        result = await _upload_to_moonraker(
+            queue_relname, None, "application/octet-stream",
+            start_print=not stage,
+            dest_path="multiace-queue" if stage else None,
+            src_path=cur,
+            progress_cb=_upload_progress_tracker(state, 85.0, 15.0, upload_total))
+        state["eta_s"] = None
         state["moonraker"] = result.get("moonraker")
 
         if stage:
@@ -1835,6 +1890,9 @@ async def preflight_print_status(job_id: str) -> dict:
         "mode":    state.get("mode"),
         "queued":   bool(state.get("queued")),
         "queue_id": state.get("queue_id"),
+        # Seconds remaining, only meaningful during the "upload" stage of a
+        # large print - see _upload_progress_tracker. None once past it.
+        "eta_s":    state.get("eta_s"),
     }
 
 @app.get("/api/preflight/pysrc")
@@ -2847,10 +2905,12 @@ def _safe_gcode_name(raw_name: str) -> str:
         raise HTTPException(status_code=400, detail="not a g-code file")
     return safe_name
 
-async def _upload_to_moonraker(safe_name: str, data: bytes,
+async def _upload_to_moonraker(safe_name: str, data: bytes | None,
                                content_type: str | None,
                                start_print: bool,
-                               dest_path: str | None = None) -> dict:
+                               dest_path: str | None = None,
+                               src_path: Path | None = None,
+                               progress_cb=None) -> dict:
     """Upload a g-code to Moonraker.
 
     `start_print` is a parameter rather than a hardcoded "true" so a caller
@@ -2858,14 +2918,35 @@ async def _upload_to_moonraker(safe_name: str, data: bytes,
     under that subdirectory of root (e.g. "multiace-queue") instead of the
     gcodes root itself - used by the print queue so staged files don't
     clutter the normal file list.
+
+    Pass EITHER `data` (small in-memory uploads, e.g. /api/upload-and-print)
+    OR `src_path` (+ optional `progress_cb(nbytes_read)`, see
+    _upload_progress_tracker) to stream a large file straight from disk
+    instead of buffering it whole - the rewrite/print pipeline, whose
+    output can be a multi-hundred-MB gcode file, uses the latter. Without
+    this a caller reading the whole file into RAM first, then handing it
+    here, meant the upload looked frozen for however long the transfer
+    took: no percent moved and nothing distinguished "still going" from
+    "hung".
     """
-    files = {"file": (safe_name, data,
-                      content_type or "application/octet-stream")}
     payload = {"root": "gcodes", "print": "true" if start_print else "false"}
     if dest_path:
         payload["path"] = dest_path
+    fh = None
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        if src_path is not None:
+            fh = open(src_path, "rb")
+            body = _ProgressFileReader(fh, progress_cb) if progress_cb else fh
+            files = {"file": (safe_name, body,
+                              content_type or "application/octet-stream")}
+        else:
+            files = {"file": (safe_name, data,
+                              content_type or "application/octet-stream")}
+        # Large uploads over a slow/embedded-host LAN can legitimately take
+        # minutes; the old flat 300s timeout could fire on a big-but-healthy
+        # transfer. Connect fails fast, read/write get real headroom.
+        timeout = httpx.Timeout(30.0, read=1800.0, write=1800.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{MOONRAKER_URL}/server/files/upload",
                                   data=payload, files=files)
             r.raise_for_status()
@@ -2875,6 +2956,9 @@ async def _upload_to_moonraker(safe_name: str, data: bytes,
                             detail=f"moonraker: {e.response.text}")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    finally:
+        if fh is not None:
+            fh.close()
 
 @app.post("/api/upload-and-print")
 async def upload_and_print(file: UploadFile = File(...)) -> dict:

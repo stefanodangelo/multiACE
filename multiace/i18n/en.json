@@ -369,6 +369,7 @@
       "stage_print_prefs": "Setting print preferences",
       "stage_upload": "Uploading to printer",
       "stage_done": "Done",
+      "eta_remaining": "~{eta} remaining",
       "skip_calibration": "Skip bed leveling, flow calibration & timelapse",
       "swaps_label": "swaps",
       "apply_loadout": "Apply loadout",

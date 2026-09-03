@@ -665,6 +665,60 @@ class TestPreflightLargeFiles:
         main, cfg, calls = app_env
         assert main._PREFLIGHT_MAX_SIZE == 500 * 1024 * 1024
 
+    def test_progress_file_reader_streams_in_the_caller_s_chunk_size(
+            self, app_env, tmp_path):
+        """httpx's multipart encoder drives this by calling .read(size) in
+        chunks - it must never see the whole file handed back from one
+        call, or the "stream from disk" fix is undone."""
+        main, cfg, calls = app_env
+        src = tmp_path / "big.gcode"
+        src.write_bytes(b"x" * 1000)
+        seen = []
+        with open(src, "rb") as f:
+            reader = main._ProgressFileReader(f, lambda n: seen.append(n))
+            first = reader.read(100)
+            second = reader.read(100)
+            rest = reader.read(10_000)  # asks for more than remains
+        assert len(first) == 100 and len(second) == 100
+        assert len(rest) == 800
+        assert seen == [100, 100, 800]
+
+    def test_upload_progress_tracker_computes_percent_and_eta(
+            self, app_env, monkeypatch):
+        """A large upload used to sit frozen on one percent value for
+        however long the transfer took - indistinguishable from a hang.
+        This tracker is what makes GET .../print/status's percent/eta_s
+        move for real during that stage."""
+        main, cfg, calls = app_env
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(main.time, "time", lambda: clock["t"])
+        state = {}
+        cb = main._upload_progress_tracker(state, base=85.0, span=15.0, total=1000)
+
+        cb(200)
+        assert state["percent"] == pytest.approx(88.0)
+        assert state["eta_s"] is None, "no speed sample yet on the first call"
+
+        clock["t"] += 0.2
+        cb(300)
+        assert state["percent"] == pytest.approx(92.5)
+        assert state["eta_s"] is not None and state["eta_s"] > 0
+
+        clock["t"] += 0.2
+        cb(500)  # done == total
+        assert state["percent"] == pytest.approx(100.0)
+        assert state["eta_s"] == pytest.approx(0.0)
+
+    def test_upload_progress_tracker_percent_never_regresses(
+            self, app_env, monkeypatch):
+        main, cfg, calls = app_env
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(main.time, "time", lambda: clock["t"])
+        state = {"percent": 50.0}  # a later stage than this tracker's own base
+        cb = main._upload_progress_tracker(state, base=0.0, span=10.0, total=1000)
+        cb(1)
+        assert state["percent"] == 50.0, "must not drag percent backwards"
+
 
 class TestVirtualLoadout:
     """§2.2's what-if tool, and §13.6's structural rule for it.
@@ -1158,7 +1212,8 @@ class TestPrintQueue:
         def fake_rewrite(pp, *, src_path, **kw):
             return src_path, resolved_slots
 
-        async def fake_upload(name_, data, ctype, start_print, dest_path=None):
+        async def fake_upload(name_, data, ctype, start_print, dest_path=None,
+                              src_path=None, progress_cb=None):
             seen.update(name=name_, start_print=start_print, dest_path=dest_path)
             return {"ok": True, "filename": name_, "moonraker": {"item": {}}}
 

@@ -374,6 +374,7 @@
       "stage_print_prefs": "Druckeinstellungen setzen",
       "stage_upload": "Hochladen zum Drucker",
       "stage_done": "Fertig",
+      "eta_remaining": "noch ~{eta}",
       "skip_calibration": "Bett-Leveling, Flow-Kalibrierung & Zeitraffer überspringen",
       "swaps_label": "Wechsel",
       "apply_loadout": "Loadout übernehmen",

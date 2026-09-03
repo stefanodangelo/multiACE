@@ -8,6 +8,15 @@
 - Starting the ACE 2 Pro dryer directly above 50 °C can trigger a `ptc_error` in the ACE firmware, requiring a power cycle. Firmware limitation, hit by automatic humidity control whenever it restarts the heater at a stored higher target. Next release works around it with a soft ramp (50 °C, then raise to target after a few minutes).
 - Per-pair purge in the Web UI shows as unchecked even when active. Enable via `ACE_SET_PURGE MATRIX=1` in the Fluidd console; WebUI fix planned.
 
+## What's new in 0.99.16b "Second Take" (since 0.99.15b)
+
+- **Reprint from history** — reprint a file exactly as it's already staged on the printer, no preflight or rewrite re-run, from the print history.
+- **Print queue** — stage a rewritten gcode file without starting it, then launch or delete it later from a new Queue panel instead of only ever printing immediately after preflight.
+- **Remember last filament** (on by default, Config tab) — pulling a bare, non-RFID filament from a slot keeps its manually assigned color/material and spool-library link in place and offers it back the next time something is inserted there, instead of clearing it. A freshly read RFID chip always takes priority over a remembered label.
+- **Large uploads no longer look frozen** — both the browser-direct and server-side upload paths now stream the gcode file straight from disk instead of buffering it whole first, and the preflight progress bar shows a live percent/ETA during upload instead of sitting on one number for however long the transfer takes.
+- Oversized preflight uploads are now rejected off the Content-Length header before the body is read, instead of buffering the whole (too-large) file first — reads to the user as a fast "too large" error instead of a stuck "Analyzing G-code..." dialog. nginx and the upload timeout were tuned to match (streamed through instead of spooled, longer read/write allowance for slow LAN transfers of large files).
+- Added WebRTC as a webcam source option alongside the existing MJPEG stream.
+
 ## What's new in 0.99.15b "Clean Sweep" (since 0.99.14b)
 
 - **Combo (ACE + feeder) mode fully stripped out for now**, not just gated off — the per-head feeder-park-length setting, the `_ace_present` non-connected-ACE guard, and the associated config/UI/tests are removed rather than left dormant. Will come back together once the underlying spool-tracking bug is fixed.

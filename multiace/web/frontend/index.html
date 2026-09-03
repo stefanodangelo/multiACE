@@ -2268,6 +2268,9 @@ reboot</pre>
         <div class="preflight-progress-label">
           {{ stageLabel(preflight.progress.stage) }} -
           {{ Math.round(preflight.progress.percent) }}%
+          <span v-if="preflight.progress.eta">
+            - {{ t('ui.preflight.eta_remaining', {eta: preflight.progress.eta}) }}
+          </span>
         </div>
         <div class="preflight-progress-bar">
           <div class="preflight-progress-fill"
