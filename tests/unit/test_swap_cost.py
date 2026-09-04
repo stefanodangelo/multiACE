@@ -183,6 +183,52 @@ class TestPurgeModel:
         assert model.purge_seconds(0) == 0.0
 
 
+class TestPurgeFromFlushMatrix:
+    """§1: the slicer already computes a real purge volume per transition
+    (flush_volumes_matrix, mm3) - purge_mm_for must prefer that over the
+    colour-distance guess, since guessing on top of a real number would be
+    strictly worse, not additive."""
+
+    def test_the_matrix_value_wins_over_the_guess(self, model):
+        matrix = [[0, 120], [80, 0]]
+        got = model.purge_mm_for(0, 1, matrix, "#000000", "#ffffff")
+        expected = sc.mm3_to_mm(120, sc.DEFAULT_DIAMETER_MM)
+        assert got == pytest.approx(expected)
+
+    def test_no_matrix_falls_back_to_the_guess(self, model):
+        assert model.purge_mm_for(0, 1, None, "#000000", "#ffffff") \
+            == model.purge_mm("#000000", "#ffffff")
+
+    def test_a_first_load_has_no_from_tool_and_falls_back(self, model):
+        matrix = [[0, 120], [80, 0]]
+        assert model.purge_mm_for(None, 1, matrix, None, "#ffffff") \
+            == model.purge_mm(None, "#ffffff")
+
+    def test_an_out_of_range_pair_falls_back(self, model):
+        matrix = [[0, 120], [80, 0]]
+        assert model.purge_mm_for(0, 5, matrix, "#000000", "#ffffff") \
+            == model.purge_mm("#000000", "#ffffff")
+
+    def test_a_zero_cell_falls_back_rather_than_reporting_zero(self, model):
+        """A same-colour transition legitimately purges nothing per the
+        slicer's own matrix, but 0 here is indistinguishable from 'this
+        pair was never sliced' - fall back to the guess (0 by default)."""
+        matrix = [[0, 0], [0, 0]]
+        assert model.purge_mm_for(0, 1, matrix, "#000000", "#ffffff") \
+            == model.purge_mm("#000000", "#ffffff")
+
+    def test_the_matrix_value_is_still_clamped(self):
+        m = sc.SwapCostModel.from_params(dict(CFG, swap_purge_max=50))
+        matrix = [[0, 900], [80, 0]]
+        assert m.purge_mm_for(0, 1, matrix) == 50
+
+    def test_the_material_floor_still_applies(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, purge_material_matrix={"TPU": 90}))
+        matrix = [[0, 10], [80, 0]]
+        assert m.purge_mm_for(0, 1, matrix, material="TPU") >= 90
+
+
 class TestPurgeClamp:
     """The number in the gcode is an upper REQUEST, never an instruction:
     the file may have been sliced against a different machine."""

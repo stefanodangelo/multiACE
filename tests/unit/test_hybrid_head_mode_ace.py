@@ -20,19 +20,11 @@ def ace(ace_module):
     obj.head_feeder = {0: False, 1: True, 2: True, 3: True}
     obj.head_feeder_combo = {0: False, 1: False, 2: False, 3: False}
     obj.head_ace = {0: 0, 1: 1, 2: 2, 3: 3}
-    # A single connected ACE (index 0), the common real-world case. Combo on
-    # a head wired to a higher, non-present ACE index must be refused.
-    obj._ace_devices = ['/dev/serial/by-id/ace0']
-    obj._ace_canonical = None
-    obj._ace_present = set(obj._ace_devices)
     obj._head_source = {0: None, 1: None, 2: None, 3: None}
     obj.feeder_load_length = 1100.0
-    obj._feeder_load_length_head = {}
     obj.feeder_retract_length = None
-    obj._feeder_retract_length_head = {}
     obj.retract_length = 1950.0
     obj.feeder_swap_retract_length = 150.0
-    obj._feeder_swap_retract_length_head = {}
     return obj
 
 
@@ -169,12 +161,10 @@ class TestRestoreHeadSource:
 
 
 class TestFeederLengthAccessors:
-    def test_load_length_falls_back_to_the_global(self, ace):
-        assert ace.feeder_load_length_for(2) == 1100.0
+    """Global only - no per-head overrides."""
 
-    def test_load_length_per_head_override_wins(self, ace):
-        ace._feeder_load_length_head[2] = 1350.0
-        assert ace.feeder_load_length_for(2) == 1350.0
+    def test_load_length_is_global(self, ace):
+        assert ace.feeder_load_length_for(2) == 1100.0
         assert ace.feeder_load_length_for(0) == 1100.0
 
     def test_retract_length_falls_back_to_the_ace_retract_length(self, ace):
@@ -185,29 +175,21 @@ class TestFeederLengthAccessors:
     def test_retract_length_global_override_wins_over_compat_fallback(self, ace):
         ace.feeder_retract_length = 150.0
         assert ace.feeder_retract_length_for(0) == 150.0
-
-    def test_retract_length_per_head_override_wins_over_global(self, ace):
-        ace.feeder_retract_length = 150.0
-        ace._feeder_retract_length_head[0] = 80.0
-        assert ace.feeder_retract_length_for(0) == 80.0
         assert ace.feeder_retract_length_for(1) == 150.0
 
-    def test_swap_retract_length_precedence(self, ace):
+    def test_swap_retract_length_is_global(self, ace):
         assert ace.get_feeder_swap_retract_length(0) == 150.0
-        ace._feeder_swap_retract_length_head[0] = 80.0
-        assert ace.get_feeder_swap_retract_length(0) == 80.0
         assert ace.get_feeder_swap_retract_length(1) == 150.0
 
 
 class TestSetHeadFeederComboGuardRails:
-    """NOTE (2026-08-27): combo mode is temporarily disabled - every
-    ENABLE=1 call now raises immediately (see
-    test_refuses_to_enable_while_combo_mode_is_disabled) before reaching
-    any of the older, more specific guards below. The other ENABLE=1
-    tests here (no-ACE-wiring, head-loaded, ACE-not-connected) still pass,
-    but only because the blanket disable short-circuits first - their own
-    guard logic is dormant until the kill switch is reverted. Left in
-    place as regression coverage for that moment."""
+    """NOTE: combo mode is temporarily disabled - every ENABLE=1 call now
+    raises immediately (see test_refuses_to_enable_while_combo_mode_is_disabled)
+    before reaching any of the older, more specific guards below. The other
+    ENABLE=1 tests here (no-ACE-wiring, head-loaded) still pass, but only
+    because the blanket disable short-circuits first - their own guard
+    logic is dormant until the kill switch is reverted. Left in place as
+    regression coverage for that moment."""
 
     def _gcmd(self, **params):
         class G:
@@ -249,19 +231,6 @@ class TestSetHeadFeederComboGuardRails:
         monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
         ace.save_variables = None
         monkeypatch.setattr(ace, 'log_always', lambda *a, **k: None)
-        gcmd = self._gcmd(HEAD=0, ENABLE=1)
-        with pytest.raises(AssertionError):
-            ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)
-        assert ace.head_feeder_combo[0] is False
-
-    def test_refuses_when_the_heads_ace_is_not_connected(self, ace, monkeypatch):
-        # head 0 is ACE-driven, but wired to ACE 2 while only ACE 0 is present
-        # (the dangling index-based default with fewer units than heads). The
-        # combo tap would enable onto a head that has no selectable slots -
-        # refuse loudly instead.
-        ace.head_ace[0] = 2
-        monkeypatch.setattr(ace, '_head_is_loaded', lambda h: False)
-        monkeypatch.setattr(ace, '_t', lambda k, **kw: k)
         gcmd = self._gcmd(HEAD=0, ENABLE=1)
         with pytest.raises(AssertionError):
             ace.cmd_ACE_SET_HEAD_FEEDER_COMBO(gcmd)

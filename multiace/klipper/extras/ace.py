@@ -17,13 +17,13 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.99.10b"
-MULTIACE_CODENAME = "Resupply Run"
+MULTIACE_VERSION = "0.99.16b"
+MULTIACE_CODENAME = "Second Take"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "4ed8cc9"
-MULTIACE_BUNDLE_SHA1 = "0841c1a"
+MULTIACE_BUILD_TAG = "ba1f3fe"
+MULTIACE_BUNDLE_SHA1 = "9ba7849"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -505,16 +505,15 @@ class MultiAce:
         # can swap between its ACE's slots and the feeder spool mid-print.
         # Orthogonal to head_feeder (which means "no ACE at all" for a head).
         #
-        # TEMPORARILY DISABLED (2026-08-27): the feature isn't working
-        # correctly yet (spool tracking breaks while a combo head is
-        # sourced from its feeder tap - book_spool_use/_spoollink_smid_for
-        # can't build a key for FEEDER_TAP_SOURCE and silently no-op). Force
-        # every head off here so every head_feeder_combo-gated code path
-        # downstream (head_has_feeder_tap, resolve_ambiguous_combo_load,
-        # the preload park-length branch, ...) stays unreachable without
-        # having to touch each of them individually. Revert this block
-        # (and the matching guard in cmd_ACE_SET_HEAD_FEEDER_COMBO) once
-        # the spool-tracking gap is fixed.
+        # DISABLED: the feature isn't working correctly yet (spool tracking
+        # breaks while a combo head is sourced from its feeder tap -
+        # book_spool_use/_spoollink_smid_for can't build a key for
+        # FEEDER_TAP_SOURCE and silently no-op). Force every head off here
+        # so every head_feeder_combo-gated code path downstream
+        # (head_has_feeder_tap, ...) stays unreachable without having to
+        # touch each of them individually. Revert this block (and the
+        # matching guard in cmd_ACE_SET_HEAD_FEEDER_COMBO) once the
+        # spool-tracking gap is fixed.
         self.head_feeder_combo = {}
         for i in range(4):
             if config.getboolean('head_feeder_combo_%d' % i, False):
@@ -523,96 +522,16 @@ class MultiAce:
                     'combo mode is temporarily disabled - ignoring' % i)
             self.head_feeder_combo[i] = False
 
+        # Stock feeder / bowden lengths and ACE feed/retract speeds and
+        # dryer temp/duration are global-only (Config tab) - no per-head or
+        # per-ACE overrides. Only the pre-existing main-section per-slot
+        # load_length_N (self.head_load_length, set up below) remains.
         self.feeder_load_length = config.getfloat(
             'feeder_load_length', 1100., minval=100., maxval=5000.)
-        self._feeder_load_length_head = {}
-        for i in range(4):
-            v = config.getfloat(
-                'feeder_load_length_%d' % i, None, minval=100., maxval=5000.)
-            if v is not None:
-                self._feeder_load_length_head[i] = v
-
-        # Combo head only: how far a stock-feeder PRELOAD (filament inserted
-        # into the port) is allowed to travel before it's considered done -
-        # short of the toolhead sensor, at the Y-splitter entrance, so an
-        # inserted stock spool never sits far enough forward to block the
-        # ACE leg. Ignored for a plain feeder-only head (head_feeder), which
-        # still preloads all the way to the toolhead sensor as before.
-        self.feeder_park_length = config.getfloat(
-            'feeder_park_length', 900., minval=100., maxval=1500.)
-        self._feeder_park_length_head = {}
-        for i in range(4):
-            v = config.getfloat(
-                'feeder_park_length_%d' % i, None, minval=100., maxval=1500.)
-            if v is not None:
-                self._feeder_park_length_head[i] = v
-
         self.feeder_retract_length = config.getfloat(
             'feeder_retract_length', None, minval=0., maxval=2000.)
-        self._feeder_retract_length_head = {}
-        for i in range(4):
-            v = config.getfloat(
-                'feeder_retract_length_%d' % i, None, minval=0., maxval=2000.)
-            if v is not None:
-                self._feeder_retract_length_head[i] = v
-
         self.feeder_swap_retract_length = config.getfloat(
             'feeder_swap_retract_length', 150., minval=0., maxval=2000.)
-        self._feeder_swap_retract_length_head = {}
-        for i in range(4):
-            v = config.getfloat(
-                'feeder_swap_retract_length_%d' % i, None,
-                minval=0., maxval=2000.)
-            if v is not None:
-                self._feeder_swap_retract_length_head[i] = v
-
-        self._ace_section_load_length = {}
-        self._ace_section_load_length_slot = {}
-        self._ace_section_retract_length = {}
-        self._ace_section_retract_length_slot = {}
-        self._ace_section_swap_retract_length = {}
-        self._ace_section_swap_retract_length_slot = {}
-        self._ace_section_feed_speed = {}
-        self._ace_section_retract_speed = {}
-        for ace_sec in config.get_prefix_sections('ace '):
-            sec_name = ace_sec.get_name()
-            try:
-                ace_i = int(sec_name.split()[1])
-            except (IndexError, ValueError):
-                continue
-            ll = ace_sec.getint('load_length', None, minval=1)
-            if ll is not None:
-                self._ace_section_load_length[ace_i] = ll
-            rl = ace_sec.getint('retract_length', None, minval=1)
-            if rl is not None:
-                self._ace_section_retract_length[ace_i] = rl
-
-            srl = ace_sec.getint('swap_retract_length', None, minval=0, maxval=2000)
-            if srl is not None:
-                self._ace_section_swap_retract_length[ace_i] = srl
-            fs = ace_sec.getint('feed_speed', None, minval=1)
-            if fs is not None:
-                self._ace_section_feed_speed[ace_i] = fs
-            rs = ace_sec.getint('retract_speed', None, minval=1)
-            if rs is not None:
-                self._ace_section_retract_speed[ace_i] = rs
-            for slot_i in range(4):
-                ll_s = ace_sec.getint('load_length_%d' % slot_i, None, minval=1)
-                if ll_s is not None:
-                    self._ace_section_load_length_slot[(ace_i, slot_i)] = ll_s
-                rl_s = ace_sec.getint('retract_length_%d' % slot_i, None, minval=1)
-                if rl_s is not None:
-                    self._ace_section_retract_length_slot[(ace_i, slot_i)] = rl_s
-                srl_s = ace_sec.getint('swap_retract_length_%d' % slot_i, None,
-                                       minval=0, maxval=2000)
-                if srl_s is not None:
-                    self._ace_section_swap_retract_length_slot[(ace_i, slot_i)] = srl_s
-
-        self.ace_dryer_temp = {}
-        self.ace_dryer_duration = {}
-        for i in range(4):
-            self.ace_dryer_temp[i] = config.getint('dryer_temp_%d' % i, self.dryer_temp)
-            self.ace_dryer_duration[i] = config.getint('dryer_duration_%d' % i, self.dryer_duration)
 
         def _parse_idx_list(key):
             raw = config.get(key, '').strip()
@@ -647,6 +566,15 @@ class MultiAce:
                 'ace__confirm_commands', None)
             if _sv is not None:
                 self._confirm_commands = bool(_sv)
+
+        _cfg_remember_filament = config.getboolean('remember_filament', True)
+        self._remember_filament = _cfg_remember_filament
+        self._remember_filament_cfg = _cfg_remember_filament
+        if self.save_variables:
+            _sv = self.save_variables.allVariables.get(
+                'ace__remember_filament', None)
+            if _sv is not None:
+                self._remember_filament = bool(_sv)
 
         self.auto_dry_default = {
             'enabled': config.getboolean('auto_dry', False),
@@ -752,7 +680,7 @@ class MultiAce:
         self._v2_assist_confirm_time = config.getfloat(
             'v2_assist_confirm_time', 0.5, minval=0.0, maxval=5.0)
 
-        self._update_repo = config.get('update_repo', 'decay71/multiACE').strip()
+        self._update_repo = config.get('update_repo', 'stefanodangelo/multiACE').strip()
         self._update_prerelease = config.getboolean('update_prerelease', False)
 
         self._update_url_base = config.get('update_url_base', '').strip()
@@ -1248,6 +1176,11 @@ class MultiAce:
             'ACE_SET_CONFIRM_COMMANDS',
             self.cmd_ACE_SET_CONFIRM_COMMANDS,
             desc='[multiACE] Toggle web load/unload confirmation (ENABLE=0|1), live + persist')
+        self.gcode.register_command(
+            'ACE_SET_REMEMBER_FILAMENT',
+            self.cmd_ACE_SET_REMEMBER_FILAMENT,
+            desc='[multiACE] Keep a slot\'s color/material label and spool '
+                 'binding across physical removal (ENABLE=0|1), live + persist')
         self.gcode.register_command(
             'ACE_FW_RELEASE',
             self.cmd_ACE_FW_RELEASE,
@@ -2379,101 +2312,44 @@ class MultiAce:
         self._queue = None
 
     def get_load_length(self, ace_idx, slot):
-        """Lookup load_length with per-ACE/per-slot override priority."""
-        v = self._ace_section_load_length_slot.get((ace_idx, slot))
-        if v is not None:
-            return v
-        v = self._ace_section_load_length.get(ace_idx)
-        if v is not None:
-            return v
+        """Lookup load_length: global, with the pre-existing main-section
+        per-slot load_length_N compat fallback."""
         return self.head_load_length.get(slot, self.load_length)
 
     def get_retract_length(self, ace_idx, slot):
-        """Lookup retract_length with per-ACE/per-slot override priority."""
-        v = self._ace_section_retract_length_slot.get((ace_idx, slot))
-        if v is not None:
-            return v
-        v = self._ace_section_retract_length.get(ace_idx)
-        if v is not None:
-            return v
+        """Global retract_length - no per-ACE/per-slot override."""
         return self.retract_length
 
     def get_swap_retract_length(self, ace_idx, slot):
-        """Swap unload retract length with per-ACE/per-slot override
-        priority, falling back to the global swap_retract_length. A value
-        of 0 (empty or explicit) means 'use the normal default retract'."""
-        v = self._ace_section_swap_retract_length_slot.get((ace_idx, slot))
-        if v is not None:
-            return v
-        v = self._ace_section_swap_retract_length.get(ace_idx)
-        if v is not None:
-            return v
+        """Global swap_retract_length - no per-ACE/per-slot override. A
+        value of 0 (empty or explicit) means 'use the normal default
+        retract'."""
         return self.swap_retract_length
 
     def feeder_load_length_for(self, head):
-        """Native stock-feeder load distance ceiling (mm) for HEAD - the
-        feeder-side equivalent of get_load_length. Per-head override wins,
-        else the global feeder_load_length (default 1100, same as the old
-        hardcoded FEED_LOAD_LENGTH_MAX in filament_feed_ace.py). Sensor-
-        stopped like an ACE load - this is only the jam/no-filament abort
-        ceiling, a Y-splitter on a combo head just needs it raised to cover
-        the added tube length."""
-        try:
-            head = int(head)
-        except (TypeError, ValueError):
-            return self.feeder_load_length
-        v = self._feeder_load_length_head.get(head)
-        if v is not None:
-            return v
+        """Native stock-feeder load distance ceiling (mm) - global only
+        (default 1100, same as the old hardcoded FEED_LOAD_LENGTH_MAX in
+        filament_feed_ace.py). Sensor-stopped like an ACE load - this is
+        only the jam/no-filament abort ceiling, a Y-splitter on a combo
+        head just needs it raised (globally) to cover the added tube
+        length."""
         return self.feeder_load_length
-
-    def feeder_park_length_for(self, head):
-        """Combo head only: how far FEED_ACT_PRELOAD drives a stock-feeder
-        insert before stopping, short of the toolhead sensor - at the
-        Y-splitter entrance, not through it. Per-head override wins, else
-        the global feeder_park_length (default 900). Meaningless for a
-        plain feeder-only head, which still preloads to the toolhead
-        sensor as before."""
-        try:
-            head = int(head)
-        except (TypeError, ValueError):
-            return self.feeder_park_length
-        v = self._feeder_park_length_head.get(head)
-        if v is not None:
-            return v
-        return self.feeder_park_length
 
     def feeder_retract_length_for(self, head):
         """Retract distance (mm) to clear a combo head's feeder filament
         past the Y-splitter junction so the ACE can feed through the same
-        shared path. Per-head override wins, else the global
-        feeder_retract_length, else retract_length (compat fallback -
-        matches the pre-existing incidental reuse of the ACE's own
-        retract_length for feeder-head unload probing, so an upgrade with no
-        new config added changes no existing behaviour)."""
-        try:
-            head = int(head)
-        except (TypeError, ValueError):
-            head = None
-        if head is not None:
-            v = self._feeder_retract_length_head.get(head)
-            if v is not None:
-                return v
+        shared path. Global feeder_retract_length, else retract_length
+        (compat fallback - matches the pre-existing incidental reuse of
+        the ACE's own retract_length for feeder-head unload probing, so an
+        upgrade with no new config added changes no existing behaviour)."""
         if self.feeder_retract_length is not None:
             return self.feeder_retract_length
         return self.retract_length
 
     def get_feeder_swap_retract_length(self, head):
         """Mid-print swap retract (mm) for pulling a combo head's feeder
-        filament clear before an ACE-slot swap takes over that head. Per-
-        head override wins, else the global feeder_swap_retract_length."""
-        try:
-            head = int(head)
-        except (TypeError, ValueError):
-            return self.feeder_swap_retract_length
-        v = self._feeder_swap_retract_length_head.get(head)
-        if v is not None:
-            return v
+        filament clear before an ACE-slot swap takes over that head.
+        Global feeder_swap_retract_length only."""
         return self.feeder_swap_retract_length
 
     def get_purge_length(self):
@@ -2586,17 +2462,11 @@ class MultiAce:
             return False
 
     def get_feed_speed(self, ace_idx):
-        """Lookup feed_speed with [ace N] override, falling back to [ace]."""
-        v = self._ace_section_feed_speed.get(ace_idx)
-        if v is not None:
-            return v
+        """Global feed_speed only - no per-ACE override."""
         return self.feed_speed
 
     def get_retract_speed(self, ace_idx):
-        """Lookup retract_speed with [ace N] override, falling back to [ace]."""
-        v = self._ace_section_retract_speed.get(ace_idx)
-        if v is not None:
-            return v
+        """Global retract_speed only - no per-ACE override."""
         return self.retract_speed
 
     def _sync_ptc_to_active_ace(self):
@@ -6408,7 +6278,8 @@ class MultiAce:
                     if (gate_list[i] == GATE_EMPTY
                             and self._connected_per_ace.get(idx, False)
                             and not self._reconnecting_per_ace.get(idx, False)
-                            and not self._slot_still_feeds_filament(idx, i)):
+                            and not self._slot_still_feeds_filament(idx, i)
+                            and not getattr(self, '_remember_filament', True)):
                         self._spool_release_slot(
                             idx, i,
                             'slot went empty' if _gate_prev == GATE_AVAILABLE
@@ -8507,6 +8378,24 @@ class MultiAce:
                                shadow_attr='_confirm_commands_cfg',
                                shadow_val=enable)
         self.log_always('[multiACE] Confirm commands %s%s'
+                        % ('ON' if enable else 'OFF', sfx))
+
+    cmd_ACE_SET_REMEMBER_FILAMENT_help = (
+        '[multiACE] Keep a slot\'s manual color/material label and spool '
+        'binding when its filament is physically removed, so re-inserting '
+        'the same (or another untagged) filament there needs no '
+        're-entry (ENABLE=0|1). A freshly read RFID chip always wins over '
+        'a remembered label. Live + write-through (writes the '
+        'remember_filament config line; PERSIST=0 = until restart).')
+
+    def cmd_ACE_SET_REMEMBER_FILAMENT(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self._remember_filament = enable
+        sfx = self._wt_persist(gcmd, 'remember_filament',
+                               _wt_fmt_bool(enable), 'ace__remember_filament',
+                               shadow_attr='_remember_filament_cfg',
+                               shadow_val=enable)
+        self.log_always('[multiACE] Remember last filament %s%s'
                         % ('ON' if enable else 'OFF', sfx))
 
     cmd_ACE_SET_AIRPRINT_DETECTION_help = (
@@ -10850,72 +10739,6 @@ class MultiAce:
             return False
         return True
 
-    def resolve_ambiguous_combo_load(self, gcmd, head, stock_ready):
-        """Decide ACE vs. feeder tap for a combo head's LOAD when nothing
-        told us which one the caller meant. The OEM touchscreen's Load
-        button (and a runout auto-continue) issue a bare FEED_AUTO LOAD=1
-        with no source parameter at all - _do_feed's LOAD branch would
-        otherwise just read whatever _head_source happened to hold last
-        (head_ace_active_for), silently defaulting to ACE regardless of
-        what the user actually just inserted. Every call site that DOES
-        know the source (ACE_SWAP_HEAD, ACE_LOAD_HEAD, a print's own swap)
-        sets _head_source explicitly before FEED_AUTO runs and never
-        reaches this method - see the _in_internal_load_head guard at the
-        one call site in filament_feed_ace.py.
-
-        Sequential and sensor-only: checked and committed in order, before
-        any physical drive starts, so a stock load and an ACE load can
-        never be attempted at once for the same shared path.
-
-        stock_ready: the feeder inlet's port sensor, read by the caller
-        (filament_feed_ace.py owns self._port, not this module).
-
-        1. Stock feeder first - something is physically staged there.
-        2. Else this head's own ACE slot, if it has filament.
-        3. Else raise: neither source has anything to load.
-        """
-        if stock_ready:
-            if not self.head_source_is_feeder_tap(head):
-                logging.info(
-                    '[multiACE] FEED_AUTO LOAD ambiguous for combo head %d: '
-                    'stock feeder has filament staged - routing to the '
-                    'feeder tap' % head)
-            self._head_source[head] = dict(FEEDER_TAP_SOURCE)
-            self._save_head_source()
-            return
-
-        ace_idx = self.head_ace_for(head)
-        slot = self._ace_slot_for_head(head)
-        info = self._info_per_ace.get(ace_idx, self._make_default_info(ace_idx))
-        slots = info.get('slots', [])
-        slot_status = slots[slot].get('status') if 0 <= slot < len(slots) else None
-        if self._is_empty_status(slot_status):
-            raise self._ace_error(gcmd,
-                'head %d: nothing to load (stock feeder inlet empty, '
-                'ACE %d / Slot %d empty too)'
-                % (self._disp(head), self._disp(ace_idx), self._disp(slot)),
-                code=211, head=head)
-
-        if self.head_source_is_feeder_tap(head):
-            # Was pinned to the feeder tap by an earlier ambiguous load, but
-            # the feeder is empty now and the ACE slot has filament - switch
-            # the routing back, same shape cmd_ACE_LOAD_HEAD's ACE branch
-            # uses to set _head_source.
-            self._head_source[head] = self._inherit_prev_capture(
-                head, ace_idx, slot, self._overlay_override(
-                    ace_idx, slot, {
-                        'ace_index': ace_idx,
-                        'slot': slot,
-                        'type': '',
-                        'color': '',
-                        'brand': '',
-                    }))
-            self._save_head_source()
-        logging.info(
-            '[multiACE] FEED_AUTO LOAD ambiguous for combo head %d: stock '
-            'feeder empty - routing to ACE %d / Slot %d'
-            % (head, ace_idx, slot))
-
     def head_uses_ace(self, head):
 
         if self.head_is_manual(head):
@@ -11215,20 +11038,6 @@ class MultiAce:
         if enable and not self.head_uses_ace(head):
             raise gcmd.error(
                 self._t('msg.head_feeder_combo_needs_ace', head=self._disp(head)))
-
-        # The combo tap only makes sense if this head's wired ACE is actually
-        # connected: a combo head still sources its slots through that ACE, so
-        # a dangling head_ace (e.g. the index-based default head_ace_N=N with
-        # fewer units than heads) leaves the dashboard with no ACE card and no
-        # selectable slots for this head - the tap silently "enables" onto
-        # nothing. Refuse loudly and point at the fix instead of succeeding.
-        if enable:
-            wired = self.head_ace_for(head)
-            if not self._is_ace_present(wired):
-                raise gcmd.error(self._t(
-                    'msg.head_feeder_combo_ace_absent',
-                    head=self._disp(head), ace=self._disp(wired),
-                    count=len(self._ace_devices)))
 
         if on_feeder_tap:
             # Disabling the tap while it is the head's current source would
@@ -14970,8 +14779,8 @@ class MultiAce:
             self.log_always(self._t('msg.ace_not_available',
                 ace=self._disp(ace_idx)))
             return
-        temp = gcmd.get_int('TEMP', self.ace_dryer_temp.get(ace_idx, self.dryer_temp))
-        duration = gcmd.get_int('DURATION', self.ace_dryer_duration.get(ace_idx, self.dryer_duration))
+        temp = gcmd.get_int('TEMP', self.dryer_temp)
+        duration = gcmd.get_int('DURATION', self.dryer_duration)
         self._wait_homing_clear()
         self.gcode.run_script_from_command('ACE_SWITCH TARGET=%d' % ace_idx)
         self.gcode.run_script_from_command('ACE_START_DRYING TEMP=%d DURATION=%d' % (temp, duration))
@@ -15855,6 +15664,7 @@ class MultiAce:
             'mode': getattr(self, '_ace_mode', 'normal'),
             'pickup_cleaning': getattr(self, '_pickup_cleaning', False),
             'confirm_commands': bool(getattr(self, '_confirm_commands', False)),
+            'remember_filament': bool(getattr(self, '_remember_filament', True)),
             'spoolman_url': getattr(self, 'spoolman_url', '') or '',
             'spoolman_auto': bool(getattr(self, 'spoolman_auto', False)),
 
@@ -15878,6 +15688,9 @@ class MultiAce:
                 ('confirm_commands',
                  getattr(self, '_confirm_commands', None),
                  getattr(self, '_confirm_commands_cfg', None)),
+                ('remember_filament',
+                 getattr(self, '_remember_filament', None),
+                 getattr(self, '_remember_filament_cfg', None)),
                 ('language', getattr(self, '_language', None),
                  getattr(self, '_language_cfg', None)),
                 ('spoolman_url', getattr(self, 'spoolman_url', None),

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-REPO="${MULTIACE_UPDATE_REPO:-decay71/multiACE}"
+REPO="${MULTIACE_UPDATE_REPO:-stefanodangelo/multiACE}"
 STATIC_BASE="${MULTIACE_UPDATE_URL_BASE:-}"
 USE_STATIC=0
 if [ -n "$STATIC_BASE" ]; then

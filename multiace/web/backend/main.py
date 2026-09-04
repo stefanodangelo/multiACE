@@ -144,6 +144,17 @@ VIRTUAL_LOADOUT_FILE = os.environ.get(
     "MULTIACE_VIRTUAL_LOADOUT_FILE",
     "/home/lava/printer_data/config/extended/multiace/virtual_loadout.json",
 )
+# The print queue registry (staged, already-rewritten gcode waiting to be
+# launched - see the "Print Queue" section below). Same directory and
+# atomic-write pattern as OVERRIDE_FILE/VIRTUAL_LOADOUT_FILE. Bounded by
+# QUEUE_MAX rather than a TTL: unlike _PREFLIGHT_JOBS these are deliberate,
+# user-kept entries with no natural expiry, but each one is a full gcode
+# file sitting on the printer's own storage.
+QUEUE_FILE = os.environ.get(
+    "MULTIACE_QUEUE_FILE",
+    "/home/lava/printer_data/config/extended/multiace/print_queue.json",
+)
+QUEUE_MAX = int(os.environ.get("MULTIACE_QUEUE_MAX", "10"))
 # multiACE's own runtime data (print history, swap calibration). Written by
 # ace.py, read here - see plan §4.
 MULTIACE_DATA_DIR = os.environ.get(
@@ -363,6 +374,7 @@ def _parse_state(status: dict) -> dict:
     fr = status.get("filament_feed right", {}) or {}
     bg = status.get("ace_bg_swap", {}) or {}
     tf = status.get("ace_tipform", {}) or {}
+    remember_filament = bool(ace.get("remember_filament", True))
 
     device_count = int(ace.get("device_count", 1))
     active_device = int(ace.get("active_device", 0))
@@ -471,12 +483,22 @@ def _parse_state(status: dict) -> dict:
                 if _pending is None:
                     _eject_pending_since[(i, s)] = _now
                 elif _now - _pending >= EJECT_DEBOUNCE_S:
-                    if _drop_override_if_present(i, s):
+                    if not remember_filament and _drop_override_if_present(i, s):
                         overrides_dirty = True
                     _eject_pending_since.pop((i, s), None)
             else:
                 _eject_pending_since.pop((i, s), None)
             rfid_status = sd.get("rfid", 0)
+
+            # A fresh successful chip read always wins over a remembered
+            # override - without this, a manual label left in place by
+            # "remember" would keep shadowing a genuinely different,
+            # RFID-tagged spool inserted into the same physical slot later.
+            if rfid_status == 2 and _last_rfid_status.get((i, s)) != 2:
+                if _drop_override_if_present(i, s):
+                    overrides_dirty = True
+            _last_rfid_status[(i, s)] = rfid_status
+
             rfid_data = None
             if rfid_status == 2:
                 rfid_data = {
@@ -729,6 +751,7 @@ def _parse_state(status: dict) -> dict:
         "mode":               mode,
         "pickup_cleaning":    bool(ace.get("pickup_cleaning", False)),
         "confirm_commands":   bool(ace.get("confirm_commands", False)),
+        "remember_filament":  remember_filament,
         "airprint_detection": bool(ace.get("airprint_detection", False)),
         "quad_replenish": bool(ace.get("quad_replenish", False)),
         "purge_matrix": bool(ace.get("purge_matrix", True)),
@@ -829,6 +852,50 @@ async def _machine_nozzles() -> dict:
 
 app = FastAPI(title="multiACE Web", version=VERSION)
 
+class _RejectOversizedPreflightUpload:
+    """Bare ASGI middleware (not BaseHTTPMiddleware, which buffers the whole
+    body into a Request object before your code ever sees it - exactly what
+    this needs to avoid) that rejects an oversized /api/preflight upload off
+    its Content-Length header, before a single byte of the body is read.
+
+    Without this, FastAPI's File(...) parameter parses the *entire*
+    multipart body into an UploadFile before the endpoint function runs, so
+    a too-large file has to be fully uploaded and buffered - slow at best,
+    and OOM-prone on the printer's embedded host at worst - before the
+    in-handler size check ever gets a chance to reject it. That reads to
+    the user as the preflight dialog hanging on "Analyzing G-code..."
+    forever rather than failing fast with a clear "too large" message.
+    """
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") in (
+                "/api/preflight", "/api/preflight/analyze"):
+            headers = dict(scope.get("headers") or ())
+            raw = headers.get(b"content-length")
+            if raw is not None:
+                try:
+                    length = int(raw)
+                except ValueError:
+                    length = None
+                # +1MB slack for multipart framing overhead around the file's
+                # own bytes (boundary markers, field headers, virtual_slots).
+                if length is not None and length > _PREFLIGHT_MAX_SIZE + (1024 * 1024):
+                    body = json.dumps({
+                        "detail": _oversized_preflight_detail(_PREFLIGHT_MAX_SIZE)
+                    }).encode()
+                    await send({
+                        "type": "http.response.start",
+                        "status": 413,
+                        "headers": [(b"content-type", b"application/json")],
+                    })
+                    await send({"type": "http.response.body", "body": body})
+                    return
+        await self._app(scope, receive, send)
+
+app.add_middleware(_RejectOversizedPreflightUpload)
+
 class MacroRequest(BaseModel):
     name: str
     args: dict[str, Any] | None = None
@@ -903,6 +970,14 @@ async def _mr_post(path: str, body: dict | None = None, timeout: float = 30.0) -
         r = await client.post(f"{MOONRAKER_URL}{path}", json=body or {})
         r.raise_for_status()
         return r.json()
+
+async def _mr_delete(path: str, timeout: float = 30.0) -> None:
+    """DELETE against Moonraker. A 404 (already gone - e.g. removed
+    out-of-band via Fluidd) is swallowed by the caller, not here, since
+    "already gone" is a success for some callers and not others."""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.delete(f"{MOONRAKER_URL}{path}")
+        r.raise_for_status()
 
 _mock_cache: dict[str, tuple[float, Any]] = {}
 
@@ -1006,7 +1081,7 @@ _PREFLIGHT_TTL = 86400.0
 _PREFLIGHT_FUZZY = 30
 
 _PREFLIGHT_MAX_SIZE = int(os.environ.get(
-    "MULTIACE_PREFLIGHT_MAX_MB", "110")) * 1024 * 1024
+    "MULTIACE_PREFLIGHT_MAX_MB", "500")) * 1024 * 1024
 
 _INBOX_DIR = _PREFLIGHT_DIR / "inbox"
 
@@ -1299,6 +1374,46 @@ def _parse_virtual_slots(raw: str | None) -> list[dict]:
             continue
     return out
 
+def _oversized_preflight_detail(limit: int) -> str:
+    return (f"This g-code is too large for in-printer preflight "
+            f"(upload exceeds the {limit // 1024 // 1024} MB limit). The "
+            f"Snapmaker U1 is too slow to analyse files this large. "
+            f"Run the multiACE post-processing script in your slicer "
+            f"instead - it does the same analysis on your PC in "
+            f"seconds - then upload the result directly via Moonraker. "
+            f"Advanced: raise the limit via the "
+            f"MULTIACE_PREFLIGHT_MAX_MB env var.")
+
+async def _stream_upload_to_path(file: UploadFile, dest_path: Path,
+                                 max_size: int) -> int:
+    """Copy an UploadFile to disk in fixed-size chunks instead of buffering
+    the whole thing as one `bytes` object first (the old `await file.read()`
+    could hold a 100+ MB upload in RAM twice over - once as the read buffer,
+    once again as the on-disk write). Enforces `max_size` incrementally so an
+    oversized upload is rejected partway through instead of only after being
+    fully received. Raises HTTPException(413) or (400) and cleans up the
+    partial file on either."""
+    size = 0
+    try:
+        with open(dest_path, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=_oversized_preflight_detail(max_size))
+                out.write(chunk)
+    except BaseException:
+        dest_path.unlink(missing_ok=True)
+        raise
+    if size == 0:
+        dest_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="empty file")
+    return size
+
 @app.post("/api/preflight")
 async def preflight(request: Request, file: UploadFile = File(...),
                     virtual_slots: str | None = Form(default=None)) -> dict:
@@ -1308,37 +1423,26 @@ async def preflight(request: Request, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-    if len(data) > _PREFLIGHT_MAX_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=(f"This g-code is too large for in-printer preflight "
-                    f"({len(data)//1024//1024} MB > "
-                    f"{_PREFLIGHT_MAX_SIZE//1024//1024} MB limit). The "
-                    f"Snapmaker U1 is too slow to analyse files this large. "
-                    f"Run the multiACE post-processing script in your slicer "
-                    f"instead - it does the same analysis on your PC in "
-                    f"seconds - then upload the result directly via Moonraker. "
-                    f"Advanced: raise the limit via the "
-                    f"MULTIACE_PREFLIGHT_MAX_MB env var."))
 
     _cleanup_preflight_dir()
     _PREFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
     import uuid as _uuid
     token = _uuid.uuid4().hex
-    upload_size = len(data)
     src_path = _PREFLIGHT_DIR / (token + ".gcode")
-    src_path.write_bytes(data)
+    upload_size = await _stream_upload_to_path(file, src_path, _PREFLIGHT_MAX_SIZE)
     (_PREFLIGHT_DIR / (token + ".name")).write_text(safe_name, encoding="utf-8")
-    del data
 
     pp = _load_post_processor()
 
+    # parse_meta/build_report are CPU-bound (a regex-per-line scan over the
+    # whole file for parse_meta); running them inline on the event loop
+    # would stall every other client's polling/WebSocket traffic for the
+    # duration of a large-file analyze. to_thread matches the treatment
+    # rewrite_pipeline already gets below.
     with open(src_path, "r", encoding="utf-8", errors="replace") as f:
         (slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta,
-         header_text) = preflight_core.parse_meta(pp, f, with_header=True)
+         header_text) = await asyncio.to_thread(
+            preflight_core.parse_meta, pp, f, with_header=True)
 
     live_slots, head_ctx, mocked = await _preflight_loadout(request)
     virtual = _parse_virtual_slots(virtual_slots)
@@ -1357,7 +1461,8 @@ async def preflight(request: Request, file: UploadFile = File(...),
     # live_slots and only live_slots.
     report_slots = virtual if virtual else live_slots
     try:
-        report = preflight_core.build_report(
+        report = await asyncio.to_thread(
+            preflight_core.build_report,
             pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
             num_aces=num_aces, plan_proxy=plan_proxy, live_slots=report_slots,
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
@@ -1400,33 +1505,62 @@ def _stage_progress(state: dict, base: float, span: float):
         state["ts"] = time.time()
     return cb
 
-def _print_prefs_line(bed_mesh: bool, camera: bool) -> str:
-    """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
-    FORCE=1 is required: the line is the first line of the uploaded file, which
-    already runs with print_stats.state == 'printing', and stock rejects a
-    non-forced preference change there (error 531). FORCE=1 bypasses that gate
-    (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
-    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
-    intentionally left off here (separate topic)."""
-    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
-            "TIME_LAPSE_CAMERA=%d FORCE=1"
-            % (1 if bed_mesh else 0, 1 if camera else 0))
+class _ProgressFileReader:
+    """Wraps an open binary file so httpx's multipart encoder streams it
+    straight from disk - never buffering the whole thing in RAM the way a
+    plain fh.read() would - while a per-chunk callback drives upload
+    percent/ETA. httpx's multipart encoder reads a file-like object in
+    fixed-size chunks via .read(size), which this just forwards."""
+    def __init__(self, f, on_read):
+        self._f = f
+        self._on_read = on_read
 
-def _prepend_print_prefs(in_path: str, out_path: str,
-                         bed_mesh: bool = False, camera: bool = False) -> None:
-    """Stream-copy in_path to out_path with the print-preference line
-    prepended at the very top (before the start gcode's calibration).
-    Any SET_PRINT_PREFERENCES the slicer already emits is commented out
-    so it can't override ours from further down the file."""
-    with open(out_path, "w", encoding="utf-8", errors="replace") as out:
-        out.write("; multiACE preflight: print preferences\n")
-        out.write(_print_prefs_line(bed_mesh, camera) + "\n")
-        with open(in_path, "r", encoding="utf-8", errors="replace") as src:
-            for line in src:
-                if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
-                    out.write("; multiACE disabled: " + line.lstrip())
-                    continue
-                out.write(line)
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._f.read(size)
+        if chunk and self._on_read is not None:
+            self._on_read(len(chunk))
+        return chunk
+
+    def seek(self, *a, **kw):
+        return self._f.seek(*a, **kw)
+
+    def tell(self):
+        return self._f.tell()
+
+def _upload_progress_tracker(state: dict, base: float, span: float, total: int):
+    """Bytes-read -> (state["percent"] within [base,base+span], state["eta_s"])
+    tracker for the Moonraker upload stage, fed by _ProgressFileReader's
+    per-chunk callback. A large upload used to sit frozen on one percent
+    value (and, before that, block on a whole-file fh.read() first) for
+    however long the transfer took - indistinguishable from a hang.
+    Mirrors the frontend's _uploadEtaTracker (app.js) so both upload paths
+    (browser-direct and server-side) behave the same way."""
+    # "done" accumulates every call; "sample_done"/"sample_t" only advance
+    # when a speed sample is taken (>=0.15s apart), so the instantaneous
+    # rate is measured over that interval rather than over every single
+    # (much smaller, much noisier) chunk callback.
+    t = {"done": 0, "sample_done": 0, "sample_t": time.time(), "bps": 0.0}
+    def cb(nbytes: int) -> None:
+        t["done"] = min(total, t["done"] + nbytes)
+        now = time.time()
+        dt = now - t["sample_t"]
+        if dt > 0.15:
+            inst = max(0.0, (t["done"] - t["sample_done"]) / dt)
+            t["bps"] = (t["bps"] * 0.7 + inst * 0.3) if t["bps"] else inst
+            t["sample_done"] = t["done"]
+            t["sample_t"] = now
+        frac = (t["done"] / total) if total > 0 else 0.0
+        state["percent"] = max(state.get("percent", 0.0), base + span * frac)
+        state["ts"] = now
+        state["eta_s"] = (max(0.0, (total - t["done"]) / t["bps"])
+                          if total > 0 and t["bps"] > 0 else None)
+    return cb
+
+# _print_prefs_line / _prepend_print_prefs moved to preflight_core (shared,
+# streaming file-to-file) so the browser's Pyodide worker runs the SAME
+# implementation instead of re-porting the regex/replace rule over a JS
+# string it would otherwise have to hold in memory whole.
+_prepend_print_prefs = preflight_core.prepend_print_prefs
 
 def _prune_old_jobs() -> None:
     now = time.time()
@@ -1447,7 +1581,8 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                                   camera: bool = False,
                                   remap_override: dict | None = None,
                                   head_assignment: dict | None = None,
-                                  head_plan: str = "loadout") -> None:
+                                  head_plan: str = "loadout",
+                                  stage: bool = False) -> None:
     state = _PREFLIGHT_JOBS[job_id]
     pp = _load_post_processor()
     src = _PREFLIGHT_DIR / (token + ".gcode")
@@ -1479,7 +1614,7 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
             except Exception:
                 head_ctx["pickup_cleaning"] = False
 
-        final = await asyncio.to_thread(
+        final, resolved_slots = await asyncio.to_thread(
             preflight_core.rewrite_pipeline, pp,
             src_path=str(src), tmp_a=str(tmp_a), tmp_b=str(tmp_b),
             slicer_colors=slicer_colors, slicer_types=slicer_types,
@@ -1499,22 +1634,38 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                 _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera)
             cur, nxt = nxt, cur
 
+        if stage and len(_queue) >= QUEUE_MAX:
+            raise RuntimeError(
+                f"queue is full ({QUEUE_MAX} max) - launch or delete a "
+                "staged job first")
+
         _set_stage(state, "upload", 85.0)
-        with open(cur, "rb") as fh:
-            files = {"file": (safe_name, fh, "application/octet-stream")}
-            payload = {"root": "gcodes", "print": "true"}
-            try:
-                async with httpx.AsyncClient(timeout=600.0) as client:
-                    r = await client.post(
-                        f"{MOONRAKER_URL}/server/files/upload",
-                        data=payload, files=files)
-                    r.raise_for_status()
-                    state["moonraker"] = r.json()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(f"moonraker {e.response.status_code}: "
-                                   f"{e.response.text}")
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"moonraker: {e}")
+        state["eta_s"] = None
+        queue_relname = f"{job_id}-{safe_name}" if stage else safe_name
+        upload_total = cur.stat().st_size
+        result = await _upload_to_moonraker(
+            queue_relname, None, "application/octet-stream",
+            start_print=not stage,
+            dest_path="multiace-queue" if stage else None,
+            src_path=cur,
+            progress_cb=_upload_progress_tracker(state, 85.0, 15.0, upload_total))
+        state["eta_s"] = None
+        state["moonraker"] = result.get("moonraker")
+
+        if stage:
+            _queue[job_id] = {
+                "id":               job_id,
+                "filename":         safe_name,
+                "relpath":          f"multiace-queue/{queue_relname}",
+                "mode":             mode,
+                "head_plan":        head_plan if mode == "head" else None,
+                "staged_at":        time.time(),
+                "referenced_slots": resolved_slots,
+                "slot_snapshot":    _snapshot_slots(live_slots, resolved_slots),
+            }
+            _save_queue_to_disk()
+            state["queued"]   = True
+            state["queue_id"] = job_id
 
         _set_stage(state, "done", 100.0)
         state["filename"] = safe_name
@@ -1530,6 +1681,133 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
             try: p.unlink()
             except Exception: pass
 
+async def _run_preflight_analyze_job(job_id: str, token: str, safe_name: str,
+                                     src_path: Path, upload_size: int,
+                                     virtual_slots_raw: str | None,
+                                     mocked: bool) -> None:
+    """Job-based counterpart of POST /api/preflight: same parse+build_report
+    work, but run as a background task with percent progress polled via
+    GET /api/preflight/analyze/status, so a large file's UI doesn't just sit
+    on one blocking POST with nothing to show for it."""
+    state = _PREFLIGHT_JOBS[job_id]
+    try:
+        _set_stage(state, "analyze", 0.0)
+        pp = _load_post_processor()
+
+        with open(src_path, "r", encoding="utf-8", errors="replace") as f:
+            (slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta,
+             header_text) = await asyncio.to_thread(
+                preflight_core.parse_meta, pp, f, with_header=True)
+
+        _set_stage(state, "analyze", 60.0)
+
+        if mocked:
+            mock = _mock_load(MOCK_STATE_FILE) or {}
+            live_slots = _live_slots_from_state(mock)
+            head_ctx = await _head_ctx_from_state(mock)
+            spool_prices = _spool_prices_from_state(mock)
+        else:
+            if await _any_head_manual():
+                raise RuntimeError(
+                    "Preflight is disabled while a head is set to manual. "
+                    "Switch the head back to auto, or upload the file "
+                    "directly via Fluidd.")
+            live_slots = await _live_slots_async()
+            head_ctx = await _head_mode_context()
+            spool_prices = _spool_prices_from_state(
+                _parse_state(await _query_state_gated()))
+
+        virtual = _parse_virtual_slots(virtual_slots_raw)
+        if not live_slots and not virtual:
+            raise RuntimeError("no slots are loaded on the printer")
+
+        # The what-if overlay answers "would 2 ACEs beat 1?" without touching
+        # the printer. It NEVER reaches rewrite_pipeline, which reads
+        # live_slots and only live_slots.
+        report_slots = virtual if virtual else live_slots
+        _set_stage(state, "analyze", 75.0)
+        report = await asyncio.to_thread(
+            preflight_core.build_report,
+            pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
+            num_aces=num_aces, plan_proxy=plan_proxy, live_slots=report_slots,
+            head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
+            fuzzy=_PREFLIGHT_FUZZY, header_text=header_text,
+            cost_params=_swap_cost_params(),
+            calibration=_swap_calibration(), meta=meta,
+            spool_prices=spool_prices)
+        if mocked:
+            report["mock"] = True
+        if virtual:
+            # Flagged loudly: a plan computed against spools that are not in
+            # the machine must never look like one that was.
+            report["virtual_loadout"] = True
+            report["virtual_slots"] = virtual
+
+        state["report"] = report
+        state["filename"] = safe_name
+        _set_stage(state, "done", 100.0)
+        state["done"] = True
+    except Exception as exc:
+        state["error"] = str(exc)
+        state["done"]  = True
+        state["ts"]    = time.time()
+
+@app.post("/api/preflight/analyze")
+async def preflight_analyze_start(
+        request: Request, file: UploadFile = File(...),
+        virtual_slots: str | None = Form(default=None)) -> dict:
+    """Async counterpart of POST /api/preflight: streams the upload to disk,
+    kicks off analysis as a background job, and returns immediately with a
+    job_id to poll via GET /api/preflight/analyze/status - the same
+    job/percent pattern already used for /api/preflight/print."""
+    raw_name = file.filename or ""
+    safe_name = os.path.basename(raw_name)
+    if not safe_name or safe_name in (".", "..") or "/" in safe_name or "\\" in safe_name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
+        raise HTTPException(status_code=400, detail="not a g-code file")
+
+    _cleanup_preflight_dir()
+    _PREFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
+    import uuid as _uuid
+    token = _uuid.uuid4().hex
+    src_path = _PREFLIGHT_DIR / (token + ".gcode")
+    upload_size = await _stream_upload_to_path(file, src_path, _PREFLIGHT_MAX_SIZE)
+    (_PREFLIGHT_DIR / (token + ".name")).write_text(safe_name, encoding="utf-8")
+
+    mocked = _mock_enabled(request)
+
+    _prune_old_jobs()
+    job_id = _uuid.uuid4().hex
+    _PREFLIGHT_JOBS[job_id] = {
+        "stage":    "queued",
+        "percent":  0.0,
+        "done":     False,
+        "error":    None,
+        "filename": safe_name,
+        "ts":       time.time(),
+    }
+    asyncio.create_task(_run_preflight_analyze_job(
+        job_id, token, safe_name, src_path, upload_size, virtual_slots, mocked))
+    return {"job_id": job_id, "token": token, "filename": safe_name}
+
+@app.get("/api/preflight/analyze/status")
+async def preflight_analyze_status(job_id: str) -> dict:
+    state = _PREFLIGHT_JOBS.get(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    out = {
+        "job_id":   job_id,
+        "stage":    state.get("stage"),
+        "percent":  round(state.get("percent", 0.0), 1),
+        "done":     bool(state.get("done")),
+        "error":    state.get("error"),
+        "filename": state.get("filename"),
+    }
+    if state.get("done") and not state.get("error"):
+        out["report"] = state.get("report")
+    return out
+
 class _PreflightPrint(BaseModel):
     token: str
     mode:  str
@@ -1543,20 +1821,32 @@ class _PreflightPrint(BaseModel):
 
     head_plan: str = "loadout"
 
+    # Stage instead of print: upload with print=false into the print queue
+    # (multiace-queue/) instead of starting it. Same endpoint rather than a
+    # separate one, since it shares every bit of the token/mode validation
+    # and job-progress plumbing below - only the tail end of
+    # _run_preflight_pipeline behaves differently.
+    stage: bool = False
+
 @app.post("/api/preflight/print")
 async def preflight_print(request: Request, req: _PreflightPrint) -> dict:
-    # A mocked run must never look like it queued a real print: there is no
-    # printer to queue it on, and a "printing…" UI with nothing behind it is
-    # worse than an honest refusal. Use "Download rewritten g-code" instead.
+    # A mocked run must never look like it queued or staged a real print:
+    # there is no printer to put it on, and a "printing…"/"staged…" UI with
+    # nothing behind it is worse than an honest refusal.
     if _mock_enabled(request):
         raise HTTPException(
             status_code=503,
-            detail=("mock mode: no printer to print on. Use "
-                    "\"Download rewritten g-code\" to get the file."))
+            detail=("mock mode: no printer to stage on."
+                    if req.stage else "mock mode: no printer to print on."))
     if req.mode not in ("slicer", "optimize", "layer", "head"):
         raise HTTPException(status_code=400, detail="invalid mode")
     if not re.fullmatch(r"[0-9a-f]{32}", req.token or ""):
         raise HTTPException(status_code=400, detail="invalid token")
+    if req.stage and len(_queue) >= QUEUE_MAX:
+        raise HTTPException(
+            status_code=409,
+            detail=f"queue is full ({QUEUE_MAX} max) - launch or delete a "
+                   "staged job first")
     gpath = _PREFLIGHT_DIR / (req.token + ".gcode")
     npath = _PREFLIGHT_DIR / (req.token + ".name")
     if not gpath.is_file():
@@ -1581,7 +1871,7 @@ async def preflight_print(request: Request, req: _PreflightPrint) -> dict:
         "loadout", "optimize", "layer") else "loadout"
     asyncio.create_task(_run_preflight_pipeline(
         job_id, req.token, req.mode, safe_name, req.bed_mesh, req.camera,
-        req.remap, req.head_assignment, head_plan))
+        req.remap, req.head_assignment, head_plan, req.stage))
     return {"job_id": job_id, "filename": safe_name, "mode": req.mode}
 
 @app.get("/api/preflight/print/status")
@@ -1598,6 +1888,11 @@ async def preflight_print_status(job_id: str) -> dict:
         "error":   state.get("error"),
         "filename": state.get("filename"),
         "mode":    state.get("mode"),
+        "queued":   bool(state.get("queued")),
+        "queue_id": state.get("queue_id"),
+        # Seconds remaining, only meaningful during the "upload" stage of a
+        # large print - see _upload_progress_tracker. None once past it.
+        "eta_s":    state.get("eta_s"),
     }
 
 @app.get("/api/preflight/pysrc")
@@ -1636,6 +1931,11 @@ async def preflight_pysrc() -> dict:
             out["swap_cost"] = cost_src.read_text(encoding="utf-8")
         out["cost_params"] = _swap_cost_params()
         out["calibration"] = _swap_calibration()
+        # Single source of truth for the browser's local/Pyodide size gate -
+        # so raising MULTIACE_PREFLIGHT_MAX_MB moves both the server's cap
+        # and the browser's cutoff, instead of the browser having its own
+        # hardcoded copy that drifts from the backend's.
+        out["max_upload_mb"] = _PREFLIGHT_MAX_SIZE // (1024 * 1024)
         return out
     except Exception as exc:
         raise HTTPException(status_code=503,
@@ -1766,7 +2066,7 @@ def _read_update_cfg() -> dict[str, str]:
     ace.cfg so the Web backend uses the same source as the gcode
     ACE_UPDATE_* commands. Falls back to defaults if the cfg isn't
     parseable or keys are missing."""
-    repo = "decay71/multiACE"
+    repo = "stefanodangelo/multiACE"
     prerelease = "0"
     url_base = ""
     try:
@@ -2239,6 +2539,30 @@ async def history_list(request: Request, limit: int = 50) -> dict:
     return {"jobs": jobs[:limit],
             "printer_ui": _printer_ui_url("#/history")}
 
+class _ReprintRequest(BaseModel):
+    filename: str
+
+@app.post("/api/history/reprint")
+async def history_reprint(request: Request, req: _ReprintRequest) -> dict:
+    """Print a history job's file again, exactly as it already sits on the
+    printer - no preflight, no rewrite. The swap macros baked in from its
+    first run still apply; a loadout that has since moved on is on the
+    user, the same way a Fluidd "reprint" would be.
+    """
+    filename = (req.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+    if _mock_enabled(request):
+        return {"ok": True, "filename": filename, "mock": True}
+    try:
+        await _mr_post("/printer/print/start", {"filename": filename})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    return {"ok": True, "filename": filename}
+
 @app.get("/api/history/{job_id}")
 async def history_detail(job_id: str, request: Request) -> dict:
     if _mock_enabled(request):
@@ -2278,6 +2602,201 @@ async def history_swap_stats() -> dict:
         _require_history().load_records(MULTIACE_DATA_DIR))
     return {"stats": stats,
             "min_samples": _require_history().MIN_CALIBRATION_SAMPLES}
+
+# ---------------------------------------------------------------------------
+# Print queue: staged, already-rewritten gcode waiting to be launched.
+#
+# A preflight plan can be "staged" instead of printed: the rewritten gcode
+# still goes to Moonraker right away (root=gcodes, print=false, under
+# multiace-queue/), but nothing starts until the user picks it from the
+# Queue tab and launches it. This registry is the metadata Moonraker's own
+# file storage doesn't know about - which plan/mode produced the file and
+# which physical ACE slots it assumed, so a later listing can warn if a
+# spool has since changed.
+# ---------------------------------------------------------------------------
+
+_queue: dict[str, dict] = {}
+
+def _load_queue_from_disk() -> None:
+    p = Path(QUEUE_FILE)
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _queue.clear()
+            _queue.update(data)
+    except Exception:
+        pass
+
+def _save_queue_to_disk() -> None:
+    """Atomic write: sibling .tmp then os.replace - same pattern as
+    _save_overrides_to_disk, so a concurrent reader never sees a half
+    write."""
+    p = Path(QUEUE_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(_queue, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(p))
+
+_load_queue_from_disk()
+
+def _snapshot_slots(live_slots: list[dict], resolved_slots: list[dict]) -> dict:
+    """{"<ace>:<slot>": {"material":, "color":}} for every slot a staged
+    plan depends on, captured at stage time - the baseline a later listing
+    diffs against. Shared by the server-side stage path
+    (_run_preflight_pipeline) and the browser-side /api/queue/register
+    endpoint so the two paths can't drift apart on what "referenced slot"
+    means. A slot with nothing loaded snapshots as empty strings, same as
+    an unset live slot - it will read back as "changed" the moment
+    something IS loaded there, which is the correct direction: a plan
+    staged against an empty slot never assumed the empty slot's contents,
+    only its absence."""
+    by_key = {(s.get("ace"), s.get("slot")): s for s in (live_slots or [])}
+    out: dict = {}
+    for ref in resolved_slots or []:
+        key = (ref.get("ace"), ref.get("slot"))
+        s = by_key.get(key) or {}
+        out[f"{key[0]}:{key[1]}"] = {
+            "material": s.get("material") or "",
+            "color":    s.get("color") or "",
+        }
+    return out
+
+def _compute_drift(entry: dict, live_slots: list[dict]) -> dict:
+    """Compare a staged entry's slot_snapshot against the slots RIGHT NOW.
+    A slot that went empty, or now holds a different material/color, means
+    the plan baked into the staged gcode no longer matches reality."""
+    by_key = {(s.get("ace"), s.get("slot")): s for s in (live_slots or [])}
+    changed = []
+    for ref in entry.get("referenced_slots") or []:
+        key = (ref.get("ace"), ref.get("slot"))
+        was = (entry.get("slot_snapshot") or {}).get(f"{key[0]}:{key[1]}") or {}
+        now = by_key.get(key)
+        now_view = ({"material": now.get("material") or "",
+                     "color": now.get("color") or ""} if now else None)
+        if now_view is None or now_view != {"material": was.get("material", ""),
+                                            "color": was.get("color", "")}:
+            changed.append({"ace": key[0], "slot": key[1],
+                            "was": was, "now": now_view})
+    return {"changed": bool(changed), "slots": changed}
+
+async def _queue_live_slots(request: Request | None) -> tuple[list[dict], bool]:
+    """Mock-aware live slots for the queue, WITHOUT _preflight_loadout's
+    "409 while a head is manual" gate: viewing/launching an already-staged
+    job must keep working even while preflight itself is temporarily
+    disabled, since staging already happened and launching is just a plain
+    print/start call."""
+    if _mock_enabled(request):
+        return _live_slots_from_state(_mock_load(MOCK_STATE_FILE) or {}), True
+    return await _live_slots_async(), False
+
+class _QueueRegister(BaseModel):
+    id: str
+    filename: str
+    relpath: str
+    mode: str
+    head_plan: str | None = None
+    resolved_slots: list[dict] = []
+    live_slots: list[dict] = []
+
+@app.post("/api/queue/register")
+async def queue_register(request: Request, req: _QueueRegister) -> dict:
+    """Record a staging the BROWSER (Pyodide) preflight path already
+    uploaded to Moonraker on its own. The server-side path writes its
+    registry entry itself, inside _run_preflight_pipeline, because it
+    controls the whole upload; the browser path does its own raw upload
+    (_startLocalPreflightPrint) and calls this afterwards to register it."""
+    if _mock_enabled(request):
+        raise HTTPException(status_code=503,
+                            detail="mock mode: no printer to stage on.")
+    if not re.fullmatch(r"[0-9a-f]{32}", req.id or ""):
+        raise HTTPException(status_code=400, detail="invalid id")
+    prefix = "multiace-queue/"
+    basename = os.path.basename(req.relpath or "")
+    if (not req.relpath.startswith(prefix) or not basename
+            or basename != req.relpath[len(prefix):]):
+        raise HTTPException(status_code=400, detail="invalid relpath")
+    if len(_queue) >= QUEUE_MAX:
+        raise HTTPException(
+            status_code=409,
+            detail=f"queue is full ({QUEUE_MAX} max) - launch or delete a "
+                   "staged job first")
+    _queue[req.id] = {
+        "id":               req.id,
+        "filename":         os.path.basename(req.filename or basename),
+        "relpath":          req.relpath,
+        "mode":             req.mode,
+        "head_plan":        req.head_plan if req.mode == "head" else None,
+        "staged_at":        time.time(),
+        "referenced_slots": req.resolved_slots,
+        "slot_snapshot":    _snapshot_slots(req.live_slots, req.resolved_slots),
+    }
+    _save_queue_to_disk()
+    return {"ok": True, "id": req.id}
+
+@app.get("/api/queue")
+async def list_queue(request: Request) -> dict:
+    live_slots, mocked = await _queue_live_slots(request)
+    present = None
+    if not mocked:
+        try:
+            listing = await _mr_get("/server/files/list?root=gcodes")
+            files = listing.get("result") if isinstance(listing, dict) else listing
+            if isinstance(files, list):
+                present = {f.get("path") for f in files if isinstance(f, dict)}
+        except Exception:
+            present = None   # degrade: skip the missing-file flag, don't fail the list
+    jobs = []
+    for entry in sorted(_queue.values(),
+                        key=lambda e: e.get("staged_at", 0), reverse=True):
+        row = dict(entry)
+        row["drift"] = _compute_drift(entry, live_slots)
+        row["missing_on_printer"] = bool(
+            present is not None and entry.get("relpath") not in present)
+        jobs.append(row)
+    return {"jobs": jobs, "mock": mocked, "max": QUEUE_MAX}
+
+@app.post("/api/queue/{id}/launch")
+async def queue_launch(id: str, request: Request) -> dict:
+    entry = _queue.get(id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="not staged")
+    if _mock_enabled(request):
+        return {"ok": True, "filename": entry["filename"], "mock": True}
+    try:
+        await _mr_post("/printer/print/start", {"filename": entry["relpath"]})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    # Only dropped from the queue on success, so a failed launch (e.g. the
+    # printer picked up another print in the meantime) leaves the job
+    # staged for a retry rather than silently disappearing.
+    del _queue[id]
+    _save_queue_to_disk()
+    return {"ok": True, "filename": entry["filename"]}
+
+@app.delete("/api/queue/{id}")
+async def queue_delete(id: str, request: Request) -> dict:
+    entry = _queue.get(id)
+    if entry is None:
+        return {"ok": True, "deleted": id}   # already gone - idempotent
+    if not _mock_enabled(request):
+        try:
+            await _mr_delete(f"/server/files/gcodes/{entry['relpath']}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise HTTPException(status_code=e.response.status_code,
+                                    detail=f"moonraker: {e.response.text}")
+            # 404: the file is already gone (e.g. removed via Fluidd) -
+            # that is exactly the outcome Delete wants, not a failure.
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    del _queue[id]
+    _save_queue_to_disk()
+    return {"ok": True, "deleted": id}
 
 @app.get("/api/debug-mode")
 async def debug_mode_get() -> dict:
@@ -2386,19 +2905,48 @@ def _safe_gcode_name(raw_name: str) -> str:
         raise HTTPException(status_code=400, detail="not a g-code file")
     return safe_name
 
-async def _upload_to_moonraker(safe_name: str, data: bytes,
+async def _upload_to_moonraker(safe_name: str, data: bytes | None,
                                content_type: str | None,
-                               start_print: bool) -> dict:
+                               start_print: bool,
+                               dest_path: str | None = None,
+                               src_path: Path | None = None,
+                               progress_cb=None) -> dict:
     """Upload a g-code to Moonraker.
 
     `start_print` is a parameter rather than a hardcoded "true" so a caller
-    can stage a file without starting a print.
+    can stage a file without starting a print. `dest_path` places the file
+    under that subdirectory of root (e.g. "multiace-queue") instead of the
+    gcodes root itself - used by the print queue so staged files don't
+    clutter the normal file list.
+
+    Pass EITHER `data` (small in-memory uploads, e.g. /api/upload-and-print)
+    OR `src_path` (+ optional `progress_cb(nbytes_read)`, see
+    _upload_progress_tracker) to stream a large file straight from disk
+    instead of buffering it whole - the rewrite/print pipeline, whose
+    output can be a multi-hundred-MB gcode file, uses the latter. Without
+    this a caller reading the whole file into RAM first, then handing it
+    here, meant the upload looked frozen for however long the transfer
+    took: no percent moved and nothing distinguished "still going" from
+    "hung".
     """
-    files = {"file": (safe_name, data,
-                      content_type or "application/octet-stream")}
     payload = {"root": "gcodes", "print": "true" if start_print else "false"}
+    if dest_path:
+        payload["path"] = dest_path
+    fh = None
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        if src_path is not None:
+            fh = open(src_path, "rb")
+            body = _ProgressFileReader(fh, progress_cb) if progress_cb else fh
+            files = {"file": (safe_name, body,
+                              content_type or "application/octet-stream")}
+        else:
+            files = {"file": (safe_name, data,
+                              content_type or "application/octet-stream")}
+        # Large uploads over a slow/embedded-host LAN can legitimately take
+        # minutes; the old flat 300s timeout could fire on a big-but-healthy
+        # transfer. Connect fails fast, read/write get real headroom.
+        timeout = httpx.Timeout(30.0, read=1800.0, write=1800.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{MOONRAKER_URL}/server/files/upload",
                                   data=payload, files=files)
             r.raise_for_status()
@@ -2408,6 +2956,9 @@ async def _upload_to_moonraker(safe_name: str, data: bytes,
                             detail=f"moonraker: {e.response.text}")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    finally:
+        if fh is not None:
+            fh.close()
 
 @app.post("/api/upload-and-print")
 async def upload_and_print(file: UploadFile = File(...)) -> dict:
@@ -4029,6 +4580,7 @@ def _drop_override_if_present(ace: int, slot: int) -> bool:
 
 EJECT_DEBOUNCE_S = 0.5
 _eject_pending_since: dict[tuple[int, int], float] = {}
+_last_rfid_status: dict[tuple[int, int], int] = {}
 
 def _override_for(ace: int, slot: int) -> dict | None:
     """Return the override dict for this (ace, slot) if any meaningful
@@ -4580,6 +5132,12 @@ async def console_send(payload: dict) -> dict:
 
 WEBCAM_BASE = os.environ.get("MULTIACE_WEBCAM_BASE", "")
 
+# Explicit override for a camera that speaks WebRTC (camera-streamer's
+# request/answer JSON handshake) instead of Moonraker's usual MJPEG
+# webcams. Set empty to fall back to the Moonraker webcams list below.
+WEBRTC_URL = os.environ.get("MULTIACE_WEBCAM_WEBRTC_URL",
+                             "http://192.168.178.82/webcam/webrtc")
+
 def _webcam_base() -> str:
     """Where a relative camera URL ('/webcam/?action=stream') points.
 
@@ -4607,6 +5165,9 @@ async def _resolve_webcam() -> dict:
     this UI, and embedding it in the UI's own sidebar would be a mirror
     tunnel rather than a webcam.
     """
+    if WEBRTC_URL:
+        return {"available": True, "name": "Webcam", "service": "webrtc",
+                "webrtc_url": WEBRTC_URL}
     try:
         listing = await _mr_get("/server/webcams/list")
     except Exception as e:
@@ -4641,13 +5202,21 @@ async def webcam_info(request: Request) -> dict:
                                                       "reason": "no fixture"}),
                 "mock": True}
     info = await _resolve_webcam()
-    if info.get("available"):
+    if info.get("available") and info.get("service") != "webrtc":
         # The browser always goes through our proxy: the camera may live
         # on a host/port the UI's origin cannot reach (and https pages
         # refuse plain-http streams). Relative to the client's own API
         # base - the UI is mounted at /multiace behind nginx but at / on
         # the dev server.
         info["proxy_path"] = "/api/webcam/stream"
+    if info.get("service") == "webrtc":
+        # The media itself travels browser-to-camera over ICE (not
+        # subject to CORS), but the signalling POSTs are plain
+        # cross-origin JSON fetches - camera-streamer sends no CORS
+        # headers and 501s on OPTIONS, so the browser's preflight always
+        # fails if it targets webrtc_url directly. Route those through
+        # us instead, same-origin, via signal_path.
+        info["signal_path"] = "/api/webcam/webrtc-signal"
     return info
 
 @app.get("/api/webcam/stream")
@@ -4658,7 +5227,7 @@ async def webcam_stream(request: Request):
     if _mock_enabled(request):
         raise HTTPException(503, "webcam stream unavailable in mock mode")
     info = await _resolve_webcam()
-    if not info.get("available"):
+    if not info.get("available") or info.get("service") == "webrtc":
         raise HTTPException(503, info.get("reason") or "no webcam")
     url = info["stream_url"]
 
@@ -4684,6 +5253,27 @@ async def webcam_stream(request: Request):
         pass
     return StreamingResponse(_pump(), media_type=ctype,
                              headers={"Cache-Control": "no-store"})
+
+@app.post("/api/webcam/webrtc-signal")
+async def webcam_webrtc_signal(request: Request) -> dict:
+    """Relay one leg of the browser<->camera SDP handshake.
+
+    Same-origin from the browser's side, so no CORS preflight; httpx on
+    our side talks to the camera directly, where CORS does not apply.
+    """
+    if _mock_enabled(request):
+        raise HTTPException(503, "webrtc signalling unavailable in mock mode")
+    info = await _resolve_webcam()
+    if not info.get("available") or info.get("service") != "webrtc":
+        raise HTTPException(503, info.get("reason") or "no webrtc camera")
+    body = await request.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(info["webrtc_url"], json=body)
+            r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"webrtc signal: {e}")
+    return r.json()
 
 @app.get("/api/webcam/snapshot")
 async def webcam_snapshot(request: Request):

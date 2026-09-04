@@ -18,6 +18,28 @@ except ImportError:                     # pragma: no cover - install layouts
         import swap_cost as _swap_cost
     except ImportError:
         _swap_cost = None
+        # Neither the package import nor a flat sibling module resolved -
+        # e.g. running the backend straight out of a checkout (uvicorn's
+        # cwd is multiace/web/backend, which is neither on sys.path as
+        # "multiace"'s parent nor next to tools/swap_cost.py). Fall back to
+        # loading it by file path, same trick main.py's _load_post_processor
+        # / _load_job_history already use for exactly this reason.
+        try:
+            import importlib.util
+            from pathlib import Path
+            for _cand in (
+                Path("/home/lava/printer_data/config/tools/swap_cost.py"),
+                Path(__file__).resolve().parents[2] / "tools" / "swap_cost.py",
+            ):
+                if _cand.is_file():
+                    _spec = importlib.util.spec_from_file_location(
+                        "multiace_swap_cost", _cand)
+                    _mod = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    _swap_cost = _mod
+                    break
+        except Exception:
+            _swap_cost = None
 
 _TOOLCHANGE_RE = re.compile(
     r"^;\s*Change Tool\s*(\d+)\s*->\s*Tool\s*(\d+)", re.MULTILINE)
@@ -149,13 +171,19 @@ def used_tool_indices(pp, gcode: str) -> set:
 
 def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
                       slicer_colors=None, slicer_types=None,
-                      event_times=None, bg_heads=None, spool_prices=None):
+                      event_times=None, bg_heads=None, spool_prices=None,
+                      flush_matrix=None):
     """Everything the per-plan estimate needs, built once per preflight.
 
     Returns None when the estimate cannot be produced (no swap_cost module,
     or a post-processor too old to build a timeline). Every caller treats
     None as "no estimate", so a preflight never fails over a number that is
     informational by definition.
+
+    `flush_matrix` is the slicer's own flush_volumes_matrix, when the
+    caller already parsed one (e.g. for the head-mode colour-objective
+    optimizer) - passing it through here makes the timeline's purge_mm use
+    the slicer's real number instead of guessing one from colour distance.
     """
     if _swap_cost is None or not hasattr(pp, "build_swap_timeline"):
         return None
@@ -183,6 +211,7 @@ def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
         "event_times": event_times,
         "bg_heads":    list(bg_heads or []),
         "prices":      dict(spool_prices or {}),
+        "flush_matrix": flush_matrix,
     }
 
 
@@ -241,10 +270,49 @@ def attach_estimate(ctx, plan, events, assignment):
 
 
 def ctx_timeline(ctx, events, assignment):
-    return ctx["_pp"].build_swap_timeline(
-        events, assignment, event_times=ctx["event_times"],
-        bg_heads=ctx["bg_heads"], cost_model=ctx["model"],
-        colors=ctx["colors"], materials=ctx["materials"])
+    pp = ctx["_pp"]
+    kwargs = dict(event_times=ctx["event_times"], bg_heads=ctx["bg_heads"],
+                  cost_model=ctx["model"], colors=ctx["colors"],
+                  materials=ctx["materials"])
+    try:
+        return pp.build_swap_timeline(
+            events, assignment, flush_matrix=ctx.get("flush_matrix"),
+            **kwargs)
+    except TypeError:
+        # An older installed post-processor has no flush_matrix kwarg yet -
+        # soft-degrade to its colour-distance guess rather than lose the
+        # timeline entirely.
+        return pp.build_swap_timeline(events, assignment, **kwargs)
+
+
+def recompute_estimate(capture, *, mapping=None, target_ids=None):
+    """Recompute {estimate, timeline} for a user-edited mapping/assignment,
+    reusing the estimate ctx captured at analyze time (see `estimate_capture`
+    on `build_report`/`head_mode_preview`).
+
+    This is the money/time counterpart of the live swap-count recalc the
+    frontend already runs on every mapping-dropdown change - without it,
+    editing a filament mapping in the preflight left the estimate showing
+    numbers for the ORIGINAL mapping. Returns None when no ctx was captured
+    (no estimate to begin with - an older post-processor, or the file's
+    header didn't parse), matching attach_estimate's soft-degrade.
+    """
+    ctx = (capture or {}).get("ctx")
+    if not ctx:
+        return None
+    if target_ids is not None:
+        assignment = assignment_from_target_ids(
+            target_ids, capture.get("targets") or [])
+        # attach_estimate prices each row from plan["mapping"]; head-mode
+        # rows are the flat {kind, head, ace, slot} shape _mapping_row_price
+        # expects, so build them straight from the assignment entries.
+        price_mapping = [dict(e, t=t) for t, e in assignment.items()]
+    else:
+        assignment = assignment_from_mapping(mapping or [])
+        price_mapping = mapping or []
+    plan = {"feasible": True, "mapping": price_mapping}
+    attach_estimate(ctx, plan, capture.get("events") or [], assignment)
+    return {"estimate": plan.get("estimate"), "timeline": plan.get("timeline")}
 
 
 def make_purge_callback(cost_params, slicer_colors, slicer_types,
@@ -650,7 +718,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
                       slicer_types, head_ctx, ace_slots, plan_proxy,
                       fuzzy=DEFAULT_FUZZY, header_text=None,
                       cost_params=None, calibration=None, meta=None,
-                      spool_prices=None) -> dict:
+                      spool_prices=None, estimate_capture=None) -> dict:
     """The head-mode preflight preview: THREE plans, mirroring multi:
       loadout  - match against the currently-loaded feeders + ACE slots (editable)
       optimize - swap-minimal proposed loadout (free, Belady per ACE head)
@@ -680,10 +748,27 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     event_times, bg_heads, bg_available = _bg_context(
         pp, head_ctx, plan_proxy, events)
 
+    # Parsed here (not down by the optimizer calls below) so the estimate
+    # ctx - and therefore every plan's timeline, including 'loadout' - gets
+    # the slicer's real purge numbers too, not just the colour-objective
+    # optimizer.
+    flush_matrix = None
+    _pfm = getattr(pp, "parse_flush_matrix", None)
+    if _pfm is not None:
+        try:
+            flush_matrix = _pfm(plan_proxy)
+        except Exception:
+            flush_matrix = None
+
     estimate_ctx = make_estimate_ctx(
         pp, header_text, cost_params=cost_params, calibration=calibration,
         slicer_colors=slicer_colors, slicer_types=slicer_types,
-        event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices)
+        event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices,
+        flush_matrix=flush_matrix)
+    if estimate_capture is not None:
+        estimate_capture["ctx"] = estimate_ctx
+        estimate_capture["events"] = events
+        estimate_capture["targets"] = targets
 
     nz_groups, nz_mixed = nozzle_context(pp, meta, head_ctx)
     try:
@@ -718,13 +803,6 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 
     num_slots = 4
 
-    flush_matrix = None
-    _pfm = getattr(pp, "parse_flush_matrix", None)
-    if _pfm is not None:
-        try:
-            flush_matrix = _pfm(plan_proxy)
-        except Exception:
-            flush_matrix = None
     plans["optimize"] = _head_proposal_plan(
         pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
         num_slots, None, event_times=event_times, bg_heads=bg_heads,
@@ -779,7 +857,8 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
 def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
                  live_slots, head_ctx, token, filename, size,
                  fuzzy=DEFAULT_FUZZY, header_text=None, cost_params=None,
-                 calibration=None, meta=None, spool_prices=None) -> dict:
+                 calibration=None, meta=None, spool_prices=None,
+                 estimate_capture=None) -> dict:
     """Build the full preflight report dict (the /api/preflight payload).
 
     Refuses an ALREADY-PROCESSED file (the "; multiACE processed:" /
@@ -815,7 +894,8 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
             pp, token, filename, size, slicer_colors, slicer_types,
             head_ctx, live_slots, plan_proxy, fuzzy=fuzzy,
             header_text=header_text, cost_params=cost_params,
-            calibration=calibration, meta=meta, spool_prices=spool_prices)
+            calibration=calibration, meta=meta, spool_prices=spool_prices,
+            estimate_capture=estimate_capture)
 
     missing_mats = pp.check_material_availability(slicer_types, live_slots)
 
@@ -861,10 +941,25 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         out["events"] = list(result.get("events") or [])
         ev_times, bg_heads, _bg_av = _bg_context(
             pp, head_ctx, proxy_remapped, out["events"])
+        # events/mapping are keyed by the ORIGINAL slicer T (the "; Change
+        # Tool" comments survive the remap - see parse_toolchanges), which
+        # is exactly how flush_volumes_matrix is indexed too, so it is safe
+        # to read straight off plan_proxy here.
+        flush_matrix = None
+        _pfm = getattr(pp, "parse_flush_matrix", None)
+        if _pfm is not None:
+            try:
+                flush_matrix = _pfm(plan_proxy)
+            except Exception:
+                flush_matrix = None
         estimate_ctx = make_estimate_ctx(
             pp, header_text, cost_params=cost_params, calibration=calibration,
             slicer_colors=slicer_colors, slicer_types=slicer_types,
-            event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices)
+            event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices,
+            flush_matrix=flush_matrix)
+        if estimate_capture is not None:
+            estimate_capture["ctx"] = estimate_ctx
+            estimate_capture["events"] = out["events"]
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
                 pp, mode, result, mapping,
@@ -885,9 +980,18 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                      remap_override=None, head_assignment=None,
                      head_plan="loadout", fuzzy=DEFAULT_FUZZY,
                      set_stage=None, stage_cb=None, cost_params=None,
-                     meta=None) -> str:
+                     meta=None) -> tuple:
     """Run the rewrite pipeline on src_path, ping-ponging between tmp_a/tmp_b,
-    and return the path holding the final print-ready gcode.
+    and return (path, resolved_slots): the path holding the final print-ready
+    gcode, plus the sorted, deduplicated list of {"ace", "slot"} dicts the
+    chosen plan actually depends on.
+
+    resolved_slots exists for staging (plan §"Print Queue"): a plan queued
+    for later needs to know which physical spools it assumed, so a caller can
+    detect drift if those spools change before the file is launched. It is
+    computed here rather than by the caller because for optimize/layer/
+    head-optimize/head-layer/head-color the assignment is computed INSIDE
+    this function and never otherwise surfaces.
 
     Pure: operates only on file paths (real temp files in the backend, MEMFS
     paths under Pyodide) + the post-processor primitives. The caller handles
@@ -1038,7 +1142,11 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
             pp.inject_auto_load_to_file(
                 str(cur), str(nxt), stage_cb(70.0, 12.0), set(ace_heads))
         cur, nxt = nxt, cur
-        return str(cur)
+        resolved = sorted({
+            (e["ace"], e["slot"]) for e in assignment.values()
+            if e.get("kind") == "ace" and e.get("slot") != "feeder"
+            and e.get("ace") is not None})
+        return str(cur), [{"ace": a, "slot": s} for a, s in resolved]
 
     if mode == "slicer":
         if remap_override is not None:
@@ -1094,4 +1202,39 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
     set_stage("inject_auto_load", 75.0)
     pp.inject_auto_load_to_file(str(cur), str(nxt), stage_cb(75.0, 10.0))
     cur, nxt = nxt, cur
-    return str(cur)
+    full_remap = {t: remap.get(t, t) for t in range(len(slicer_colors))}
+    resolved = sorted({(v // 4, v % 4) for v in full_remap.values()})
+    return str(cur), [{"ace": a, "slot": s} for a, s in resolved]
+
+def print_prefs_line(bed_mesh: bool, camera: bool) -> str:
+    """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
+    FORCE=1 is required: the line is the first line of the uploaded file, which
+    already runs with print_stats.state == 'printing', and stock rejects a
+    non-forced preference change there (error 531). FORCE=1 bypasses that gate
+    (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
+    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
+    intentionally left off here (separate topic)."""
+    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
+            "TIME_LAPSE_CAMERA=%d FORCE=1"
+            % (1 if bed_mesh else 0, 1 if camera else 0))
+
+def prepend_print_prefs(in_path: str, out_path: str,
+                        bed_mesh: bool = False, camera: bool = False) -> None:
+    """Stream-copy in_path to out_path with the print-preference line
+    prepended at the very top (before the start gcode's calibration).
+    Any SET_PRINT_PREFERENCES the slicer already emits is commented out
+    so it can't override ours from further down the file.
+
+    Shared, streaming, file-to-file - one implementation both the backend
+    (real temp files) and the browser's Pyodide worker (MEMFS paths) call,
+    instead of the worker re-porting the same regex/replace rule over a
+    JS string it would otherwise have to hold in memory whole."""
+    with open(out_path, "w", encoding="utf-8", errors="replace") as out:
+        out.write("; multiACE preflight: print preferences\n")
+        out.write(print_prefs_line(bed_mesh, camera) + "\n")
+        with open(in_path, "r", encoding="utf-8", errors="replace") as src:
+            for line in src:
+                if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
+                    out.write("; multiACE disabled: " + line.lstrip())
+                    continue
+                out.write(line)

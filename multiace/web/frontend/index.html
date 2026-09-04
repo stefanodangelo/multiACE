@@ -383,8 +383,11 @@
            and wants the horizontal room for long lines. -->
       <div class="monitor-top">
         <div class="monitor-webcam side-webcam">
-          <img v-if="webcam.available" :src="webcamSrc" class="webcam-img"
+          <img v-if="webcam.available && webcam.service !== 'webrtc'" :src="webcamSrc" class="webcam-img"
                :alt="webcam.name || t('ui.sidebar.webcam')">
+          <video v-else-if="webcam.available" ref="webcamVideo" class="webcam-img"
+                 autoplay muted playsinline
+                 :aria-label="webcam.name || t('ui.sidebar.webcam')"></video>
           <div v-else class="webcam-none">
             <p>{{ webcam.loaded ? t('ui.sidebar.webcam_unavailable')
                                 : t('ui.sidebar.webcam_loading') }}</p>
@@ -393,8 +396,13 @@
             <button @click="loadWebcam">{{ t('ui.common.reload') }}</button>
           </div>
           <div class="side-foot" v-if="webcam.available">
-            <span class="muted small">{{ webcam.name }}</span>
-            <button @click="webcam.nonce++">{{ t('ui.common.reload') }}</button>
+            <span class="muted small">
+              {{ webcam.name }}
+              <template v-if="webcam.service === 'webrtc' && webcam.connFailed">
+                &middot; {{ t('ui.sidebar.webcam_unavailable') }}<span v-if="webcam.reason"> ({{ webcam.reason }})</span>
+              </template>
+            </span>
+            <button @click="webcam.service === 'webrtc' ? startWebrtc() : webcam.nonce++">{{ t('ui.common.reload') }}</button>
           </div>
         </div>
         <!-- Live print control. Every value here is read BACK from the
@@ -519,7 +527,11 @@
           <button type="submit" :disabled="consoleBusy || !consoleInput.trim()">⏎</button>
         </form>
       </div>
-      <div class="monitor-start">
+      <!-- Plain-printer fallback: with no ACE hardware there is no Loadout
+           tab to carry this button, so it stays reachable here for that
+           mode. Every other mode gets it on the Loadout tab instead - see
+           .monitor-start below. -->
+      <div class="monitor-start" v-if="state.mode === 'normal'">
         <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
                class="upload-input" @change="onUploadGcode($event.target.files)">
         <button class="upload-btn primary start-print-btn" @click="triggerUpload()"
@@ -544,6 +556,21 @@
                 :title="t('ui.dashboard.show_display_hint')">
           {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
         </button>
+        <!-- The Loadout tab is where a session starts, so the print action
+             lives here as the default CTA rather than tucked in Control.
+             v-if (not just the section's v-show) keeps this the only mounted
+             uploadInput when mode is 'normal' - see the fallback above,
+             which shares that ref name and must be the sole instance then. -->
+        <div class="monitor-start status-row-cta" v-if="state.mode !== 'normal'">
+          <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
+                 class="upload-input" @change="onUploadGcode($event.target.files)">
+          <button class="upload-btn primary start-print-btn" @click="triggerUpload()"
+                  :disabled="uploading"
+                  :title="t('ui.upload.tooltip')">
+            <span v-if="!uploading">⬆ {{ t('ui.upload.button') }}</span>
+            <span v-else>{{ t('ui.upload.in_progress') }}</span>
+          </button>
+        </div>
       </div>
       <!-- COLLAPSIBLE PANEL. Collapsing changes density, never awareness:
            the collapsed header still carries a chip per filament lane, so
@@ -610,11 +637,6 @@
                         :class="{active: dryPanelOpen(ace.idx), running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
-                <button class="ace-overrides-btn"
-                        v-if="configForm.perAce[ace.idx]"
-                        :class="{active: overridesPanelOpen(ace.idx)}"
-                        @click="toggleOverridesPanel(ace.idx)"
-                        :title="t('ui.config.per_ace')">⚙</button>
                 <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)"
                         :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load_all') }}</button>
               </span>
@@ -747,88 +769,6 @@
                 </div>
               </div>
             </transition>
-            <transition name="dry-fade">
-              <div v-if="overridesPanelOpen(ace.idx) && configForm.perAce[ace.idx]"
-                   class="dry-panel override-panel" @click.stop>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.dryer_temp_override') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_temp"
-                           min="0" max="80" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_temp')"> °C
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.dryer_duration_override') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].dryer_duration"
-                           min="0" max="600" step="5"
-                           :placeholder="perAcePlaceholder(ace.idx, 'dryer_duration')"> min
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feed_speed') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].feed_speed"
-                           min="1" max="500" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'feed_speed')"> mm/s
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.retract_speed') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_speed"
-                           min="1" max="500" step="1"
-                           :placeholder="perAcePlaceholder(ace.idx, 'retract_speed')"> mm/s
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.load_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].load_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'load_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.retract_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].retract_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'retract_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.swap_retract_length') }}
-                    <input type="number" v-model.number="configForm.perAce[ace.idx].swap_retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perAcePlaceholder(ace.idx, 'swap_retract_length')"> mm
-                  </label>
-                </div>
-                <details class="per-slot-block">
-                  <summary>{{ t('ui.config.per_slot_overrides') }}</summary>
-                  <table class="per-slot-table">
-                    <thead>
-                      <tr>
-                        <th>Slot</th>
-                        <th>{{ t('ui.config.load_length') }}</th>
-                        <th>{{ t('ui.config.retract_length') }}</th>
-                        <th>{{ t('ui.config.swap_retract_length') }}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="s in 4" :key="s-1">
-                        <td>{{ dispIdx(s-1) }}</td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].load_length"
-                                   min="0" max="5000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'load_length')"></td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].retract_length"
-                                   min="0" max="5000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'retract_length')"></td>
-                        <td><input type="number" v-model.number="configForm.perAce[ace.idx].perSlot[s-1].swap_retract_length"
-                                   min="0" max="2000" step="10"
-                                   :placeholder="perSlotPlaceholder(ace.idx, s-1, 'swap_retract_length')"></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </details>
-                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
-              </div>
-            </transition>
           </article>
         </div>
         <h3 class="th-section-head">
@@ -851,11 +791,6 @@
                 <span class="th-color"
                       v-if="t_.color && !t_.feeder && !t_.manual && t_.head_source_known && !toolheadOps[t_.idx]"
                       :style="{background: t_.color}"></span>
-                <button class="ace-overrides-btn"
-                        v-if="configForm.perFeeder[t_.idx]"
-                        :class="{active: feederOverridesPanelOpen(t_.idx)}"
-                        @click="toggleFeederOverridesPanel(t_.idx)"
-                        :title="t('ui.config.per_feeder')">⚙</button>
               </span>
             </h2>
             <!-- The tile is a SIBLING of the title, not inside it: in the h2
@@ -971,33 +906,6 @@
                 <span>{{ t('ui.dashboard.bg') }}</span>
               </label>
             </div>
-            <transition name="dry-fade">
-              <div v-if="feederOverridesPanelOpen(t_.idx) && configForm.perFeeder[t_.idx]"
-                   class="dry-panel override-panel" @click.stop>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_load_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].load_length"
-                           min="0" max="5000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'load_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_retract_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'retract_length')"> mm
-                  </label>
-                </div>
-                <div class="per-ace-row">
-                  <label>{{ t('ui.config.feeder_swap_retract_length') }}
-                    <input type="number" v-model.number="configForm.perFeeder[t_.idx].swap_retract_length"
-                           min="0" max="2000" step="10"
-                           :placeholder="perFeederPlaceholder(t_.idx, 'swap_retract_length')"> mm
-                  </label>
-                </div>
-                <p class="muted small">{{ t('ui.config.per_ace_save_hint') }}</p>
-              </div>
-            </transition>
           </article>
         </div>
       </div>
@@ -1076,6 +984,7 @@
             <th>{{ t('ui.history.swaps') }}</th>
             <th>{{ t('ui.history.filament') }}</th>
             <th>{{ t('ui.history.result') }}</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -1095,10 +1004,19 @@
               <td>{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
               <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
               <td><span class="pill">{{ row.status || '–' }}</span></td>
+              <td>
+                <button v-if="row.filename" class="reprint-btn"
+                        :disabled="isPrinting || history.reprinting !== ''"
+                        :title="t('ui.history.reprint_hint')"
+                        @click.stop="reprintJob(row)">
+                  {{ history.reprinting === (row.id || row.job_id)
+                     ? t('ui.preflight.sending') : t('ui.history.reprint') }}
+                </button>
+              </td>
             </tr>
             <tr v-if="history.detail && history.detail.id === row.id"
                 class="history-detail">
-              <td colspan="7">
+              <td colspan="8">
                 <div v-if="row.multiace">
                   <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
                      · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>
@@ -1129,6 +1047,57 @@
               </td>
             </tr>
           </template>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- QUEUE: staged, already-rewritten gcode waiting to be launched.
+         Uploaded to Moonraker with print=false at stage time (multiace-queue/),
+         so Launch here is just a plain print/start on a file that already
+         exists - no rewrite, no preflight re-run. -->
+    <section v-show="tab==='queue'">
+      <div class="row">
+        <h3>{{ t('ui.queue.title') }}</h3>
+        <button @click="loadQueue" :disabled="queue.busy">
+          {{ queue.busy ? t('ui.common.saving') : t('ui.common.reload') }}
+        </button>
+      </div>
+      <p v-if="queue.error" class="error">{{ queue.error }}</p>
+      <p v-else-if="queue.loaded && !queue.jobs.length" class="muted">
+        {{ t('ui.queue.empty') }}
+      </p>
+      <table v-else class="history-table">
+        <thead>
+          <tr>
+            <th>{{ t('ui.queue.staged_at') }}</th>
+            <th>{{ t('ui.queue.file') }}</th>
+            <th>{{ t('ui.queue.mode') }}</th>
+            <th></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in queue.jobs" :key="row.id" class="history-row">
+            <td>{{ new Date((row.staged_at || 0) * 1000).toLocaleString() }}</td>
+            <td>{{ row.filename }}
+              <span v-if="row.missing_on_printer" class="warn small"
+                    :title="t('ui.queue.missing_hint')">· {{ t('ui.queue.missing') }}</span>
+              <span v-else-if="row.drift && row.drift.changed" class="warn small"
+                    :title="queueDriftTooltip(row)">· {{ t('ui.queue.drifted') }}</span>
+            </td>
+            <td>{{ row.mode === 'head' ? (row.head_plan || row.mode) : row.mode }}</td>
+            <td>
+              <button class="primary" :disabled="row.missing_on_printer || queue.launching !== ''"
+                      @click="launchQueued(row)">
+                {{ queue.launching === row.id ? t('ui.preflight.sending') : t('ui.queue.launch') }}
+              </button>
+            </td>
+            <td>
+              <button :disabled="queue.deleting !== ''" @click="deleteQueued(row)">
+                {{ queue.deleting === row.id ? t('ui.common.saving') : t('ui.queue.delete') }}
+              </button>
+            </td>
+          </tr>
         </tbody>
       </table>
     </section>
@@ -1422,6 +1391,15 @@
             {{ t('ui.config.confirm_commands_label') }}
           </label>
           <p class="muted small" v-if="infoShown('confirm_commands')">{{ t('ui.config.confirm_commands_hint') }}</p>
+          <h4 class="pnl-sub">{{ t('ui.config.remember_filament') }}<button type="button" class="info-btn"
+              @click="toggleInfo('remember_filament')" :aria-expanded="infoShown('remember_filament')"
+              :title="infoShown('remember_filament') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button></h4>
+          <label class="pickup-clean-toggle">
+            <input type="checkbox" :checked="state.remember_filament"
+                   @change="setRememberFilament($event.target.checked)">
+            {{ t('ui.config.remember_filament_label') }}
+          </label>
+          <p class="muted small" v-if="infoShown('remember_filament')">{{ t('ui.config.remember_filament_hint') }}</p>
           <h4 class="pnl-sub">{{ t('ui.config.airprint_detection') }}<button type="button" class="info-btn"
               @click="toggleInfo('airprint_detection')" :aria-expanded="infoShown('airprint_detection')"
               :title="infoShown('airprint_detection') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button></h4>
@@ -2290,6 +2268,9 @@ reboot</pre>
         <div class="preflight-progress-label">
           {{ stageLabel(preflight.progress.stage) }} -
           {{ Math.round(preflight.progress.percent) }}%
+          <span v-if="preflight.progress.eta">
+            - {{ t('ui.preflight.eta_remaining', {eta: preflight.progress.eta}) }}
+          </span>
         </div>
         <div class="preflight-progress-bar">
           <div class="preflight-progress-fill"
@@ -2381,8 +2362,9 @@ reboot</pre>
 
           <template v-if="!gpreview.collapsed">
             <!-- Sequential-move scrub within the top visible layer. Play
-                 drives it; 2x/4x only show up while playing (plan section
-                 4), so a paused viewer keeps an uncluttered control row. -->
+                 drives it; 5x/10x/100x only show up while playing (plan
+                 section 4), so a paused viewer keeps an uncluttered control
+                 row. -->
             <div class="gpreview-controls">
               <button @click="gpreviewTogglePlay" :disabled="gpreview.phase !== 'ready'"
                       :aria-pressed="gpreview.playing">
@@ -2390,7 +2372,7 @@ reboot</pre>
               </button>
               <span class="gpv-speed" v-if="gpreview.playing" role="group"
                     :aria-label="t('ui.gpreview.speed')">
-                <button v-for="s in [1, 2, 4]" :key="'sp-'+s"
+                <button v-for="s in [1, 5, 10, 100]" :key="'sp-'+s"
                         :class="{sel: gpreview.speed === s}"
                         :aria-pressed="gpreview.speed === s"
                         @click="gpreviewSetSpeed(s)">{{ s }}x</button>
@@ -2838,11 +2820,9 @@ reboot</pre>
                 @click="applySelected">
           {{ preflight.applying !== '' ? t('ui.preflight.applying') : t('ui.preflight.apply_loadout') }}
         </button>
-        <button v-if="preflight.report && preflight.report.local && strategy !== 'whatif'"
-                :disabled="preflight.sending !== ''"
-                :title="t('ui.preflight.download_hint')"
-                @click="downloadSelected">
-          {{ preflight.sending === 'download' ? t('ui.preflight.sending') : t('ui.preflight.download') }}
+        <button :disabled="!canPrint()" @click="stageSelected"
+                :title="t('ui.preflight.stage_for_later_hint')">
+          {{ preflight.sending !== '' ? t('ui.preflight.sending') : t('ui.preflight.stage_for_later') }}
         </button>
         <button class="primary" :disabled="!canPrint()" @click="printSelected">
           {{ preflight.sending !== '' ? t('ui.preflight.sending') : t('ui.preflight.strat_print') }}

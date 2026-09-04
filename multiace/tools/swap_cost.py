@@ -84,6 +84,13 @@ MATERIAL_DENSITY = {
 DEFAULT_DENSITY = 1.24
 DEFAULT_DIAMETER_MM = 1.75
 
+#: €/kg assumed for a tool whose colour has no priced spool bound (no spool
+#: at all, or one added before the price field existed) - same default
+#: ACE_SPOOL_ADD and _spool_prices_from_state already apply, so the
+#: headline number is always a real estimate the user can correct in
+#: Settings -> Spools rather than silently going quiet for that tool.
+DEFAULT_PRICE_PER_KG = 20.0
+
 #: Conservative default max volumetric flow (mm3/s). Purging faster than
 #: the hotend can melt grinds the filament flat and can pop the PTFE
 #: coupler (§13.2), so purge time is rate-limited by THIS, never by a raw
@@ -343,6 +350,14 @@ class HeaderInfo(object):
 def mm_to_mm3(length_mm, diameter_mm=DEFAULT_DIAMETER_MM):
     r = (diameter_mm or DEFAULT_DIAMETER_MM) / 2.0
     return 3.141592653589793 * r * r * float(length_mm or 0.0)
+
+
+def mm3_to_mm(volume_mm3, diameter_mm=DEFAULT_DIAMETER_MM):
+    """Inverse of mm_to_mm3 - the slicer's flush matrix is in mm3, the cost
+    model's purge lengths are in mm of filament."""
+    r = (diameter_mm or DEFAULT_DIAMETER_MM) / 2.0
+    area = 3.141592653589793 * r * r
+    return (float(volume_mm3 or 0.0) / area) if area else 0.0
 
 
 def mm_to_grams(length_mm, diameter_mm=DEFAULT_DIAMETER_MM,
@@ -635,6 +650,9 @@ class SwapCostModel(object):
         configured `swap_purge_length`. With it on, interpolate between
         swap_purge_min and swap_purge_max on the direction-aware transition
         severity, floored by the material-pair minimum.
+
+        This is a GUESS, used only when nothing better is available - see
+        `purge_mm_for` for the slicer-supplied number that supersedes it.
         """
         floor = self._material_floor(material)
         if not self.purge_color_aware:
@@ -648,6 +666,35 @@ class SwapCostModel(object):
         if hi < lo:
             lo, hi = hi, lo
         return max(lo + (hi - lo) * severity, floor)
+
+    def purge_mm_for(self, from_t, to_t, flush_matrix=None, from_color=None,
+                     to_color=None, material=None):
+        """Millimetres to purge for one swap, preferring the SLICER'S OWN
+        number over the colour-distance guess.
+
+        `flush_matrix` is the slicer's `flush_volumes_matrix` (mm3,
+        row-major NxN, row = from-tool) - parsed straight out of the gcode
+        by `parse_flush_matrix`/`parse_flush_matrix_from_file`. The slicer
+        already computed exactly how much this specific transition needs;
+        guessing a volume from colour distance ON TOP of a real number the
+        file already carries would be strictly worse, not additive. Falls
+        back to `purge_mm` when there is no matrix, no prior tool (first
+        load - nothing to flush), or the pair falls outside it.
+
+        The matrix value still goes through `clamp_purge_mm` - the file may
+        have been sliced against a different machine, and a purge-bin
+        ceiling exists precisely to catch that regardless of source.
+        """
+        if (flush_matrix is not None and from_t is not None
+                and to_t is not None
+                and 0 <= from_t < len(flush_matrix)
+                and 0 <= to_t < len(flush_matrix[from_t])):
+            mm3 = flush_matrix[from_t][to_t]
+            if mm3:
+                mm = mm3_to_mm(mm3, self.filament_diameter)
+                applied, _reason = self.clamp_purge_mm(mm)
+                return max(applied, self._material_floor(material))
+        return self.purge_mm(from_color, to_color, material)
 
     def _material_floor(self, material):
         if not material:
@@ -807,7 +854,7 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     totals_mm = 0.0
     totals_g = 0.0
     totals_price = 0.0
-    any_price_known = False
+    defaulted_g = 0.0
     tools = sorted(used_tools) if used_tools else sorted(
         set(list(per_tool_purge_mm.keys())
             + list(range(len(header.per_tool_mm) if header else 0))))
@@ -828,12 +875,24 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                               / 1000.0, 2),
         }
         price_per_kg = prices.get(t)
-        if price_per_kg is not None:
-            row_price = tool_total_g / 1000.0 * price_per_kg
-            row["price_eur"] = _round(row_price, 2)
-            totals_price += row_price
-            any_price_known = True
+        if price_per_kg is None:
+            price_per_kg = DEFAULT_PRICE_PER_KG
+            defaulted_g += tool_total_g
+        row_price = tool_total_g / 1000.0 * price_per_kg
+        row["price_eur"] = _round(row_price, 2)
+        totals_price += row_price
         per_color.append(row)
+    any_price_known = bool(tools)
+
+    # Grams priced at the DEFAULT_PRICE_PER_KG guess rather than a spool the
+    # user actually bound - the total is still shown (better than silently
+    # going quiet for that tool), but flagged so it isn't mistaken for a
+    # real number.
+    if defaulted_g > 0:
+        assumptions.append(
+            "%.1f g has no spool bound and is priced at the default "
+            "€%.0f/kg - bind a spool in Settings -> Spools to price it "
+            "exactly" % (defaulted_g, DEFAULT_PRICE_PER_KG))
 
     purge_g_total = sum(model.purge_grams(mm, materials.get(t))
                         for t, mm in per_tool_purge_mm.items())
