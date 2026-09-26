@@ -19,7 +19,8 @@
  *                        costParams, calibration}
  *   -> {type:"analyze-done", jobId, report}             (+ {type:"progress"})
  *   <- {type:"rewrite", jobId, file, liveSlots, headCtx, mode, remapOverride,
- *                        headAssignment, headPlan, costParams, bedMesh, camera}
+ *                        headAssignment, headPlan, costParams, bedMesh,
+ *                        camera, flowCal}
  *   -> {type:"rewrite-chunk", jobId, chunk}   (Transferable ArrayBuffer, one
  *                        or more, streamed as the output file is read back
  *                        out of MEMFS - never one whole-file JS string)
@@ -286,6 +287,7 @@ async function doRewrite(jobId, msg) {
   // second JS-only copy of the same rule.
   py.globals.set("_bed_mesh", !!msg.bedMesh);
   py.globals.set("_camera", !!msg.camera);
+  py.globals.set("_flow_cal", !!msg.flowCal);
 
   // Bridge the streaming-stage progress out to the main thread. set_stage
   // maps a coarse (stage, percent) within the pipeline's own 0-100 span;
@@ -314,9 +316,9 @@ _final, _resolved = _core.rewrite_pipeline(
     meta=_meta,
     set_stage=lambda s, p: _on_stage(s, p))
 _out_path = _final
-if _bed_mesh or _camera:
+if _bed_mesh or _camera or _flow_cal:
     _out_path = "/preflight/prefs.gcode"
-    _core.prepend_print_prefs(_final, _out_path, _bed_mesh, _camera)
+    _core.prepend_print_prefs(_final, _out_path, _bed_mesh, _camera, _flow_cal)
 json.dumps({"out_path": _out_path, "resolved_slots": _resolved})
 `);
   const outMeta = JSON.parse(metaJson);

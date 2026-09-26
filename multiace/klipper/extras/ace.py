@@ -576,6 +576,13 @@ class MultiAce:
             if _sv is not None:
                 self._remember_filament = bool(_sv)
 
+        # Default OFF, unlike upstream's default-on: auto-capturing PA from
+        # the stock flow routine and auto-applying it on toolchange is a
+        # silent behaviour change on every print until a user opts in -
+        # see docs/UPSTREAM_MERGE_ANALYSIS.md M1.
+        self.pa_sync = config.getboolean('pa_sync', False)
+        self._pa_sync_cfg = self.pa_sync
+
         self.auto_dry_default = {
             'enabled': config.getboolean('auto_dry', False),
 
@@ -1182,6 +1189,10 @@ class MultiAce:
             desc='[multiACE] Keep a slot\'s color/material label and spool '
                  'binding across physical removal (ENABLE=0|1), live + persist')
         self.gcode.register_command(
+            'ACE_SET_PA_SYNC',
+            self.cmd_ACE_SET_PA_SYNC,
+            desc='[multiACE] Toggle PA capture+apply automatics (ENABLE=0|1), live + persist')
+        self.gcode.register_command(
             'ACE_FW_RELEASE',
             self.cmd_ACE_FW_RELEASE,
             desc='[multiACE] Release one ACE 2 serial port for a firmware flash (ACE=n)')
@@ -1208,7 +1219,7 @@ class MultiAce:
             'ACE_SET_QUAD_REPLENISH',
             self.cmd_ACE_SET_QUAD_REPLENISH,
             desc=self.cmd_ACE_SET_QUAD_REPLENISH_help)
-        for _n in ('ADD', 'SET', 'ASSIGN', 'DELETE', 'LIST', 'IMPORT'):
+        for _n in ('ADD', 'SET', 'PA', 'ASSIGN', 'DELETE', 'LIST', 'IMPORT'):
             self.gcode.register_command(
                 'ACE_SPOOL_%s' % _n,
                 getattr(self, 'cmd_ACE_SPOOL_%s' % _n),
@@ -1868,6 +1879,9 @@ class MultiAce:
         self.toolhead = self.printer.lookup_object('toolhead')
 
         self.reactor.register_callback(self._migrate_settings_savevars)
+
+        self._install_flow_calibrator_hook()
+        self._install_flow_calibrate_cmd_hook()
 
         if self.stall_watchdog and getattr(self, '_watchdog_timer', None) is None:
             self._watchdog_next = None
@@ -8451,6 +8465,22 @@ class MultiAce:
         self.log_always('[multiACE] Remember last filament %s%s'
                         % ('ON' if enable else 'OFF', sfx))
 
+    cmd_ACE_SET_PA_SYNC_help = (
+        '[multiACE] Enable/disable PA sync (ENABLE=0|1): ON auto-captures '
+        'the stock flow routine onto the bound spool AND auto-applies the '
+        'stored per-spool value on toolchange; OFF leaves pressure advance '
+        'to the slicer/manual value. ACE_PA_CALIBRATE stays usable either '
+        'way. Live + write-through (writes the pa_sync config line; '
+        'PERSIST=0 = until restart).')
+
+    def cmd_ACE_SET_PA_SYNC(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self.pa_sync = enable
+        sfx = self._wt_persist(gcmd, 'pa_sync', _wt_fmt_bool(enable), None,
+                               shadow_attr='_pa_sync_cfg', shadow_val=enable)
+        self.log_always('[multiACE] PA sync %s%s'
+                        % ('ON' if enable else 'OFF', sfx))
+
     cmd_ACE_SET_AIRPRINT_DETECTION_help = (
         '[multiACE] Enable/disable Air-Print Detection (ENABLE=0|1): the '
         'resistance-watch pauses (per lane + per head) and the airlog chew '
@@ -9411,6 +9441,370 @@ class MultiAce:
 
         return mm * SPOOL_FILAMENT_AREA_MM2 * self._spool_density(spool) / 1000.
 
+    def _nozzle_key_for_head(self, head):
+        """'{dia}_{volume_type}' for the head's extruder, mod-compatible.
+        Pre-1.6.0 firmware has no volume type attribute; 'standard' is
+        correct there, since high_flow cannot even be declared yet."""
+        try:
+            name = 'extruder' if int(head) == 0 else 'extruder%d' % int(head)
+            ext = self.printer.lookup_object(name, None)
+            if ext is None:
+                return None
+            dia = getattr(ext, 'nozzle_diameter', None)
+            if dia is None:
+                return None
+            vt = getattr(ext, 'nozzle_volume_type', None) or 'standard'
+            return '%s_%s' % (('%g' % float(dia)), str(vt))
+        except Exception:
+            return None
+
+    def _nozzle_keys_status(self):
+        """Deduped, order-preserving list of the four heads' PA keys for
+        get_status - unresolvable heads dropped. Safe during __init__
+        (lookup_object with default; whole thing fail-open)."""
+        out = []
+        try:
+            for h in range(4):
+                k = self._nozzle_key_for_head(h)
+                if k and k not in out:
+                    out.append(k)
+        except Exception:
+            pass
+        return out
+
+    def _spool_for_head_pa(self, head):
+        """(sid, spool) feeding `head`, resolved exactly like
+        book_spool_use: ACE head via head_source -> slot binding, feeder/
+        manual via the h<n> head binding. (None, None) when unbound."""
+        try:
+            src = self._head_source.get(head)
+            if src:
+                sid = self._spool_binding.get(
+                    self._spool_key(src['ace_index'], src['slot']))
+            elif not self.head_uses_ace(head):
+                sid = self._spool_binding.get(self._spool_head_key(head))
+            else:
+                return None, None
+            sp = self._spools.get(sid) if sid else None
+            return (sid, sp) if sp is not None else (None, None)
+        except Exception:
+            return None, None
+
+    def _spool_pa_store(self, sid, spool, nozzle_key, value):
+        """Merge one measured value into the spool's pa_matrix + persist.
+        Merge, never replace: other nozzles' entries survive."""
+        try:
+            m = spool.get('pa_matrix')
+            if not isinstance(m, dict):
+                m = {}
+            m[str(nozzle_key)] = round(float(value), 6)
+            spool['pa_matrix'] = m
+            self._save_spool_db()
+            logging.info('[multiACE] [pa] spool #%s: stored %s = %.6f'
+                         % (sid, nozzle_key, float(value)))
+            self.log_always('[multiACE] PA %.6f saved for spool %s (%s)'
+                            % (float(value),
+                               spool.get('label') or sid, nozzle_key))
+        except Exception as e:
+            logging.info('[multiACE] [pa] store failed: %s' % e)
+
+    def _apply_spool_pa(self, head, why=''):
+        """Apply the bound spool's stored PA for the head's CURRENT nozzle.
+        Silent no-op when unbound / no entry / value already applied (the
+        toolchange hook fires constantly mid-print - the cache keeps this
+        to one SET_PRESSURE_ADVANCE per actual change). SpoolLink mode is
+        skipped: PA there belongs to the pechex mod's own apply path, and
+        our table is not the leading store in that world."""
+        try:
+            if not self.pa_sync:
+                return
+            if self._spoollink_active():
+                return
+            sid, sp = self._spool_for_head_pa(head)
+            if sp is None:
+                return
+            key = self._nozzle_key_for_head(head)
+            m = sp.get('pa_matrix')
+            if not key or not isinstance(m, dict) or key not in m:
+                return
+            val = float(m[key])
+            cache = getattr(self, '_pa_applied', None)
+            if cache is None:
+                cache = self._pa_applied = {}
+            if cache.get(head) == (sid, key, val):
+                return
+            self._set_head_pa(head, val)
+            cache[head] = (sid, key, val)
+            logging.info('[multiACE] [pa] head %d: applied %.6f (%s, '
+                         'spool #%s%s)'
+                         % (head, val, key, sid,
+                            (', ' + why) if why else ''))
+        except Exception as e:
+            logging.info('[multiACE] [pa] apply failed (head %s): %s'
+                         % (head, e))
+
+    def _install_flow_calibrator_hook(self):
+        """Auto-capture PA from the stock flow routine onto the bound spool.
+
+        The selectable per-print flow calibration (and any FLOW_CALIBRATE)
+        ends each extruder via flow_calibrator._end_of_calibration(extruder)
+        - on the measured-success AND out-of-range-default paths, but NEVER
+        on FLOW_RESET_K (that calls _save_config directly, not
+        _end_of_calibration). Wrapping it therefore captures a real
+        calibration and never a reset. Runtime method wrap, no stock file
+        edited (the pattern multiACE already uses for stock methods). At
+        that point _current_k[extruder_name] already holds the final K.
+        Idempotent (own re-wrap guard), re-armed on each klippy:ready."""
+        try:
+            fc = self.printer.lookup_object('flow_calibrator', None)
+        except Exception:
+            fc = None
+        if fc is None or getattr(fc, '_multiace_pa_wrapped', False):
+            return
+        orig = getattr(fc, '_end_of_calibration', None)
+        if not callable(orig):
+            return
+
+        def _wrapped(extruder, *a, **kw):
+            try:
+                self._capture_flow_pa(fc, extruder)
+            except Exception as e:
+                logging.info('[multiACE] [pa] flow-capture failed: %s' % e)
+            return orig(extruder, *a, **kw)
+
+        fc._end_of_calibration = _wrapped
+        fc._multiace_pa_wrapped = True
+        logging.info('[multiACE] [pa] flow_calibrator hook active - the '
+                     'stock flow routine now stores PA per bound spool')
+
+    def _install_flow_calibrate_cmd_hook(self):
+        """Spool value beats the measurement. Wraps the FLOW_CALIBRATE
+        gcode command (register_command None -> capture -> re-register,
+        the SET_PRINT_FILAMENT_CONFIG pattern): when the active head's
+        bound spool carries a value for the current nozzle, the ~1-2 min
+        measurement is skipped and the spool value applied instead;
+        without one, stock measures and the _end_of_calibration hook above
+        stores the result on the spool, so it is present next time.
+        Precedence: spool > calibrated K > slicer. Reached by the
+        preflight's per-head "T<h> A0 + FLOW_CALIBRATE" block AND by the
+        touchscreen start (SM_PRINT_FLOW_CALIBRATE runs the same command),
+        so both start paths behave alike. FORCE=1 (a deliberate stock
+        re-calibration) and ACE_PA_CALIBRATE's own re-measure
+        (_pa_force_measure) always measure. Idempotent."""
+        if getattr(self, '_orig_flow_calibrate', None) is not None:
+            return
+        try:
+            orig = self.gcode.register_command('FLOW_CALIBRATE', None)
+            if orig is None:
+                return
+            self._orig_flow_calibrate = orig
+            self.gcode.register_command(
+                'FLOW_CALIBRATE', self._wrap_flow_calibrate,
+                desc='start calibrate the factor for pressure advance '
+                     '(multiACE: skipped when the bound spool carries a '
+                     'value, see pa_sync)')
+            logging.info('[multiACE] [pa] FLOW_CALIBRATE hook active - a '
+                         'bound spool value skips the measurement')
+        except Exception as e:
+            logging.info('[multiACE] [pa] FLOW_CALIBRATE hook not '
+                         'installed: %s' % e)
+
+    def _wrap_flow_calibrate(self, gcmd):
+        """Replacement handler for FLOW_CALIBRATE (see the installer)."""
+        skip = None
+        try:
+            if (self.pa_sync and not getattr(self, '_pa_force_measure', False)
+                    and gcmd.get_int('FORCE', 0) == 0
+                    and not self._spoollink_active()):
+                ext = self.toolhead.get_extruder()
+                head = int(getattr(ext, 'extruder_index', -1))
+                if 0 <= head <= 3:
+                    sid, sp = self._spool_for_head_pa(head)
+                    key = self._nozzle_key_for_head(head)
+                    m = sp.get('pa_matrix') if sp else None
+                    if key and isinstance(m, dict) and key in m:
+                        skip = (head, sid, sp, key, float(m[key]))
+        except Exception as e:
+            logging.info('[multiACE] [pa] FLOW_CALIBRATE pre-check failed, '
+                         'measuring: %s' % e)
+            skip = None
+        if skip is None:
+            return self._orig_flow_calibrate(gcmd)
+        head, sid, sp, key, val = skip
+        self._set_head_pa(head, val)
+        cache = getattr(self, '_pa_applied', None)
+        if cache is None:
+            cache = self._pa_applied = {}
+        cache[head] = (sid, key, val)
+        self.log_always('[multiACE] PA calibration skipped: head %d uses '
+                        'spool value %.6f (%s, spool %s)'
+                        % (self._disp(head), val, key,
+                           sp.get('label') or sid))
+        logging.info('[multiACE] [pa] FLOW_CALIBRATE skipped on head %d: '
+                     'spool #%s %s = %.6f applied' % (head, sid, key, val))
+
+    def _set_head_pa(self, head, val):
+        """Apply a PA value to a head's extruder stepper DIRECTLY (the way
+        stock's own calibrator does), not via SET_PRESSURE_ADVANCE: with
+        print_task_config.flow_calibrate on, stock's command handler
+        ignores every SET_PRESSURE_ADVANCE while printing ("flow
+        calibration enabled, so not take effect", kinematics/extruder.py),
+        which would silently block the spool value on a mid-print swap.
+        The power-loss PA env is recorded like stock does. Falls back to
+        the gcode command on firmware without the stepper method."""
+        name = 'extruder' if int(head) == 0 else 'extruder%d' % int(head)
+        ext = self.printer.lookup_object(name, None)
+        es = getattr(ext, 'extruder_stepper', None)
+        setter = getattr(es, '_set_pressure_advance', None)
+        if es is None or not callable(setter):
+            self.gcode.run_script_from_command(
+                'SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%.6f'
+                % (name, float(val)))
+            return
+        st = getattr(es, 'config_smooth_time', None)
+        if st is None:
+            st = getattr(es, 'pressure_advance_smooth_time', 0.040)
+        setter(float(val), st)
+        try:
+            vsd = self.printer.lookup_object('virtual_sdcard', None)
+            rec = getattr(vsd, 'record_pl_print_pressure_advance', None)
+            if callable(rec):
+                rec({es.name: [es.pressure_advance,
+                               es.pressure_advance_smooth_time]})
+        except Exception:
+            pass
+
+    def _capture_flow_pa(self, fc, extruder):
+        """Store one just-calibrated extruder's K onto its bound spool for
+        the head's current nozzle. Loaded/bound heads only; SpoolLink is
+        skipped (PA belongs to the mod's own path there)."""
+        if not self.pa_sync:
+            return
+        if self._spoollink_active():
+            return
+        try:
+            name = extruder.get_name()
+        except Exception:
+            return
+        if name == 'extruder':
+            head = 0
+        elif name.startswith('extruder') and name[8:].isdigit():
+            head = int(name[8:])
+        else:
+            return
+        if head < 0 or head > 3:
+            return
+        k = getattr(fc, '_current_k', None)
+        if not isinstance(k, dict) or name not in k:
+            return
+        try:
+            val = float(k[name])
+        except (TypeError, ValueError):
+            return
+        if val <= 0:
+            return
+        sid, sp = self._spool_for_head_pa(head)
+        if sp is None:
+            return
+        key = self._nozzle_key_for_head(head)
+        if not key:
+            return
+        cur = sp.get('pa_matrix')
+        if isinstance(cur, dict) and key in cur:
+            try:
+                if abs(float(cur[key]) - val) < 1e-9:
+                    return
+            except (TypeError, ValueError):
+                pass
+        self._spool_pa_store(sid, sp, key, val)
+        logging.info('[multiACE] [pa] captured from flow routine: head %d '
+                     '%s = %.6f (spool #%s)' % (head, key, val, sid))
+
+    cmd_ACE_PA_CALIBRATE_help = (
+        '[multiACE] Measure pressure advance via stock FLOW_CALIBRATE for '
+        'loaded heads whose bound spool has no stored value for the '
+        'current nozzle. ACE_PA_CALIBRATE [HEAD=n] [FORCE=1] - HEAD limits '
+        'to one head, FORCE re-measures despite an existing entry.')
+
+    def cmd_ACE_PA_CALIBRATE(self, gcmd):
+        head_arg = gcmd.get_int('HEAD', None, minval=0, maxval=3)
+        force = gcmd.get_int('FORCE', 0, minval=0, maxval=1)
+        ps = self.printer.lookup_object('print_stats', None)
+        if ps is not None and (getattr(ps, 'state', '') or '').lower() \
+                in ('printing', 'paused'):
+            raise self._ace_error(gcmd, 'PA calibration requires an idle '
+                                        'printer', code=200)
+        fp = self.printer.lookup_object('filament_parameters', None)
+        heads = [head_arg] if head_arg is not None else list(range(4))
+        done, skipped = [], []
+        for head in heads:
+            sid, sp = self._spool_for_head_pa(head)
+            if sp is None:
+                skipped.append((head, 'no spool bound'))
+                continue
+            if not self._head_is_loaded(head):
+                skipped.append((head, 'not loaded'))
+                continue
+            key = self._nozzle_key_for_head(head)
+            if key is None:
+                skipped.append((head, 'nozzle unknown'))
+                continue
+            m = sp.get('pa_matrix')
+            if not force and isinstance(m, dict) and key in m:
+                skipped.append((head, 'has %s' % key))
+                continue
+            try:
+                gate = getattr(fp, 'is_allow_to_flow_calibrate', None)
+                if gate is not None:
+                    name = 'extruder' if head == 0 \
+                        else 'extruder%d' % head
+                    ext = self.printer.lookup_object(name, None)
+                    ptc = self.printer.lookup_object(
+                        'print_task_config', None)
+                    st = ptc.get_status() if ptc else {}
+                    if ext is not None and not gate(
+                            st.get('filament_vendor', [''] * 4)[head],
+                            st.get('filament_type', [''] * 4)[head],
+                            st.get('filament_sub_type', [''] * 4)[head],
+                            ext.nozzle_diameter):
+                        skipped.append((head, 'material not allowed on '
+                                              'this nozzle'))
+                        continue
+            except Exception:
+                pass
+            name = 'extruder' if head == 0 else 'extruder%d' % head
+            ext = self.printer.lookup_object(name, None)
+            before = getattr(ext, 'pressure_advance', None)
+            self.log_always('[multiACE] PA calibration: head %d, spool '
+                            '%s, nozzle %s'
+                            % (self._disp(head),
+                               sp.get('label') or sid, key))
+            self._pa_force_measure = True
+            try:
+                self.gcode.run_script_from_command('T%d' % head)
+                self.gcode.run_script_from_command(
+                    'FLOW_CALIBRATE EXTRUDER=%s' % name)
+            except Exception as e:
+                skipped.append((head, 'FLOW_CALIBRATE failed: %s'
+                                % str(e)[:80]))
+                continue
+            finally:
+                self._pa_force_measure = False
+            after = getattr(ext, 'pressure_advance', None)
+            if after is None or after == before:
+                skipped.append((head, 'no measurement'))
+                continue
+            self._spool_pa_store(sid, sp, key, after)
+            done.append(head)
+        parts = []
+        if done:
+            parts.append('measured: %s' % ', '.join(
+                'T%d' % self._disp(h) for h in done))
+        for h, r in skipped:
+            parts.append('T%d skipped (%s)' % (self._disp(h), r))
+        self.log_always('[multiACE] PA calibration: '
+                        + ('; '.join(parts) if parts else 'nothing to do'))
+
     def book_spool_use(self, head, mm, why='move'):
         """Book `mm` of filament against the spool feeding `head`. Public:
         the bg engine calls it for its stealth prime, which bypasses the
@@ -9920,6 +10314,71 @@ class MultiAce:
         self.log_always('[multiACE] Spool #%s updated: %s'
                         % (sid, self._spool_label(spool)))
 
+    cmd_ACE_SPOOL_PA_help = (
+        '[multiACE] Edit a spool\'s stored pressure-advance values: '
+        'ACE_SPOOL_PA ID=n [KEY=0.4_standard VALUE=0.222] '
+        '[DELETE=0.4_standard]. KEY is {nozzle}_{volume_type}, the same '
+        'keys the flow-routine capture writes. Without KEY/DELETE the '
+        'entries are listed.')
+
+    @staticmethod
+    def _pa_key_valid(key):
+        """Key shape '{dia}_{volume_type}' (see _nozzle_key_for_head - %g
+        float, volume type may itself carry underscores: high_flow). No
+        regex on purpose - ace.py does not import re."""
+        parts = key.split('_', 1)
+        if len(parts) != 2 or not parts[1]:
+            return False
+        try:
+            float(parts[0])
+        except ValueError:
+            return False
+        return all(c.islower() or c == '_' for c in parts[1])
+
+    def cmd_ACE_SPOOL_PA(self, gcmd):
+        sid = str(gcmd.get_int('ID', minval=1))
+        spool = self._spools.get(sid)
+        if spool is None:
+            raise self._ace_error(gcmd, 'No spool #%s in the table' % sid,
+                                  code=200)
+        if self._spoollink_active():
+            raise self._ace_error(gcmd, 'PA is managed by SpoolLink in '
+                                        'this spool mode', code=200)
+        dele = gcmd.get('DELETE', None)
+        key = gcmd.get('KEY', None)
+        if dele is not None:
+            m = spool.get('pa_matrix')
+            if isinstance(m, dict) and dele in m:
+                m.pop(dele, None)
+                self._save_spool_db()
+                self.log_always('[multiACE] PA %s removed from spool %s'
+                                % (dele, spool.get('label') or sid))
+            else:
+                raise self._ace_error(gcmd, 'Spool #%s has no PA entry %s'
+                                      % (sid, dele), code=200)
+        elif key is not None:
+            key = key.strip()
+            if not self._pa_key_valid(key):
+                raise self._ace_error(gcmd, 'Invalid PA key %r (expected '
+                                            'e.g. 0.4_standard)' % key,
+                                      code=200)
+            val = gcmd.get_float('VALUE', minval=0., maxval=5.)
+            self._spool_pa_store(sid, spool, key, val)
+            for h in range(4):
+                _hs, _hsp = self._spool_for_head_pa(h)
+                if _hs == sid:
+                    self._apply_spool_pa(h, why='edit')
+        else:
+            m = spool.get('pa_matrix')
+            if isinstance(m, dict) and m:
+                self.log_always('[multiACE] PA of spool %s: %s'
+                                % (spool.get('label') or sid,
+                                   ', '.join('%s=%s' % (k, m[k])
+                                             for k in sorted(m))))
+            else:
+                self.log_always('[multiACE] Spool %s has no stored PA'
+                                % (spool.get('label') or sid))
+
     cmd_ACE_SPOOL_ASSIGN_help = (
         '[multiACE] Bind a spool to a slot: ACE_SPOOL_ASSIGN ACE=n SLOT=n '
         '[ID=n], or to a feeder/manual head: ACE_SPOOL_ASSIGN HEAD=n [ID=n]. '
@@ -9987,6 +10446,8 @@ class MultiAce:
         if _prev is not None and str(_prev) != sid:
             self._spool_drop_if_unbound_sm(_prev, 'displaced by #%s' % sid)
         self._save_spool_db(backup=True)
+        if h is not None:
+            self._apply_spool_pa(h, why='assign')
         self.log_always('[multiACE] %s: spool #%s (%s)'
                         % (where, sid,
                            self._spool_label(self._spools[sid])))
@@ -11421,6 +11882,8 @@ class MultiAce:
                 'reason': 'no_head_index',
             })
             return
+
+        self._apply_spool_pa(head_index, why='toolchange')
 
         source = self._head_source.get(head_index)
         if source is None:
@@ -15792,6 +16255,8 @@ class MultiAce:
                 'per_head':         {str(k): v for k, v in self.head_auto_retries.items()},
             },
             'firmware_version': self.firmware_version,
+            'pa_sync': bool(getattr(self, 'pa_sync', False)),
+            'nozzle_keys': self._nozzle_keys_status(),
             'aces': aces,
         }
 

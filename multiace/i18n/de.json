@@ -733,7 +733,8 @@
       "pa_paste_title": "Durch die gemerkten Werte ersetzen (gespeichert erst mit Speichern)",
       "learn_uid": "Karten-UID {uid} der Spule \"{spool}\" hinzufügen? {where} Jede Seite mit diesem Chip bindet danach von selbst.",
       "learn_uid_where_local": "Sie wird in der lokalen Spulentabelle gespeichert.",
-      "learn_uid_where_sm": "Sie wird lokal gespeichert und bei Spoolman in card_uids der Spule eingetragen (SpoolLink liest dasselbe Feld)."
+      "learn_uid_where_sm": "Sie wird lokal gespeichert und bei Spoolman in card_uids der Spule eingetragen (SpoolLink liest dasselbe Feld).",
+      "pa_bad_key": "Ungültiger PA-Schlüssel (erwartet z.B. 0.4_standard)"
     },
     "confirm": {
       "load_slot": "Kopf {head} aus ACE {ace} / Slot {slot} laden?",

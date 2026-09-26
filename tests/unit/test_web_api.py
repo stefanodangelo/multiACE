@@ -1500,6 +1500,65 @@ class TestDeclaredBlackColor:
         assert parsed["aces"][0]["slots"][0]["color"] == "#000000"
 
 
+class TestSpoolmanPaMatrix:
+    """_pa_norm / _spoolman_pa_extra: the local<->Spoolman PA matrix
+    round-trip. Spoolman text extra fields are JSON-string-encoded
+    (usually a double-encoded string), so decoding has to tolerate a
+    bare dict, a JSON object string, or a JSON-string-of-a-JSON-string."""
+
+    def test_pa_norm_rounds_and_drops_unparseable(self, app_env):
+        main, cfg, calls = app_env
+        out = main._pa_norm({
+            "0.4_standard": 0.1234567, "0.6_high_flow": "0.05",
+            "bad": "not-a-number", 1: 2,
+        })
+        assert out == {"0.4_standard": 0.123457, "0.6_high_flow": 0.05,
+                       "1": 2.0}
+
+    def test_pa_norm_non_dict_is_empty(self, app_env):
+        main, cfg, calls = app_env
+        assert main._pa_norm(None) == {}
+        assert main._pa_norm("nope") == {}
+
+    def test_extra_field_missing_is_none(self, app_env):
+        main, cfg, calls = app_env
+        assert main._spoolman_pa_extra({"extra": {}}) is None
+        assert main._spoolman_pa_extra({}) is None
+
+    def test_extra_field_bare_dict(self, app_env):
+        main, cfg, calls = app_env
+        sp = {"extra": {main._SM_PA_FIELD: {"0.4_standard": 0.2}}}
+        assert main._spoolman_pa_extra(sp) == {"0.4_standard": 0.2}
+
+    def test_extra_field_double_encoded_json_string(self, app_env):
+        """The real Spoolman shape: a text extra field holding a JSON
+        string, whose decoded value is itself a JSON-encoded string."""
+        import json
+        main, cfg, calls = app_env
+        inner = json.dumps({"0.4_standard": 0.222})
+        sp = {"extra": {main._SM_PA_FIELD: json.dumps(inner)}}
+        assert main._spoolman_pa_extra(sp) == {"0.4_standard": 0.222}
+
+    def test_extra_field_garbage_is_none(self, app_env):
+        main, cfg, calls = app_env
+        sp = {"extra": {main._SM_PA_FIELD: "{not json"}}
+        assert main._spoolman_pa_extra(sp) is None
+
+    def test_pull_only_fills_pa_when_local_side_has_none(self, app_env):
+        """_spoolman_to_local must not clobber a locally-measured PA value
+        with a stale/absent one from Spoolman - local capture leads."""
+        main, cfg, calls = app_env
+        sp = {"id": 7, "filament": {}, "extra": {
+            main._SM_PA_FIELD: json.dumps(json.dumps(
+                {"0.4_standard": 0.3}))}}
+        out = main._spoolman_to_local(sp, existing=None)
+        assert out["pa_matrix"] == {"0.4_standard": 0.3}
+
+        out2 = main._spoolman_to_local(
+            sp, existing={"pa_matrix": {"0.4_standard": 0.111}})
+        assert "pa_matrix" not in out2
+
+
 class TestMachineNozzleTypes:
     """_machine_nozzle_types(): the supply-side read of the mixed
     standard/high-flow nozzle axis (firmware 1.6.0's nozzle_volume_type),

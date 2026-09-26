@@ -1193,6 +1193,36 @@
         <label>{{ t('ui.spools.sku') }}
           <input v-model="spoolForm.sku" size="16" :placeholder="t('ui.spools.sku_ph')">
         </label>
+        <!-- Pressure advance: existing-spool only (a value only makes
+             sense once the spool has fed a nozzle at least once). One
+             row per stored {dia}_{volume_type} key, plus an add-row and
+             a copy/paste slot for moving a whole matrix onto another
+             spool (e.g. a second roll of the same filament). -->
+        <div class="spool-pa" v-if="spoolEditId">
+          <label class="pnl-sub">{{ t('ui.spools.pa_hint') }}</label>
+          <table class="spool-pa-table" v-if="Object.keys(spoolForm.paMatrix).length">
+            <tr v-for="(val, key) in spoolForm.paMatrix" :key="'pa-' + key">
+              <td>{{ key }}</td>
+              <td>{{ val }}</td>
+              <td><button type="button" class="spool-pa-remove"
+                          @click="spoolPaRemoveEntry(key)"
+                          :title="t('ui.common.delete')">&times;</button></td>
+            </tr>
+          </table>
+          <p class="muted small" v-else>{{ t('ui.spools.pa_empty') }}</p>
+          <div class="spool-pa-add">
+            <input v-model="spoolPaNew.key" size="12" :placeholder="t('ui.spools.pa_key_ph')">
+            <input v-model="spoolPaNew.value" type="number" min="0" max="5" step="0.001"
+                   size="6" :placeholder="t('ui.spools.pa_value_ph')">
+            <button type="button" @click="spoolPaAddEntry()">+</button>
+          </div>
+          <div class="spool-pa-clipboard">
+            <button type="button" @click="spoolPaCopy()"
+                    :title="t('ui.spools.pa_copy_title')">{{ t('ui.spools.pa_copy') }}</button>
+            <button type="button" @click="spoolPaPaste()" :disabled="!spoolPaClipboard"
+                    :title="t('ui.spools.pa_paste_title')">{{ t('ui.spools.pa_paste') }}</button>
+          </div>
+        </div>
         <button @click="spoolSave()" :disabled="spoolAddBusy">{{ t('ui.common.save') }}</button>
         <button @click="spoolFormClear()">{{ t('ui.common.cancel') }}</button>
       </div>
@@ -1289,6 +1319,8 @@
                   :style="{background: '#' + sp.color}"></span>
             <span v-if="sp.label">{{ sp.label }}</span>
             <span class="muted small" v-if="spoolDetails(sp)">{{ sp.label ? ' · ' : '' }}{{ spoolDetails(sp) }}</span>
+            <span class="spool-pa-badge" v-if="sp.pa_matrix && Object.keys(sp.pa_matrix).length"
+                  :title="t('ui.spools.pa_btn_title')" @click="spoolEdit(sp)">PA</span>
           </td>
           <!-- The tag id in full, as its OWN column since it became
                sortable: which spool carries which tag is exactly what you
@@ -1400,6 +1432,17 @@
             {{ t('ui.config.remember_filament_label') }}
           </label>
           <p class="muted small" v-if="infoShown('remember_filament')">{{ t('ui.config.remember_filament_hint') }}</p>
+          <h4 class="pnl-sub">{{ t('ui.config.pa_sync') }}<button type="button" class="info-btn"
+              @click="toggleInfo('pa_sync')" :aria-expanded="infoShown('pa_sync')"
+              :title="infoShown('pa_sync') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button></h4>
+          <label class="pickup-clean-toggle">
+            <input type="checkbox" :checked="state.pa_sync"
+                   :disabled="state.spool_mode === 'spoollink'"
+                   @change="setPaSync($event.target.checked)">
+            {{ t('ui.config.pa_sync_label') }}
+          </label>
+          <p class="muted small" v-if="state.spool_mode === 'spoollink'">{{ t('ui.config.pa_sync_spoollink') }}</p>
+          <p class="muted small" v-if="infoShown('pa_sync')">{{ t('ui.config.pa_sync_hint') }}</p>
           <h4 class="pnl-sub">{{ t('ui.config.airprint_detection') }}<button type="button" class="info-btn"
               @click="toggleInfo('airprint_detection')" :aria-expanded="infoShown('airprint_detection')"
               :title="infoShown('airprint_detection') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button></h4>
@@ -2811,6 +2854,9 @@ reboot</pre>
         </label>
         <label>
           <input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}
+        </label>
+        <label :title="t('ui.preflight.pref_flow_cal_title')">
+          <input type="checkbox" v-model="preflight.flowCal"> {{ t('ui.preflight.pref_flow_cal') }}
         </label>
         <span class="spacer"></span>
         <button @click="closePreflight"

@@ -762,7 +762,8 @@
       "pa_paste_title": "Replace with the copied values (saved on Save)",
       "learn_uid": "Add card UID {uid} to spool \"{spool}\"? {where} Any side with this chip will then bind by itself.",
       "learn_uid_where_local": "It is stored in the local spool table.",
-      "learn_uid_where_sm": "It is stored locally and written to the spool's card_uids in Spoolman (SpoolLink reads the same field)."
+      "learn_uid_where_sm": "It is stored locally and written to the spool's card_uids in Spoolman (SpoolLink reads the same field).",
+      "pa_bad_key": "Invalid PA key (expected e.g. 0.4_standard)"
     },
     "confirm": {
       "load_slot": "Load Head {head} from ACE {ace} / Slot {slot}?",

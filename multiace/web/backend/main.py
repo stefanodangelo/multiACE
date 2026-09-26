@@ -764,6 +764,8 @@ def _parse_state(status: dict) -> dict:
         "pickup_cleaning":    bool(ace.get("pickup_cleaning", False)),
         "confirm_commands":   bool(ace.get("confirm_commands", False)),
         "remember_filament":  remember_filament,
+        "pa_sync":            bool(ace.get("pa_sync", False)),
+        "nozzle_keys":        ace.get("nozzle_keys", []) or [],
         "airprint_detection": bool(ace.get("airprint_detection", False)),
         "quad_replenish": bool(ace.get("quad_replenish", False)),
         "purge_matrix": bool(ace.get("purge_matrix", True)),
@@ -1617,6 +1619,7 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                                   safe_name: str,
                                   bed_mesh: bool = False,
                                   camera: bool = False,
+                                  flow_cal: bool = False,
                                   remap_override: dict | None = None,
                                   head_assignment: dict | None = None,
                                   head_plan: str = "loadout",
@@ -1666,10 +1669,11 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         cur = Path(final)
         nxt = tmp_b if cur == tmp_a else tmp_a
 
-        if bed_mesh or camera:
+        if bed_mesh or camera or flow_cal:
             _set_stage(state, "print_prefs", 84.0)
             await asyncio.to_thread(
-                _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera)
+                _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera,
+                flow_cal)
             cur, nxt = nxt, cur
 
         if stage and len(_queue) >= QUEUE_MAX:
@@ -1852,6 +1856,7 @@ class _PreflightPrint(BaseModel):
 
     bed_mesh: bool = False
     camera:   bool = False
+    flow_cal: bool = False
 
     remap: dict[str, int] | None = None
 
@@ -1909,7 +1914,7 @@ async def preflight_print(request: Request, req: _PreflightPrint) -> dict:
         "loadout", "optimize", "layer") else "loadout"
     asyncio.create_task(_run_preflight_pipeline(
         job_id, req.token, req.mode, safe_name, req.bed_mesh, req.camera,
-        req.remap, req.head_assignment, head_plan, req.stage))
+        req.flow_cal, req.remap, req.head_assignment, head_plan, req.stage))
     return {"job_id": job_id, "filename": safe_name, "mode": req.mode}
 
 @app.get("/api/preflight/print/status")
@@ -3230,6 +3235,116 @@ def _spoolman_subtype_guess(name: str, material: str) -> str:
     rest = n[low.index(mlow) + len(m):].strip(" -_/")
     return rest[:32]
 
+_SM_PA_FIELD = "pressure_advance_matrix"
+_sm_pa_field_state: dict = {"base": "", "ok": False}
+_sm_pa_pushed: dict = {}
+
+def _pa_norm(m) -> dict:
+    """{str key: round(float, 6)} with unparseable entries dropped - the
+    comparable form of a PA matrix (matches ace.py's round(...,6) store)."""
+    out = {}
+    if isinstance(m, dict):
+        for k, v in m.items():
+            try:
+                out[str(k)] = round(float(v), 6)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+def _spoolman_pa_extra(sp: dict) -> dict | None:
+    """The SM spool's PA matrix, tolerantly decoded. Spoolman text extra
+    fields hold JSON-string-encoded values, so the raw value is usually
+    '"{\\"0.4_standard\\": 0.222}"' - one loads yields the inner JSON
+    string, a second the dict. Accepts a bare dict / bare JSON object too.
+    None = no usable data."""
+    raw = (sp.get("extra") or {}).get(_SM_PA_FIELD)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return _pa_norm(raw) or None
+    try:
+        v = json.loads(str(raw))
+        if isinstance(v, str):
+            v = json.loads(v) if v.strip() else None
+        return _pa_norm(v) or None
+    except (ValueError, TypeError):
+        return None
+
+async def _spoolman_ensure_pa_field(client, base: str) -> bool:
+    """Create the extra-field definition once if the instance lacks it
+    (a PATCH with an undefined extra key is refused). Cached per base for
+    the process lifetime; the mod may have created it already."""
+    if _sm_pa_field_state["ok"] and _sm_pa_field_state["base"] == base:
+        return True
+    try:
+        r = await client.get(f"{base}/api/v1/field/spool")
+        r.raise_for_status()
+        keys = {str(f.get("key")) for f in (r.json() or [])
+                if isinstance(f, dict)}
+        if _SM_PA_FIELD not in keys:
+            r2 = await client.post(
+                f"{base}/api/v1/field/spool/{_SM_PA_FIELD}",
+                json={"name": "Pressure Advance Matrix",
+                      "field_type": "text"})
+            r2.raise_for_status()
+            _trace.info("spoolman: created extra field %s", _SM_PA_FIELD)
+        _sm_pa_field_state.update(base=base, ok=True)
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: pa field ensure failed: %s",
+                    str(e) or type(e).__name__)
+        return False
+
+async def _spoolman_pa_push_one(client, base: str, smid: str, sp: dict,
+                                matrix: dict) -> bool:
+    """PATCH one SM spool's PA field to the local matrix. Sends the FULL
+    existing extra dict with only our key changed - whether Spoolman's
+    PATCH replaces or merges the extra object, other fields (card_uids
+    etc.) survive. An empty matrix writes an empty text value (clears
+    under either semantics)."""
+    if not await _spoolman_ensure_pa_field(client, base):
+        return False
+    extra = dict(sp.get("extra") or {})
+    norm = _pa_norm(matrix)
+    extra[_SM_PA_FIELD] = json.dumps(
+        json.dumps(norm, sort_keys=True) if norm else "")
+    try:
+        r = await client.patch(f"{base}/api/v1/spool/{smid}",
+                               json={"extra": extra})
+        r.raise_for_status()
+        _trace.info("spoolman: pa pushed to SM%s (%d entr%s)", smid,
+                    len(norm), "y" if len(norm) == 1 else "ies")
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: pa push SM%s failed: %s", smid,
+                    str(e) or type(e).__name__)
+        return False
+
+async def _spoolman_pa_maybe_push(client, base: str, smid: str,
+                                  local_pa) -> bool:
+    """Piggyback PA push for the consumption pusher: acts only when the
+    local matrix differs from what this process last saw/wrote in Spoolman
+    (RAM gate -> the periodic tick normally costs NOTHING). On a change:
+    one GET (also yields the extra dict the PATCH must carry), skip if
+    Spoolman already matches, else PATCH. Local leads."""
+    if not isinstance(local_pa, dict):
+        return False
+    want = _pa_norm(local_pa)
+    if _sm_pa_pushed.get(smid) == want:
+        return False
+    r = await client.get(f"{base}/api/v1/spool/{smid}")
+    r.raise_for_status()
+    sp = r.json()
+    if not isinstance(sp, dict):
+        return False
+    if (_spoolman_pa_extra(sp) or {}) == want:
+        _sm_pa_pushed[smid] = want
+        return False
+    ok = await _spoolman_pa_push_one(client, base, smid, sp, local_pa)
+    if ok:
+        _sm_pa_pushed[smid] = want
+    return ok
+
 def _spool_card_uids(sp: dict) -> list:
     """Entries of the spool's `card_uids` extra field, uppercased - the
     field SpoolLink maintains (comma-separated UID hex, JSON-string-
@@ -3290,6 +3405,10 @@ def _spoolman_to_local(sp: dict, existing: dict | None,
         out["sku"] = _ex_sku or _gen
     out["subtype"] = ((ex.get("subtype") or "").strip()
                       or _spoolman_subtype_guess(out["label"], out["material"]))
+    if ex.get("pa_matrix") is None:
+        _pa = _spoolman_pa_extra(sp)
+        if _pa:
+            out["pa_matrix"] = _pa
     return out
 
 async def _spoolman_refresh_known(base: str, spools: dict,
@@ -3329,6 +3448,9 @@ async def _spoolman_refresh_known(base: str, spools: dict,
                    - float(ex.get("density") or 0)) > 1e-6:
                 return True
         except (TypeError, ValueError):
+            return True
+        if (new_row.get("pa_matrix") is not None
+                and ex.get("pa_matrix") is None):
             return True
         return False
 
@@ -3787,6 +3909,12 @@ async def _spoolman_push(base: str, spools: dict) -> tuple[int, list[str]]:
             smid = str(sp.get("spoolman_id") or "").strip()
             if not smid:
                 continue
+            try:
+                await _spoolman_pa_maybe_push(client, base, smid,
+                                              sp.get("pa_matrix"))
+            except (httpx.HTTPError, ValueError) as e:
+                _trace.info("spoolman: pa push SM%s failed: %s", smid,
+                            str(e) or type(e).__name__)
             try:
                 used = float(sp.get("used_mm") or 0.0)
                 done = float(sp.get("spoolman_synced_mm") or 0.0)

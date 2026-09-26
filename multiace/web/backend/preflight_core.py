@@ -1249,35 +1249,114 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
     resolved = sorted({(v // 4, v % 4) for v in full_remap.values()})
     return str(cur), [{"ace": a, "slot": s} for a, s in resolved]
 
-def print_prefs_line(bed_mesh: bool, camera: bool) -> str:
+_FLOW_CAL_LINE_RE = re.compile(r"^\s*SM_PRINT_FLOW_CALIBRATE\b", re.IGNORECASE)
+_AUTO_LOAD_END_RE = re.compile(r"^\s*;\s*multiACE auto-load: end\b")
+_BARE_T_RE = re.compile(r"^\s*T(\d+)\s*(?:;.*)?$")
+
+def print_prefs_line(bed_mesh: bool, camera: bool,
+                     flow_cal: bool = False) -> str:
     """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
     FORCE=1 is required: the line is the first line of the uploaded file, which
     already runs with print_stats.state == 'printing', and stock rejects a
     non-forced preference change there (error 531). FORCE=1 bypasses that gate
     (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
-    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
-    intentionally left off here (separate topic)."""
-    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
+    start/bed-leveling steps so the flags are set in time.
+
+    FLOW_CALIBRATE: stock's "flow calibration" is the per-head pressure-
+    advance measurement (flow_calibrator.FLOW_CALIBRATE). With the flag on,
+    stock also IGNORES every SET_PRESSURE_ADVANCE from the slicer while
+    printing; with it off, the slicer's own line prints. The touchscreen
+    start dialog is the only stock place that turns it on, and a web-
+    started print never sees that dialog - so a preflight print ran at
+    the slicer's placeholder PA whatever the user had calibrated (issue
+    #115: rough top surfaces, overextrusion). The start gcode's own
+    SM_PRINT_FLOW_CALIBRATE lines sit BEFORE our auto-load block (heads
+    still empty -> runout pause), which is why the flag used to be forced
+    off; _prepend_print_prefs moves the calibration behind the block
+    instead when the toggle is on."""
+    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=%d "
             "TIME_LAPSE_CAMERA=%d FORCE=1"
-            % (1 if bed_mesh else 0, 1 if camera else 0))
+            % (1 if bed_mesh else 0, 1 if flow_cal else 0,
+               1 if camera else 0))
+
+def _flow_cal_block(lines: list) -> tuple:
+    """(insert_index, block_lines) for the relocated flow calibration, or
+    (None, []) when the file has no auto-load block to anchor on (then the
+    slicer's lines stay where they are = stock placement).
+
+    One T<h> A0 + FLOW_CALIBRATE pair per PHYSICAL head the processed file
+    actually prints with (bare T lines), NOT the stock SM_PRINT_FLOW_
+    CALIBRATE wrapper: that wrapper skips heads stock believes unused, and
+    stock derives 'used' from the slicer header's per-LOGICAL-T grams via
+    its map table - which no longer matches the physical heads after our
+    remap (issue #115 file: head 0 printed but read as unused). The pair
+    is exactly what the wrapper runs internally. Ends by re-selecting the
+    tool the start gcode had selected before the block, mirroring stock's
+    own re-select after its calibration, because the prime line follows
+    right after the block with the active tool."""
+    end_idx = None
+    initial = None
+    heads = set()
+    for i, line in enumerate(lines):
+        m = _BARE_T_RE.match(line)
+        if m:
+            h = int(m.group(1))
+            if 0 <= h <= 3:
+                heads.add(h)
+                if end_idx is None:
+                    initial = h
+            continue
+        if end_idx is None and _AUTO_LOAD_END_RE.match(line):
+            end_idx = i
+    if end_idx is None or not heads:
+        return None, []
+    if initial is None:
+        initial = min(heads)
+    block = ["; multiACE preflight: flow calibration (moved behind the "
+             "auto-load, heads loaded)\n"]
+    order = sorted(h for h in heads if h != initial) + \
+        ([initial] if initial in heads else [])
+    for h in order:
+        block.append("T%d A0\n" % h)
+        block.append("FLOW_CALIBRATE EXTRUDER=%d\n" % h)
+    block.append("T%d\n" % initial)
+    block.append("; multiACE preflight: flow calibration end\n")
+    return end_idx + 1, block
 
 def prepend_print_prefs(in_path: str, out_path: str,
-                        bed_mesh: bool = False, camera: bool = False) -> None:
+                        bed_mesh: bool = False, camera: bool = False,
+                        flow_cal: bool = False) -> None:
     """Stream-copy in_path to out_path with the print-preference line
     prepended at the very top (before the start gcode's calibration).
     Any SET_PRINT_PREFERENCES the slicer already emits is commented out
-    so it can't override ours from further down the file.
+    so it can't override ours from further down the file. With flow_cal
+    the slicer's SM_PRINT_FLOW_CALIBRATE lines are commented out and the
+    calibration is re-emitted behind the auto-load block (see
+    _flow_cal_block); the file is read twice for that (anchor + heads),
+    still streamed on the write side.
 
     Shared, streaming, file-to-file - one implementation both the backend
     (real temp files) and the browser's Pyodide worker (MEMFS paths) call,
     instead of the worker re-porting the same regex/replace rule over a
     JS string it would otherwise have to hold in memory whole."""
+    ins_idx, block = None, []
+    if flow_cal:
+        with open(in_path, "r", encoding="utf-8", errors="replace") as src:
+            ins_idx, block = _flow_cal_block(src.readlines())
     with open(out_path, "w", encoding="utf-8", errors="replace") as out:
         out.write("; multiACE preflight: print preferences\n")
-        out.write(print_prefs_line(bed_mesh, camera) + "\n")
+        out.write(print_prefs_line(bed_mesh, camera, flow_cal) + "\n")
+        i = -1
         with open(in_path, "r", encoding="utf-8", errors="replace") as src:
-            for line in src:
+            for i, line in enumerate(src):
+                if ins_idx is not None and i == ins_idx:
+                    out.writelines(block)
                 if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
                     out.write("; multiACE disabled: " + line.lstrip())
                     continue
+                if ins_idx is not None and _FLOW_CAL_LINE_RE.match(line):
+                    out.write("; multiACE moved: " + line.lstrip())
+                    continue
                 out.write(line)
+            if ins_idx is not None and ins_idx >= i + 1:
+                out.writelines(block)

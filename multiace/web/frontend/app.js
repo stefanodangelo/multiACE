@@ -1613,6 +1613,17 @@ createApp({
       } catch (_) {}
       reloadState();
     }
+    async function setPaSync(enable) {
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PA_SYNC",
+                                args: {ENABLE: enable ? 1 : 0}}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
     // Register the panel as a camera in Fluidd. A button, not something
     // the installer does - it changes the user's own dashboard, and the
     // backend leaves an existing entry of that name alone, so a second
@@ -1668,7 +1679,14 @@ createApp({
     // binding happens in the row's slot dropdown or from the slot card.
     const spoolForm = reactive({material: "", color: "", vendor: "",
                                subtype: "", weight: "", label: "", sku: "",
-                               price: "20"});
+                               price: "20", paMatrix: {}});
+    // {key: value} the user typed for a NEW PA entry - separate from
+    // spoolForm.paMatrix so a half-typed row doesn't leak into Save.
+    const spoolPaNew = reactive({key: "", value: ""});
+    // One shared clipboard slot: "copy" on any spool's edit form fills
+    // it, "paste" on any other applies it - values only take effect on
+    // Save, same as every other edited field.
+    const spoolPaClipboard = ref(null);
     // The RFID tag travels to Klipper as a gcode argument, and '#' TERMINATES
     // gcode arguments - so the marker '#' many users put in front of a
     // self-written tag must be stripped here. Harmless: the matcher compares
@@ -2003,13 +2021,51 @@ createApp({
       spoolForm.sku = sp.sku || "";
       spoolForm.price = (sp.price_per_kg === undefined || sp.price_per_kg === null)
         ? "20" : sp.price_per_kg;
+      // Own object, not a reference into the spool row: editing/deleting
+      // an entry here must not touch anything until Save.
+      spoolForm.paMatrix = Object.assign({}, sp.pa_matrix || {});
+      spoolPaNew.key = ""; spoolPaNew.value = "";
     }
     function spoolEditCancel() {
       spoolEditId.value = "";
       spoolForm.label = ""; spoolForm.weight = ""; spoolForm.sku = "";
-      spoolForm.price = "20";
+      spoolForm.price = "20"; spoolForm.paMatrix = {};
+      spoolPaNew.key = ""; spoolPaNew.value = "";
     }
-    function spoolSave() {
+    // '{dia}_{volume_type}' - see ace.py's _pa_key_valid, kept in step so
+    // a key rejected there is caught here first with the same message.
+    function spoolPaKeyValid(key) {
+      const parts = String(key || "").split("_");
+      if (parts.length < 2 || !parts[1]) return false;
+      if (!Number.isFinite(Number(parts[0]))) return false;
+      return /^[a-z_]+$/.test(parts.slice(1).join("_"));
+    }
+    function spoolPaAddEntry() {
+      const key = (spoolPaNew.key || "").trim();
+      const val = Number(spoolPaNew.value);
+      if (!spoolPaKeyValid(key)) {
+        setMacroLog(t("ui.spools.pa_bad_key"));
+        return;
+      }
+      if (!Number.isFinite(val) || val < 0 || val > 5) {
+        setMacroLog(t("ui.spools.pa_bad_value"));
+        return;
+      }
+      spoolForm.paMatrix[key] = val;
+      spoolPaNew.key = ""; spoolPaNew.value = "";
+    }
+    function spoolPaRemoveEntry(key) {
+      delete spoolForm.paMatrix[key];
+    }
+    function spoolPaCopy() {
+      spoolPaClipboard.value = Object.assign({}, spoolForm.paMatrix);
+    }
+    function spoolPaPaste() {
+      if (spoolPaClipboard.value) {
+        spoolForm.paMatrix = Object.assign({}, spoolPaClipboard.value);
+      }
+    }
+    async function spoolSave() {
       if (!spoolEditId.value) { spoolAdd(); return; }
       const args = {ID: spoolEditId.value,
                     MATERIAL: spoolForm.material || "PLA",
@@ -2020,8 +2076,31 @@ createApp({
                     COLOR: (spoolForm.color || "").replace("#", "")};   // "" clears it
       if (spoolForm.weight !== "") args.WEIGHT = spoolForm.weight;
       if (spoolForm.price !== "") args.PRICE_PER_KG = spoolForm.price;
-      spoolMacro("ACE_SPOOL_SET", args);
+      await spoolMacro("ACE_SPOOL_SET", args);
+      await spoolPaSyncEdits(spoolEditId.value);
       spoolEditCancel();
+    }
+    // Diffs spoolForm.paMatrix against the spool as it stood when the edit
+    // form opened, and issues one ACE_SPOOL_PA per added/changed/removed
+    // key - the command itself is single-entry, so a multi-row edit is
+    // several round-trips rather than one, same trade-off as the rest of
+    // this dialog (each field already goes through ACE_SPOOL_SET as a
+    // batch, but PA has its own gcode command with its own validation).
+    async function spoolPaSyncEdits(id) {
+      const sp = (state.spools || {})[id] || {};
+      const before = sp.pa_matrix || {};
+      const after = spoolForm.paMatrix || {};
+      for (const key of Object.keys(after)) {
+        if (before[key] === undefined
+            || Number(before[key]) !== Number(after[key])) {
+          await spoolMacro("ACE_SPOOL_PA", {ID: id, KEY: key, VALUE: after[key]});
+        }
+      }
+      for (const key of Object.keys(before)) {
+        if (after[key] === undefined) {
+          await spoolMacro("ACE_SPOOL_PA", {ID: id, DELETE: key});
+        }
+      }
     }
     async function spoolAdd() {
       const args = {MATERIAL: spoolForm.material || "PLA"};   // empty = filter cleared
@@ -4029,6 +4108,7 @@ createApp({
       // these on the official start).
       bedMesh: false,
       camera:  false,
+      flowCal: false,
       // true when this report was produced in-browser (Pyodide worker) rather
       // than by the printer backend - selects the local rewrite+upload path.
       local: false,
@@ -6012,6 +6092,7 @@ createApp({
         // never assembled into one JS string here to run a .replace() on.
         payload.bedMesh = !!preflight.bedMesh;
         payload.camera  = !!preflight.camera;
+        payload.flowCal = !!preflight.flowCal;
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
@@ -6088,7 +6169,8 @@ createApp({
       const POLL_MS        = 500;
       try {
         const body = {token: rep.token, mode, stage: !!stage,
-                      bed_mesh: !!preflight.bedMesh, camera: !!preflight.camera};
+                      bed_mesh: !!preflight.bedMesh, camera: !!preflight.camera,
+                      flow_cal: !!preflight.flowCal};
         if (mode === "slicer") {
           // Send the (possibly user-edited) slot assignment verbatim so the
           // print matches the preview exactly. Only entries differing from
@@ -7256,7 +7338,7 @@ createApp({
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setRememberFilament, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setRememberFilament, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
       spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
@@ -7266,6 +7348,8 @@ createApp({
       spoolListShown, spoolFilterActive, spoolFormClear,
       spoolList, spoolForSlot, spoolForHead, spoolSlotLabel, spoolWeightLabel, spoolTitle,
       spoolAdd, spoolSave, spoolEdit, spoolEditCancel, spoolEditId, spoolAddBusy,
+      spoolPaNew, spoolPaAddEntry, spoolPaRemoveEntry,
+      spoolPaCopy, spoolPaPaste, spoolPaClipboard,
       spoolUnassign, spoolDelete, spoolDetails,
       spoolSlotOptions, spoolSlotKey, spoolMoveLocked, spoolAssignTo, spoolPickerOptions,
       smRowTaken, smRowWhere, spoolWeightDialog, spoolSort, spoolNewTitle,
