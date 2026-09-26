@@ -462,6 +462,7 @@ class AceProtocolV2(AceProtocol):
                 'brand': '',
                 'color': color,
                 'rfid': 2 if ftype else 0,
+                'code': _fval(fields, 12, 0),
             }
 
             _tag = {}
@@ -479,7 +480,7 @@ class AceProtocolV2(AceProtocol):
             if _tag:
                 ret['result']['tag'] = _tag
 
-            _extra = _unparsed_fields(fields, (1, 2, 3, 4, 5, 6, 7, 8, 9))
+            _extra = _unparsed_fields(fields, (1, 2, 3, 4, 5, 6, 7, 8, 9, 12))
             if _extra:
                 ret['result']['_unparsed'] = _extra
         elif cmd == Cmd.GET_FEED_INFO:
