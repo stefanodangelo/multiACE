@@ -22,8 +22,8 @@ MULTIACE_CODENAME = "Second Take"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "9f33bed"
-MULTIACE_BUNDLE_SHA1 = "9ba7849"
+MULTIACE_BUILD_TAG = "a5ba9a4"
+MULTIACE_BUNDLE_SHA1 = "c37a2b9"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
