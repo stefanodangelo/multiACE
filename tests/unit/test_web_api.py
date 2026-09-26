@@ -1470,6 +1470,78 @@ def _raw_ace_status(*, slot0_status="ready", slot0_gate=1, slot0_rfid=0,
     }
 
 
+class TestDeclaredBlackColor:
+    """_color_to_hex(c, declared=...): an EMPTY slot reports (0,0,0) and
+    must stay colorless, but a slot with a known material/type whose tag
+    genuinely declares black must not fall back to grey."""
+
+    def test_undeclared_black_stays_none(self, app_env):
+        main, cfg, calls = app_env
+        assert main._color_to_hex([0, 0, 0]) is None
+        assert main._color_to_hex([0, 0, 0], declared=False) is None
+
+    def test_declared_black_is_kept(self, app_env):
+        main, cfg, calls = app_env
+        assert main._color_to_hex([0, 0, 0], declared=True) == "#000000"
+
+    def test_non_black_is_unaffected_by_declared(self, app_env):
+        main, cfg, calls = app_env
+        assert main._color_to_hex([217, 64, 64]) == "#d94040"
+        assert main._color_to_hex([217, 64, 64], declared=True) == "#d94040"
+
+    def test_a_black_filament_in_a_ready_slot_is_not_dropped_to_grey(
+            self, app_env):
+        """End-to-end through _parse_state: a slot with a known material
+        (declared) and a truly black RGB must render '#000000', not None -
+        the bug this fixes showed it as grey in the picker."""
+        main, cfg, calls = app_env
+        parsed = main._parse_state(_raw_ace_status(
+            slot0_status="ready", slot0_gate=1, slot0_color=[0, 0, 0]))
+        assert parsed["aces"][0]["slots"][0]["color"] == "#000000"
+
+
+class TestMachineNozzleTypes:
+    """_machine_nozzle_types(): the supply-side read of the mixed
+    standard/high-flow nozzle axis (firmware 1.6.0's nozzle_volume_type),
+    parallel to the existing diameter read in _machine_nozzles()."""
+
+    def test_reads_volume_type_per_extruder(self, app_env):
+        main, cfg, calls = app_env
+
+        async def fake_get(path):
+            assert path.startswith("/printer/objects/query?")
+            return {"result": {"status": {
+                "extruder": {"nozzle_volume_type": "standard"},
+                "extruder1": {"nozzle_volume_type": "high_flow"},
+                "extruder2": {},
+                "extruder3": {"nozzle_volume_type": ""},
+            }}}
+
+        main._mr_get = fake_get
+        out = asyncio.run(main._machine_nozzle_types())
+        assert out == {0: "standard", 1: "high_flow"}
+
+    def test_pre_1_6_0_firmware_is_empty_not_standard(self, app_env):
+        """The field is simply absent on older firmware - missing must
+        stay missing, never default to 'standard'."""
+        main, cfg, calls = app_env
+
+        async def fake_get(path):
+            return {"result": {"status": {}}}
+
+        main._mr_get = fake_get
+        assert asyncio.run(main._machine_nozzle_types()) == {}
+
+    def test_query_failure_is_swallowed(self, app_env):
+        main, cfg, calls = app_env
+
+        async def fake_get(path):
+            raise RuntimeError("moonraker unreachable")
+
+        main._mr_get = fake_get
+        assert asyncio.run(main._machine_nozzle_types()) == {}
+
+
 class TestRememberFilament:
     """Slot 0's manual override (color/material) should survive a
     physical eject when ace.remember_filament is on (the default), and

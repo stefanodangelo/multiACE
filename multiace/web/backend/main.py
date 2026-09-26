@@ -306,12 +306,18 @@ def _resolve_head_source(src: Any) -> tuple[int | None, int | None]:
         return (d, src.get("slot"))
     return (None, None)
 
-def _color_to_hex(c: Any) -> str | None:
-    """[r,g,b] (0-255) → '#rrggbb', or None for [0,0,0]/missing."""
+def _color_to_hex(c: Any, declared: bool = False) -> str | None:
+    """[r,g,b] (0-255) → '#rrggbb', or None for missing.
+
+    All-zero is ambiguous: an EMPTY slot reports (0,0,0), a tag may declare
+    black. With a declared material/type the zeros are the tag's black and
+    are kept; without one they mean "nothing known". Callers pass
+    declared=bool(material or type). Without this, a genuinely black
+    filament shows as grey (the color falls through to None)."""
     if not isinstance(c, (list, tuple)) or len(c) < 3:
         return None
     r, g, b = int(c[0]), int(c[1]), int(c[2])
-    if r == 0 and g == 0 and b == 0:
+    if r == 0 and g == 0 and b == 0 and not declared:
         return None
     return f"#{r:02x}{g:02x}{b:02x}"
 
@@ -506,7 +512,10 @@ def _parse_state(status: dict) -> dict:
                     "brand":    sd.get("brand", ""),
                     "sku":      sd.get("sku", ""),
                     "subtype":  sd.get("subtype", ""),
-                    "color":    _color_to_hex(sd.get("color")),
+                    "color":    _color_to_hex(
+                        sd.get("color"),
+                        declared=bool((sd.get("material", "")
+                                       or sd.get("type", "")).strip())),
                 }
 
             override = _override_for(i, s)
@@ -590,7 +599,10 @@ def _parse_state(status: dict) -> dict:
                         "brand":     sd.get("brand", ""),
                         "sku":       sd.get("sku", ""),
                         "subtype":   disp_subtype,
-                        "color":     _color_to_hex(sd.get("color")),
+                        "color":     _color_to_hex(
+                            sd.get("color"),
+                            declared=bool((sd.get("material", "")
+                                           or sd.get("type", "")).strip())),
                         "color_rgb": sd.get("color"),
                         "rfid_data": rfid_data,
                         "source":    source,
@@ -848,6 +860,29 @@ async def _machine_nozzles() -> dict:
             continue
         if d > 0:
             out[i] = d
+    return out
+
+async def _machine_nozzle_types() -> dict:
+    """{head: 'standard'|'high_flow'} from the extruder status objects.
+
+    Firmware 1.6.0 introduced the nozzle VOLUME TYPE next to the diameter
+    (per-extruder JSON, SET_NOZZLE_PROPERTIES, sts['nozzle_volume_type']) -
+    the supply side of the HF/standard axis that previously had no source
+    at all. Empty dict on pre-1.6.0 firmware (the field is simply absent) -
+    callers must treat missing as unknown, never as 'standard'."""
+    try:
+        objs = ["extruder"] + ["extruder%d" % i for i in range(1, 4)]
+        qs = "&".join(objs)
+        data = await _mr_get(f"/printer/objects/query?{qs}")
+        st = data.get("result", {}).get("status", {})
+    except Exception as e:
+        logging.info("[multiace] nozzle type query failed (ignored): %s", e)
+        return {}
+    out = {}
+    for i, name in enumerate(objs):
+        vt = (st.get(name) or {}).get("nozzle_volume_type")
+        if isinstance(vt, str) and vt:
+            out[i] = vt
     return out
 
 app = FastAPI(title="multiACE Web", version=VERSION)
@@ -1312,6 +1347,9 @@ async def _head_ctx_from_state(parsed: dict) -> dict:
             "combo_heads": combo_heads,
             "head_nozzles": {str(h): d
                              for h, d in (await _machine_nozzles()).items()},
+            "head_nozzle_types": {str(h): v
+                                  for h, v in
+                                  (await _machine_nozzle_types()).items()},
             "pickup_cleaning": bool(parsed.get("pickup_cleaning")),
             "bg_available": bool(bgs.get("available")),
             "bg_heads": [int(h) for h in (bgs.get("enabled_heads") or [])]}

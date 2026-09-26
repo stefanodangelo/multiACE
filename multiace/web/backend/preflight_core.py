@@ -854,6 +854,8 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         "nozzles": {str(t): d
                     for t, d in ((meta or {}).get("nozzles") or {}).items()},
         "head_nozzles": dict((head_ctx or {}).get("head_nozzles") or {}),
+        "head_nozzle_types": dict(
+            (head_ctx or {}).get("head_nozzle_types") or {}),
         "nozzles_mixed": nz_mixed,
 
         "live_slots": [
@@ -949,6 +951,8 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
     out["nozzles"] = {str(t): d
                       for t, d in ((meta or {}).get("nozzles") or {}).items()}
     out["head_nozzles"] = dict((head_ctx or {}).get("head_nozzles") or {})
+    out["head_nozzle_types"] = dict(
+        (head_ctx or {}).get("head_nozzle_types") or {})
     out["nozzles_mixed"] = nz_mixed
     if not missing_mats:
         remap, info, _ = pp.match_colors_to_slots(
