@@ -296,3 +296,28 @@ be adopted incrementally or declined without cost.
 
 Recommended posture: **selective adoption in the eight steps above, not a merge.**
 Budget the effort against steps 4 and 5; everything else is mechanical.
+
+---
+
+## 9. Adoption log
+
+Executed on branch `feature/upstream-v1.00.1b-selective-adoption`, one commit
+per step, `pytest` green (464 → 488 passed) after each:
+
+| Step | Status | Notes |
+|---|---|---|
+| 1. L-tier | **Done** | Field-12 `code` decode, dormant `ace_rc522.py`, new docs, installer/hook entries. `README_DE.md` kept explicitly. |
+| 2. i18n (L3) | **Done** | Scripted key-union, 270/255 new keys (en/de), fork wording kept on the 5 shared-key overlaps per language. `zh.json` untouched — already falls back through `main.py`'s existing `get_i18n()`. |
+| 3. Firmware probe (M4) | **Done** | `_db_takes_nozzle_args` in `filament_feed_ace.py`, narrowly scoped to just the signature probe. |
+| 4. Mixed-nozzle gate (H3/H4/M3/M5) | **Done** | `nozzle_volume_type`/`diameter_v160` reconciled with the fork's own crash-fix attribute; `allowed_heads` threaded through `compute_swap_aware_layout`; `file_body_detectable` guard; `firmware_compat.py` 1.6.x row marked **untested**, not supported. |
+| 5. `ace.py` (H2) | **Done** | Real trial merge in a disposable worktree to get the true 23-hunk conflict set. Only genuinely new content: `_stop_fa_for_head()`. Everything else was either adjacency (fork already has it), pre-existing shared code the diff falsely flagged as new, or the combo-mode overlap resolved in the fork's favour (combo is disabled but the gating stays for a future re-enable). |
+| 6. Web layer (M2/M7) | **Done, narrow** | `_color_to_hex` declared-black fix; `head_nozzle_types` field (backend-only, no UI consumer yet — the fork's existing UI already has full diameter-mismatch awareness that the step-4 gate protects transparently). Upstream's calibration/PA/RC522 UI and the two-sided app.js/index.html rewrite were not adopted. |
+| 7. PA (D) | **Deferred** (user decision, 2026-09-26) | Hooks stock Klipper's flow-calibrator at runtime (`_install_flow_calibrator_hook`/`_wrap_flow_calibrate`); its new commands would be live regardless of `pa_sync`'s default, with zero test coverage and no hardware validation path — same risk shape as the calibration wizard. Revisit with real-hardware testing available. |
+| 8. Calibration (B) | **Declined** | Per the plan's own recommendation: ~1000 lines of live, motor-driving code upstream itself ships dark (`CALIBRATION_TAB = false`). No reason for this fork to carry it. |
+| H1 (ACE2-Open patch) | **Declined, more conservative than the plan** | The plan allowed landing the patcher file dormant; this pass declined even that, since it adds no value without a hardware-validated `KNOWN_FIRMWARE` entry and the outcome of a bad flash has no rollback. |
+| C (RC522 write) | **Declined** | Per the plan. The dormant `ace_rc522.py` module (step 1) is unwired — read-path wiring itself was also declined in step 5 because `cmd_ACE_TAG_READ` gates on the declined ACE2-Open firmware. |
+
+Not verifiable from this environment (no target hardware): a real boot on
+1.6.0 firmware to confirm the `*_nozzle_config.json` migration, and dry-run
+load/unload/swap on each head. Both remain open per §7's verification gates
+before treating the 1.6.x firmware row as anything but "untested".
