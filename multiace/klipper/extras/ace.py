@@ -3847,6 +3847,58 @@ class MultiAce:
         except Exception as e:
             logging.info('[multiACE] channel_state reset error: %s' % e)
 
+    def _stop_fa_for_head(self, head, why=''):
+        """Stop feed assist on the lane of `head`, verified.
+
+        Called when a multiACE pause hands control back to the user. A failed
+        swap is exactly when someone pulls the PTFE off the toolhead, and an
+        armed ACE 2 pushes again at every tug: its assist reacts to filament
+        MOTION, so the firmware's own idle timeout never expires while a hand
+        is pulling. The tip is then hard to remove and hard to re-insert.
+
+        Targeted on purpose, not _disable_feed_assist_all: that one walks
+        every unit and would disarm a parallel background op or another
+        head - and it skips V2 by design, which is the half that matters
+        here. Re-arming is the resume's job (_on_print_start), which is
+        why head_source is deliberately kept on a failed load.
+        """
+        try:
+            if head is None or not self.head_uses_ace(head):
+                return
+            src = self._head_source.get(head) or {}
+            ace = src.get('ace_index')
+            if ace is None:
+                ace = self._active_device_index
+            slot = self._ace_slot_for_head(head)
+            if ace is None or slot is None or not (0 <= slot <= 3):
+                return
+            if not self._connected_per_ace.get(ace, False):
+                return
+            ok = False
+            for attempt in range(3):
+                resp = self._tipform_send(ace, {
+                    'method': 'stop_feed_assist',
+                    'params': {'index': slot}}, timeout=2.0)
+                if not self._tipform_rejected(resp):
+                    ok = True
+                    break
+                if attempt < 2:
+                    self.reactor.pause(self.reactor.monotonic() + 0.4)
+            if self._feed_assist_per_ace.get(ace, -1) == slot:
+                self._feed_assist_per_ace[ace] = -1
+                if ace == self._active_device_index:
+                    self._feed_assist_index = -1
+            if getattr(self, '_v2_active_rev_assist', False):
+                self._v2_active_rev_assist = False
+                self._fa_trace('_v2_active_rev_assist cleared by pause stop')
+            logging.info('[multiACE] pause: FA stop ACE %d slot %d %s(%s)'
+                         % (self._disp(ace), self._disp(slot),
+                            '' if ok else 'NOT ACCEPTED (3x) ', why))
+            self._fa_trace('pause stop FA on ACE %d slot %d accepted=%s'
+                           % (ace, slot, ok))
+        except Exception as e:
+            logging.info('[multiACE] pause: FA stop failed (ignored): %s' % e)
+
     def _pause_for_recovery(self, gcmd, detail_msg, recovery_steps, code=210):
         for i, step in enumerate(recovery_steps, 1):
             try:
@@ -3863,6 +3915,7 @@ class MultiAce:
 
         active = self.toolhead.get_extruder().get_name() if self.toolhead else 'extruder'
         idx = 0 if active == 'extruder' else int(active.replace('extruder', '') or 0)
+        self._stop_fa_for_head(idx, why='recovery pause')
 
         if not self._head_is_loaded(idx):
             self._runout_suppress_heads.add(idx)

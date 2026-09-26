@@ -419,6 +419,71 @@ class FakeSensor:
 
 
 @pytest.fixture
+def fa_ace(ace_module):
+    """A MultiAce with only the fields _stop_fa_for_head touches."""
+    obj = ace_module.MultiAce.__new__(ace_module.MultiAce)
+    obj.reactor = FakeReactor()
+    obj._active_device_index = 0
+    obj._head_source = {}
+    obj._connected_per_ace = {0: True}
+    obj._feed_assist_per_ace = {0: 2}
+    obj._feed_assist_index = 2
+    obj._v2_active_rev_assist = False
+    obj.head_uses_ace = lambda head: True
+    obj._ace_slot_for_head = lambda head: 2
+    obj._tipform_send = lambda ace_idx, payload, timeout=2.0: {"code": 0}
+    obj._tipform_rejected = lambda resp: not resp or resp.get("code", -1) != 0
+    obj._fa_trace = lambda msg: None
+    return obj
+
+
+class TestStopFaForHead:
+    """Called from _pause_for_recovery: stop feed assist on the active
+    head's lane so an armed ACE 2 doesn't keep re-pushing while a user
+    pulls filament out of a paused, failed swap."""
+
+    def test_non_ace_head_is_a_noop(self, fa_ace):
+        fa_ace.head_uses_ace = lambda head: False
+        fa_ace._tipform_send = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not talk to the ACE for a non-ACE head"))
+        fa_ace._stop_fa_for_head(0, why="test")
+
+    def test_success_clears_the_feed_assist_index(self, fa_ace):
+        fa_ace._stop_fa_for_head(0, why="test")
+        assert fa_ace._feed_assist_per_ace[0] == -1
+        assert fa_ace._feed_assist_index == -1
+
+    def test_different_slot_is_left_untouched(self, fa_ace):
+        """Feed assist is armed on a slot other than the one this head is
+        loaded from - stopping this head must not clear that state."""
+        fa_ace._feed_assist_per_ace = {0: 1}
+        fa_ace._feed_assist_index = 1
+        fa_ace._stop_fa_for_head(0, why="test")
+        assert fa_ace._feed_assist_per_ace[0] == 1
+        assert fa_ace._feed_assist_index == 1
+
+    def test_rejected_stop_does_not_raise(self, fa_ace):
+        fa_ace._tipform_send = lambda *a, **k: {"code": 0, "msg": "FORBIDDEN"}
+        fa_ace._stop_fa_for_head(0, why="test")  # must not raise
+
+    def test_exception_in_transport_is_swallowed(self, fa_ace):
+        """A pause is already the recovery path - a comms failure here
+        must never turn into a second, unrelated crash."""
+
+        def boom(*a, **k):
+            raise RuntimeError("serial dropped")
+
+        fa_ace._tipform_send = boom
+        fa_ace._stop_fa_for_head(0, why="test")  # must not raise
+
+    def test_disconnected_ace_is_a_noop(self, fa_ace):
+        fa_ace._connected_per_ace = {0: False}
+        fa_ace._tipform_send = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not talk to a disconnected ACE"))
+        fa_ace._stop_fa_for_head(0, why="test")
+
+
+@pytest.fixture
 def neighbors(ace_module, loader):
     """A loader wired for neighbour clearance: ACE 0 has filament in all
     four slots, nothing is loaded into a head, and every ACE request is
