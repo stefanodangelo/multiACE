@@ -56,6 +56,21 @@ FIRMWARE_COMPAT: dict[str, dict] = {
         "known_issues": [],
         "notes": "Reference firmware: spool-id (print_task_config) is present.",
     },
+    "1.6.x": {
+        "status": STATUS_UNTESTED,
+        "device": "Snapmaker U1",
+        "known_issues": [
+            "Mixed standard/high-flow nozzle support "
+            "(nozzle_volume_type, diameter_v160) is implemented against "
+            "upstream's v1.00.1b adaptation but has not been run on real "
+            "1.6.0 hardware by this fork - filament_parameters signature "
+            "is probed at runtime and degrades to the 1.5.x call shape "
+            "when the nozzle-aware arguments aren't accepted.",
+        ],
+        "notes": "Boot Klipper once on 1.6.0 and confirm the "
+                 "*_nozzle_config.json migration (diameter_v160/volume_type) "
+                 "wrote sane values before treating this as supported.",
+    },
     # --- ACE unit firmware -------------------------------------------
     "1.1.31": {
         "status": STATUS_SUPPORTED,

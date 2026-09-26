@@ -144,6 +144,45 @@ _TC_CHANGE_RE = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
 _TC_BARE_RE = re.compile(r'^T(\d{1,2})\b')
 _TC_M73_RE = re.compile(r'^M73\b.*?\bR(\d+(?:\.\d+)?)')
 
+_TC_MATCH_RE = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
+_LAYER_BOUNDARY_RE = re.compile(r'^;\s*(?:LAYER_CHANGE|CHANGE_LAYER)\b')
+
+def _file_has_change_tool(in_path):
+    """Cheap pre-scan: does the file carry any '; Change Tool X -> Tool Y'
+    marker? Decides the body-start boundary shared by all three streaming
+    passes (rewrite head / rewrite multi / _scan_body_tools)."""
+    try:
+        with open(in_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if _TC_MATCH_RE.match(line.lstrip()):
+                    return True
+    except OSError:
+        pass
+    return False
+
+def _body_start_re(in_path):
+    """The line predicate that marks the body start: the tool-change marker
+    when the file has one, else the first layer-change marker (fallback for
+    a file whose slicer profile omits the tool-change comment)."""
+    return _TC_MATCH_RE if _file_has_change_tool(in_path) else _LAYER_BOUNDARY_RE
+
+def file_body_detectable(in_path):
+    """True if the print body can be found by EITHER the tool-change marker
+    or a layer-change marker. A multi-colour file where NEITHER exists
+    yields zero swaps by any path - the preflight should refuse it loudly
+    rather than ship a file that silently prints one colour. An all-pinned
+    head-mode print is NOT caught here: it has layer markers, so its body
+    is detectable; its zero ACE swaps are legitimate."""
+    try:
+        with open(in_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                s = line.lstrip()
+                if _TC_MATCH_RE.match(s) or _LAYER_BOUNDARY_RE.match(s):
+                    return True
+    except OSError:
+        pass
+    return False
+
 def _toolchanges_with_times(lines_iter, has_change):
 
     events = []
@@ -1486,9 +1525,9 @@ def _scan_body_tools(in_path):
     of the T line - the same numbering _scan_post_t_unretracts keys on,
     so the bg-swap stamp can look up the FUTURE arrival's un-retract
     (its ANTI_OOZE contract, S35)."""
-    change_t = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
     bare_t = re.compile(r'^T(\d{1,2})\s*$')
     m73_r = re.compile(r'^M73\b.*?\bR(\d+(?:\.\d+)?)')
+    body_start = _body_start_re(in_path)
     tools = []
     times = []
     line_nos = []
@@ -1501,7 +1540,7 @@ def _scan_body_tools(in_path):
             if mr:
                 last_r = float(mr.group(1))
                 continue
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
                 continue
             m = bare_t.match(stripped)
@@ -1547,7 +1586,6 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
 
     m104_re    = re.compile(r'^M10[49]\b')
     preextr_re = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=(\d{1,2})\b')
-    change_t   = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
     bare_t     = re.compile(r'^T(\d{1,2})\s*$')
 
     def fix_m104(line):
@@ -1557,6 +1595,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
         return re.sub(r'T(\d{1,2})', repl, line)
 
     in_body = False
+    body_start = _body_start_re(in_path)
 
     cooling_standbys = scan_cooling_standbys(in_path, head_of)
     cur = {}
@@ -1616,7 +1655,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
 
             mt = bare_t.match(stripped)
@@ -2187,7 +2226,8 @@ def _suggest_layer_friendly_remap(layer_colors, num_aces):
     return new_t if any(v != k for k, v in new_t.items()) else None
 
 def compute_swap_aware_layout(events, num_aces, num_heads=4,
-                              layer_color_sets=None, cost_model=None):
+                              layer_color_sets=None, cost_model=None,
+                              allowed_heads=None):
     """Search head assignments per color (free distribution - colors
     are NOT bound to head=T%4) for the one that minimizes the runtime
     swap count.
@@ -2212,6 +2252,13 @@ def compute_swap_aware_layout(events, num_aces, num_heads=4,
             when provided, assignments that put 2+ colors on the same
             head within ANY single layer are rejected (= layer-only
             swap mode, no mid-layer changes).
+        allowed_heads: optional {T: set(heads)} from nozzle_gate_groups -
+            the MIXED-NOZZLE constraint. A filament is sliced at the line
+            width of one nozzle diameter and can only ever print on a head
+            carrying that diameter; without this the optimizer is free to
+            move it to a wrong-sized nozzle, which is a silently ruined
+            print. None/empty (uniform machine, unknown diameters) leaves
+            the search unconstrained, i.e. byte-identical to before.
 
     Returns:
         (color_to_head dict, swap_count) on success
@@ -2228,10 +2275,27 @@ def compute_swap_aware_layout(events, num_aces, num_heads=4,
     if n > 12:
         return None, None
 
+    allow = None
+    if allowed_heads:
+        allow = []
+        for c in colors_list:
+            hs = allowed_heads.get(c, None)
+            allow.append(None if hs is None else set(hs))
+        if all(a is None for a in allow):
+            allow = None
+
     best_assignment = None
     best_swaps = None
 
     for assignment in product(range(num_heads), repeat=n):
+        if allow is not None:
+            ok = True
+            for i, h in enumerate(assignment):
+                if allow[i] is not None and h not in allow[i]:
+                    ok = False
+                    break
+            if not ok:
+                continue
         head_count = [0] * num_heads
         for h in assignment:
             head_count[h] += 1
@@ -3193,7 +3257,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
     m104_re   = re.compile(r'^M10[49]\b')
     drop_pre  = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([4-9]|1[0-5])\b')
     low_pre   = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([0-3])\b')
-    change_t  = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
 
     change_to = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
     bare_hi   = re.compile(r'^T([4-9]|1[0-5])\s*$')
@@ -3207,6 +3270,7 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                       line)
 
     in_body = False
+    body_start = _body_start_re(in_path)
     head_loaded = {0: (0, 0), 1: (0, 1), 2: (0, 2), 3: (0, 3)}
 
     head_slicer = {}
@@ -3340,7 +3404,7 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
 
             _mct = change_to.match(stripped)
