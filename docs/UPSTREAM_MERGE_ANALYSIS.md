@@ -302,7 +302,7 @@ Budget the effort against steps 4 and 5; everything else is mechanical.
 ## 9. Adoption log
 
 Executed on branch `feature/upstream-v1.00.1b-selective-adoption`, one commit
-per step, `pytest` green (464 → 488 passed) after each:
+per step, `pytest` green (464 → 507 passed) after each:
 
 | Step | Status | Notes |
 |---|---|---|
@@ -312,12 +312,15 @@ per step, `pytest` green (464 → 488 passed) after each:
 | 4. Mixed-nozzle gate (H3/H4/M3/M5) | **Done** | `nozzle_volume_type`/`diameter_v160` reconciled with the fork's own crash-fix attribute; `allowed_heads` threaded through `compute_swap_aware_layout`; `file_body_detectable` guard; `firmware_compat.py` 1.6.x row marked **untested**, not supported. |
 | 5. `ace.py` (H2) | **Done** | Real trial merge in a disposable worktree to get the true 23-hunk conflict set. Only genuinely new content: `_stop_fa_for_head()`. Everything else was either adjacency (fork already has it), pre-existing shared code the diff falsely flagged as new, or the combo-mode overlap resolved in the fork's favour (combo is disabled but the gating stays for a future re-enable). |
 | 6. Web layer (M2/M7) | **Done, narrow** | `_color_to_hex` declared-black fix; `head_nozzle_types` field (backend-only, no UI consumer yet — the fork's existing UI already has full diameter-mismatch awareness that the step-4 gate protects transparently). Upstream's calibration/PA/RC522 UI and the two-sided app.js/index.html rewrite were not adopted. |
-| 7. PA (D) | **Deferred** (user decision, 2026-09-26) | Hooks stock Klipper's flow-calibrator at runtime (`_install_flow_calibrator_hook`/`_wrap_flow_calibrate`); its new commands would be live regardless of `pa_sync`'s default, with zero test coverage and no hardware validation path — same risk shape as the calibration wizard. Revisit with real-hardware testing available. |
-| 8. Calibration (B) | **Declined** | Per the plan's own recommendation: ~1000 lines of live, motor-driving code upstream itself ships dark (`CALIBRATION_TAB = false`). No reason for this fork to carry it. |
-| H1 (ACE2-Open patch) | **Declined, more conservative than the plan** | The plan allowed landing the patcher file dormant; this pass declined even that, since it adds no value without a hardware-validated `KNOWN_FIRMWARE` entry and the outcome of a bad flash has no rollback. |
-| C (RC522 write) | **Declined** | Per the plan. The dormant `ace_rc522.py` module (step 1) is unwired — read-path wiring itself was also declined in step 5 because `cmd_ACE_TAG_READ` gates on the declined ACE2-Open firmware. |
+| 7. PA (D) | **Done** (revised 2026-09-27) | Initially deferred (2026-09-26) for the same risk shape as the calibration wizard; on review the scope is bounded enough to land: `pa_sync` defaults **false** (opt-in, unlike upstream's default-on), the flow-calibrator hook is a narrow method wrap (not the reactor-timer state machine calibration has), and it's covered by 19 new tests (pure-function PA math, Spoolman round-trip, flow-cal relocation). Includes the independent FLOW_CALIBRATE relocation fix (issue #115) and UI built into the fork's existing settings/spool panels (PA sync toggle, preflight checkbox, spool PA editor with copy/paste) rather than a new dialog. |
+| 8. Calibration (B) | **Declined** (reconfirmed 2026-09-27) | Per the plan's own recommendation, and reconfirmed on a direct ask after scoping it: ~1300 lines of continuous, reactor-timer-driven real-time motor control (feed/mark/retract/verify/return, position sampling and decoder polling across ~30 interacting methods) with no feasible test harness in this repo. Upstream itself ships it UI-dark (`CALIBRATION_TAB = false`) despite writing it. Qualitatively different risk from PA — a bug in the abort/restore path can leave a timer running or the ACE mid-motion, not just a wrong number in a JSON field. |
+| H1 (ACE2-Open patch) | **Declined, more conservative than the plan** (reconfirmed 2026-09-27) | The plan allowed landing the patcher file dormant; this pass declined even that, since it adds no value without a hardware-validated `KNOWN_FIRMWARE` entry and the outcome of a bad flash has no rollback. |
+| C (RC522 write) | **Declined** (reconfirmed 2026-09-27) | Per the plan. The dormant `ace_rc522.py` module (step 1) is unwired — read-path wiring itself was also declined in step 5 because `cmd_ACE_TAG_READ` gates on the declined ACE2-Open firmware. |
 
-Not verifiable from this environment (no target hardware): a real boot on
-1.6.0 firmware to confirm the `*_nozzle_config.json` migration, and dry-run
-load/unload/swap on each head. Both remain open per §7's verification gates
-before treating the 1.6.x firmware row as anything but "untested".
+Not verifiable from this environment (no target hardware, no browser tool
+in this session): a real boot on 1.6.0 firmware to confirm the
+`*_nozzle_config.json` migration, dry-run load/unload/swap on each head,
+and a visual check of the rendered PA UI (backend-served markup and API
+responses were checked directly; the Vue rendering itself was not). All
+remain open per §7's verification gates before treating the 1.6.x firmware
+row as anything but "untested".
