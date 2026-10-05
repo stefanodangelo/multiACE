@@ -954,6 +954,46 @@ class TestHistoryEndpoints:
         assert j["mock"] is True and len(j["jobs"]) == 3
         assert j["jobs"][0]["multiace"]["plan"] == "optimize"
 
+    def test_mock_jobs_carry_the_actual_duration_summary(self, client):
+        """Plan §2.5: `row.actual` is a cheap summary so the History table
+        needs no second request."""
+        c, main, cfg, calls = client
+        j = c.get("/api/history?mock=1").json()
+        job0 = next(r for r in j["jobs"] if r["id"] == "mock-job-0")
+        assert job0["segments"] == 1
+        assert job0["actual"]["wall_total"] > 0
+        assert set(job0["actual"]["buckets"]) == {
+            "depositing", "filament_swap", "toolhead_swap", "warmup",
+            "paused_error", "paused_user", "crash_gap"}
+
+    def test_a_power_loss_resume_merges_into_one_history_row(
+            self, client, tmp_path, monkeypatch):
+        """Two Moonraker segments of one crash-resumed print must appear
+        as ONE row with a segment count, not two rows whose durations
+        would otherwise be read as additive (plan §1.3)."""
+        c, main, cfg, calls = client
+        data_dir = str(tmp_path / "mahist")
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", data_dir)
+
+        async def fake_moonraker_history(limit):
+            return [
+                {"job_id": "r1", "filename": "resumed.gcode",
+                 "start_time": 1000.0, "end_time": 119348.0,
+                 "total_duration": 118348, "print_duration": 118348,
+                 "status": "klippy_shutdown"},
+                {"job_id": "r2", "filename": "resumed.gcode",
+                 "start_time": 121354.0, "end_time": 184545.0,
+                 "total_duration": 181538, "print_duration": 157886,
+                 "status": "completed"},
+            ]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        j = c.get("/api/history").json()
+        rows = [r for r in j["jobs"] if r.get("filename") == "resumed.gcode"]
+        assert len(rows) == 1
+        assert rows[0]["segments"] == 2
+        assert rows[0]["actual"]["wall_total"] == pytest.approx(183545.0)
+
     def test_a_mock_job_detail_is_served(self, client):
         c, main, cfg, calls = client
         j = c.get("/api/history/mock-job-1?mock=1").json()

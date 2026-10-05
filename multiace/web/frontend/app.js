@@ -5851,6 +5851,12 @@ createApp({
       if (!est.added_s) return "";
       return "+" + fmtDuration(est.added_s);
     }
+    // One decimal, no sign - callers that need a sign (drift) add it
+    // themselves so this stays reusable for plain percentages too.
+    function fmtPct(n) {
+      if (n === null || n === undefined || Number.isNaN(Number(n))) return "–";
+      return (Math.round(Number(n) * 10) / 10).toString();
+    }
     function wastePercent(est) {
       if (!est || !est.totals || !est.totals.g || !est.purge) return 0;
       return Math.round((est.purge.g / est.totals.g) * 1000) / 10;
@@ -6535,6 +6541,14 @@ createApp({
       loaded: false, busy: false, error: "", jobs: [], printerUi: "",
       detail: null, reprinting: "",
     });
+    // The Actual-duration breakdown popover (print-analysis plan §3.2) -
+    // a glance, not the full analysis modal (plan §4), so it is just an
+    // open flag keyed to one row rather than its own fetch.
+    const actualPopover = reactive({open: false, rowKey: ""});
+    //: The seven buckets row.actual.buckets always carries, in the order
+    //: the popover and composition bar render them (plan §3.2's table).
+    const ACTUAL_BUCKET_ORDER = ["depositing", "filament_swap",
+      "toolhead_swap", "warmup", "paused_error", "paused_user", "crash_gap"];
 
     async function loadHistory() {
       history.busy = true;
@@ -6572,6 +6586,43 @@ createApp({
       if (!est || !est.total_s || !actual) return null;
       const pct = Math.round(((actual - est.total_s) / est.total_s) * 1000) / 10;
       return {predicted: est.total_s, actual, pct};
+    }
+    // ---- actual-duration column (print-analysis plan §3) ---------------
+    function historyRowKey(row) {
+      return (row && (row.id || row.job_id || row.filename)) || "";
+    }
+    // Moonraker's own metadata.estimated_time (plan §2.2) first - it is
+    // what the slicer actually promised - falling back to multiACE's own
+    // preflight estimate when a job predates that metadata passthrough.
+    function historyEstimated(row) {
+      const meta = row && row.meta;
+      if (meta && meta.estimated_time) return meta.estimated_time;
+      const est = row && row.multiace && row.multiace.estimate;
+      return (est && est.total_s) || null;
+    }
+    function actualDriftPct(row) {
+      const est = historyEstimated(row);
+      const actual = row && row.actual && row.actual.wall_total;
+      if (!est || !actual) return null;
+      return Math.round(((actual - est) / est) * 1000) / 10;
+    }
+    function actualBucketRows(row) {
+      const buckets = (row && row.actual && row.actual.buckets) || {};
+      return ACTUAL_BUCKET_ORDER
+        .map(key => ({key, ...(buckets[key] || {seconds: 0, pct_of_wall: 0,
+                                                  source: "derived"})}))
+        .filter(b => b.seconds > 0);
+    }
+    // The 100%-width stacked bar above the popover's table (plan §3.2) -
+    // same segments, rendered as widths rather than rows.
+    function compBarSegments(row) {
+      return actualBucketRows(row).map(b => ({key: b.key, pct: b.pct_of_wall,
+                                              seconds: b.seconds}));
+    }
+    function toggleActualPopover(row) {
+      const key = historyRowKey(row);
+      actualPopover.open = !(actualPopover.open && actualPopover.rowKey === key);
+      actualPopover.rowKey = actualPopover.open ? key : "";
     }
     watch(() => tab.value, v => { if (v === "history" && !history.loaded) loadHistory(); });
     // Reprint: start the file exactly as it already sits on the printer -
@@ -7334,6 +7385,8 @@ createApp({
       sendPrintControl,
       history, loadHistory, openHistoryDetail, historyColors,
       historyAccuracy, reprintJob,
+      actualPopover, historyRowKey, historyEstimated, actualDriftPct,
+      actualBucketRows, compBarSegments, toggleActualPopover, fmtPct,
       queue, loadQueue, launchQueued, deleteQueued, queueDriftTooltip,
       webcam, webcamShown, webcamSrc, webcamVideo, loadWebcam, startWebrtc,
       consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,

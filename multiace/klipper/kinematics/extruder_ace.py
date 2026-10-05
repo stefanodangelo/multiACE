@@ -1,4 +1,4 @@
-import math, logging
+import math, logging, time
 import stepper, chelper, coded_exception, queuefile
 import os, json, copy
 
@@ -1266,6 +1266,12 @@ class PrinterExtruder:
         params = gcmd.get_command_parameters()
         is_grab_complete = False
         ace = self.printer.lookup_object('ace')
+        # Print-analysis plan §2.1 ("the one genuinely new measurement"):
+        # wall-clock span of the switch, logged only once it actually
+        # completes (switch_complete == True below) - an "already active"
+        # or failed attempt is not a toolhead change.
+        _switch_t0 = time.time()
+        _switch_from = getattr(toolhead.get_extruder(), 'extruder_num', None)
         if 'ACTION' in params:
             action = params['ACTION']
 
@@ -1574,7 +1580,24 @@ class PrinterExtruder:
         except ExtruderParkAction as e:
             pass
         except Exception as e:
-
+            try:
+                extract = getattr(self.printer, 'extract_encoded_message', None)
+                coded_message = extract(str(e)) if extract else None
+                if coded_message:
+                    coded_str = coded_message.get("coded")
+                    head = coded_message.get("index")
+                    code = coded_message.get("code")
+                    if coded_str:
+                        parts = str(coded_str).split('-')
+                        if len(parts) == 4:
+                            head = int(parts[2])
+                            code = int(parts[3])
+                    ace._job_note_event(
+                        'error', code=code, head=head, coded=coded_str,
+                        msg=coded_message.get("msg"),
+                        action=coded_message.get("action"))
+            except Exception:
+                pass
             raise
         finally:
             self.activating_move = False
@@ -1605,6 +1628,14 @@ class PrinterExtruder:
                     toolhead.set_accel(saved_states['max_accel'])
 
             if switch_complete == True:
+                if _switch_from != self.extruder_num:
+                    try:
+                        ace._job_note_event(
+                            'toolhead_change', **{'from': _switch_from,
+                                                   'to': self.extruder_num},
+                            s=round(time.time() - _switch_t0, 1))
+                    except Exception:
+                        pass
                 gcmd.respond_info("Activating extruder %s" % (self.name,))
                 toolhead.flush_step_generation()
                 toolhead.set_extruder(self, self.last_position)

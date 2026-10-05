@@ -1,0 +1,31 @@
+{
+  "_comment": "Two Moonraker segments of ONE logical print, stitched by a power-loss resume (plan §1.3). Counters on the second segment are CUMULATIVE (restored print_stats), not segment-local: print_duration=157886 and duration=181538 already count time from the first segment. wall_total = last_end - first_start = 183545; crash_gap = segment-2 start - segment-1 end = 2006; paused = duration - print_duration = 23652.",
+  "rows": [
+    {
+      "source": "moonraker",
+      "job_id": "000055",
+      "filename": "Moro_PLA_1d14h40m.gcode",
+      "start_time": 1000.0,
+      "end_time": 119348.0,
+      "duration": 118348,
+      "print_duration": 118348,
+      "status": "klippy_shutdown",
+      "filament_used": 183745,
+      "multiace": null,
+      "ambiguous": false
+    },
+    {
+      "source": "moonraker",
+      "job_id": "000056",
+      "filename": "Moro_PLA_1d14h40m.gcode",
+      "start_time": 121354.0,
+      "end_time": 184545.0,
+      "duration": 181538,
+      "print_duration": 157886,
+      "status": "completed",
+      "filament_used": 241816,
+      "multiace": null,
+      "ambiguous": false
+    }
+  ]
+}
