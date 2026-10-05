@@ -622,6 +622,38 @@ class FilamentFeed:
             return self._feed_load_counts_max
         return int(length / FEED_WHEEL_CIRCUMFERENCE * 2)
 
+    def _press_seat_local(self, ch, motor_dir, press_mm):
+        """Push this channel's own feeder motor press_mm further, using
+        the wheel encoders for closed-loop distance tracking. This is the
+        no-ACE counterpart to the ACE tipform seat press in FEED_ACT_LOAD:
+        the runout sensor (filament_motion_sensor) sits before the
+        extruder gear nip by design (see ace.cfg seat_overshoot_length),
+        so a sensor-stopped channel always needs this nudge, whether or
+        not it is ACE-sourced. Best-effort - a timeout just stops the
+        motor rather than failing the caller."""
+        if press_mm <= 0:
+            return False
+        target_cnt = press_mm * self.wheel[ch].ppr * 2.0 / FEED_WHEEL_CIRCUMFERENCE
+        wheel_cnt_a_0 = self.wheel[ch].get_counts()
+        wheel_cnt_b_0 = self.wheel_2[ch].get_counts()
+        systime_0 = self.reactor.monotonic()
+        timeout = press_mm / 5.0 + 3.0
+        ok = False
+        self.motor.run(motor_dir, self.motor_speed_extrude)
+        try:
+            while True:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                moved_a = self.wheel[ch].get_counts() - wheel_cnt_a_0
+                moved_b = self.wheel_2[ch].get_counts() - wheel_cnt_b_0
+                if moved_a >= target_cnt or moved_b >= target_cnt:
+                    ok = True
+                    break
+                if self.reactor.monotonic() - systime_0 > timeout:
+                    break
+        finally:
+            self.motor.run(FEED_MOTOR_DIR_IDLE, 0)
+        return ok
+
     def _runout_evt_handle(self, extruder, present):
         if present == True:
             return
@@ -1103,6 +1135,18 @@ class FilamentFeed:
                     if self.channel_error[ch] != FEED_OK:
                         raise
 
+                    _preload_press = (int(getattr(self.ace, 'seat_overshoot_length', 0))
+                                       if self.ace is not None else 0)
+                    if _preload_press > 0:
+                        logging.info(
+                            "[feed_preload] extruder[%d]: seat press %dmm "
+                            "(push sensor-stopped tip into gear nip)",
+                            self.filament_ch[ch], _preload_press)
+                        if not self._press_seat_local(ch, motor_dir, _preload_press):
+                            logging.info(
+                                "[feed_preload] seat press timed out "
+                                "(continuing)")
+
                     self._set_channel_state(ch, FEED_STA_PRELOAD_FINISH)
 
                 except:
@@ -1496,6 +1540,18 @@ class FilamentFeed:
                             self.ace._arm_fa_for(_p_idx, _p_slot)
                         except Exception:
                             pass
+                    elif (_press > 0 and self.ace is not None
+                          and not self.ace.head_ace_active_for(self.filament_ch[ch])
+                          and not self.ace.head_is_manual(self.filament_ch[ch])):
+                        logging.info(
+                            "[feed_loading] feeder head %d: local seat "
+                            "press %dmm", self.filament_ch[ch], _press)
+                        if self._press_seat_local(ch, motor_dir, _press):
+                            _seat_pressed = True
+                        else:
+                            logging.info(
+                                "[feed_loading] local seat press timed out "
+                                "(continuing)")
 
                     self.exception_code[ch] = 50
                     self._set_channel_state(ch, FEED_STA_LOAD_EXTRUDING)
