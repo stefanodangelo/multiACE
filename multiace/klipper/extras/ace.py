@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Star Turn"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "b7ba963"
+MULTIACE_BUILD_TAG = "678b66f"
 MULTIACE_BUNDLE_SHA1 = "2ba938d"
 
 def _load_i18n_catalog(i18n_dir, lang):
