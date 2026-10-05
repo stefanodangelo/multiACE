@@ -1896,6 +1896,63 @@ body:has(.panel) .overlay .dialog {
 .history-table .swatch { margin-right: 2px; }
 .reprint-btn { font-size: .8rem; padding: .2rem .5rem; }
 
+/* --- Column priority (print-analysis plan §6) -------------------------
+   11 columns do not fit at 1280px with a 168px rail. The always-shown
+   set stays visible at any width; everything else is gated by viewport
+   and stays reachable in the detail row regardless, so hiding it here
+   costs nothing. */
+.history-table [data-prio] { display: none; }
+@media (min-width: 1100px) { .history-table [data-prio="1100"] { display: table-cell; } }
+@media (min-width: 1300px) { .history-table [data-prio="1300"] { display: table-cell; } }
+@media (min-width: 1500px) { .history-table [data-prio="1500"] { display: table-cell; } }
+
+/* --- Actual-duration popover (print-analysis plan §3.2) --------------
+   A glance, not the full analysis modal: an inline panel under the row
+   rather than a floating box, so it never fights the rail or the table's
+   own scroll for z-index. */
+.actual-toggle {
+  background: transparent; border: 1px solid transparent; color: var(--fg);
+  display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
+  padding: .15rem .3rem; border-radius: 4px; font: inherit;
+}
+.actual-toggle:hover { border-color: var(--border); }
+.actual-toggle .small { font-size: .78rem; }
+.actual-toggle .warn { color: var(--warn); }
+.actual-toggle .chevron { display: inline-block; transition: transform .15s ease; opacity: .7; }
+.actual-toggle .chevron.open { transform: rotate(180deg); }
+.actual-pop-row td { background: rgba(127, 127, 127, .06); padding: .6rem .8rem; }
+.actual-pop { max-width: 560px; }
+.actual-pop-head { display: flex; justify-content: space-between;
+                   font-size: .95rem; margin-bottom: .4rem; }
+.actual-pop-table { border-collapse: collapse; font-size: .85rem; width: 100%; }
+.actual-pop-table td { padding: .12rem .6rem .12rem 0; }
+.actual-pop-table td:nth-child(2),
+.actual-pop-table td:nth-child(3) { font-family: var(--mono);
+  font-variant-numeric: tabular-nums; text-align: right; }
+
+/* The composition bar: one 100%-width stack, shared with the full
+   analysis report's chart (plan §4.3). Hue alone never carries the
+   meaning - every segment also gets a border or a hatch. */
+.comp-bar { display: flex; width: 100%; height: 10px; border-radius: 3px;
+           overflow: hidden; margin-bottom: .5rem;
+           border: 1px solid var(--border); }
+.comp-seg { display: block; height: 100%; }
+.comp-seg-depositing    { background: var(--accent); }
+.comp-seg-filament_swap { background: var(--ink-700); box-shadow: inset 0 0 0 1px rgba(0,0,0,.3); }
+.comp-seg-toolhead_swap {
+  background: var(--ink-700);
+  background-image: repeating-linear-gradient(
+      45deg, rgba(255,255,255,.4) 0 2px, transparent 2px 4px);
+}
+.comp-seg-warmup        { background: var(--ink-800); }
+.comp-seg-paused_error  { background: var(--error); }
+.comp-seg-paused_user   { background: var(--warn); }
+.comp-seg-crash_gap      {
+  background: var(--ink-900);
+  background-image: repeating-linear-gradient(
+      135deg, rgba(255,255,255,.3) 0 2px, transparent 2px 4px);
+}
+
 /* --- Plan timeline (plan section 3.2 / 3.3) --------------------------- */
 /* Inline swaps are a solid stall block: the print is WAITING. Background
    swaps are hatched and half-height: the print is not. That visual

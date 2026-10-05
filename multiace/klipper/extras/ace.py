@@ -22,8 +22,8 @@ MULTIACE_CODENAME = "Second Take"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "6dc2d31"
-MULTIACE_BUNDLE_SHA1 = "1e9f791"
+MULTIACE_BUILD_TAG = "b7ba963"
+MULTIACE_BUNDLE_SHA1 = "2ba938d"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -374,6 +374,11 @@ class MultiAce:
         self._job_swaps = []
         self._job_toolchanges = 0
         self._job_load_retries = 0
+        #: Layer-1 events for the print-analysis data layer (plan §2.1).
+        #: Bounded the same way self._job_swaps effectively is - see
+        #: job_history.bound_events.
+        self._job_events = []
+        self._job_warmup_logged = False
         #: Set by the web backend before a preflight print so the record can
         #: carry estimated-vs-actual without recomputing the estimate.
         self._job_plan_hint = None
@@ -2691,6 +2696,11 @@ class MultiAce:
         A polled watcher rather than a gcode marker injected by the rewrite:
         a print started straight from Fluidd, without going through
         preflight, still deserves a history entry.
+
+        `paused` is tracked here too (print-analysis plan §2.1): the raw
+        pause/resume events are written without a resolved cause - that
+        resolution is a pure function of the event stream and lives in
+        print_analysis.py, where it can be unit tested.
         """
         try:
             state, filename = self._print_state_now()
@@ -2698,6 +2708,10 @@ class MultiAce:
                 if state == 'printing' and self._job_last_state in (
                         '', 'standby', 'complete', 'cancelled', 'error'):
                     self._job_open(filename)
+                elif state == 'printing' and self._job_last_state == 'paused':
+                    self._job_note_event('resume')
+                elif state == 'paused' and self._job_id:
+                    self._job_note_event('pause')
                 elif state in ('complete', 'cancelled', 'error') \
                         and self._job_id:
                     self._job_close(state)
@@ -2723,11 +2737,14 @@ class MultiAce:
             'toolchanges': 0,
             'load_retries': 0,
             'neighbor_retracts': {},
+            'events':     [],
         })
         self._job_id = (rec or {}).get('id')
         self._job_swaps = []
         self._job_toolchanges = 0
         self._job_load_retries = 0
+        self._job_events = []
+        self._job_warmup_logged = False
 
     def _job_close(self, result):
         hist = self._job_history()
@@ -2765,6 +2782,34 @@ class MultiAce:
             'kind': kind, 'head': head, 'ace': ace_index, 'slot': slot,
             'seconds': round(float(seconds), 1), 'ts': time.time()})
         self._job_toolchanges += 1
+        if not self._job_warmup_logged:
+            # The first swap/extrusion after print_start, per plan §2.1 -
+            # logged just before the swap itself so it sorts earlier.
+            self._job_warmup_logged = True
+            self._job_note_event('warmup_end')
+        self._job_note_event('swap', head=head, ace=ace_index, slot=slot,
+                             s=round(float(seconds), 1), swap_kind=kind)
+
+    def _job_note_event(self, kind, **fields):
+        """Append one Layer-1 event (print-analysis plan §2.1) and flush
+        the bounded list to the history record.
+
+        History is never worth failing a print over (job_history.py's own
+        rule): every step here is best-effort and swallows its own
+        failure.
+        """
+        if not self._job_id:
+            return
+        try:
+            self._job_events.append(dict(fields, t=time.time(), kind=kind))
+            hist = self._job_history()
+            if hist is None:
+                return
+            self._job_events = hist.bound_events(self._job_events)
+            hist.update_record(self.job_history_dir, self._job_id,
+                               events=list(self._job_events))
+        except Exception as e:
+            logging.info('[multiACE] job event write failed: %s' % e)
 
     def _read_decoder(self, idx, slot):
         """[diag] Synchronous V2 decoder read (get_feed_info -> per-slot
@@ -3968,6 +4013,8 @@ class MultiAce:
                             '[multiACE] recovery (head mode): runout suppressed '
                             'on unloaded ACE head %d until it is loaded' % h)
 
+        self._job_note_event('error', code=code, head=idx,
+                             msg=detail_msg[:400], action='pause')
         self._restore_machine_state_for_resume()
         raise gcmd.error(
             message=detail_msg.replace('"', "'")[:400], action='pause',

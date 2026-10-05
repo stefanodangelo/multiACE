@@ -537,6 +537,11 @@
       "date": "Date",
       "file": "File",
       "duration": "Duration",
+      "estimated": "Estimated",
+      "actual": "Actual",
+      "actual_hint": "Wall-clock time this print really cost, including pauses and swaps. Click to break it down.",
+      "segments": "{n} segments",
+      "segments_hint": "Resumed after a power loss - these segments are stitched into one print; the counters are the printer's own cumulative totals, not a sum of the rows.",
       "colors": "Colours",
       "swaps": "Swaps",
       "filament": "Filament",
@@ -556,6 +561,23 @@
       "reprint_msg": "Start printing \"{name}\" again? This uses the file as it already is on the printer - it will not re-check the loadout or re-run preflight.",
       "reprint_ok": "Reprint",
       "reprint_started": "Reprint started: {name}"
+    },
+    "analysis": {
+      "bucket": {
+        "depositing": "Depositing",
+        "filament_swap": "Filament changes",
+        "toolhead_swap": "Toolhead changes",
+        "warmup": "Heating / homing",
+        "paused_error": "Paused — errors",
+        "paused_user": "Paused — by you",
+        "crash_gap": "Crash recovery"
+      },
+      "source": {
+        "measured": "measured",
+        "derived": "derived",
+        "residual": "residual",
+        "reconstructed": "reconstructed"
+      }
     },
     "virtual": {
       "title": "What-if loadout (does not touch the printer)",

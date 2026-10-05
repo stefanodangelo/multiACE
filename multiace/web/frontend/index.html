@@ -979,11 +979,12 @@
           <tr>
             <th>{{ t('ui.history.date') }}</th>
             <th>{{ t('ui.history.file') }}</th>
-            <th>{{ t('ui.history.duration') }}</th>
-            <th>{{ t('ui.history.colors') }}</th>
-            <th>{{ t('ui.history.swaps') }}</th>
-            <th>{{ t('ui.history.filament') }}</th>
-            <th>{{ t('ui.history.result') }}</th>
+            <th data-prio="1100">{{ t('ui.history.estimated') }}</th>
+            <th :title="t('ui.history.actual_hint')">{{ t('ui.history.actual') }}</th>
+            <th data-prio="1300">{{ t('ui.history.colors') }}</th>
+            <th data-prio="1300">{{ t('ui.history.swaps') }}</th>
+            <th data-prio="1500">{{ t('ui.history.filament') }}</th>
+            <th data-prio="1100">{{ t('ui.history.result') }}</th>
             <th></th>
           </tr>
         </thead>
@@ -995,15 +996,30 @@
                 <span v-if="row.ambiguous" class="muted small"
                       :title="t('ui.history.ambiguous_hint')">· {{ t('ui.history.ambiguous') }}</span>
               </td>
-              <td>{{ fmtDuration(row.duration) }}</td>
-              <td>
+              <td data-prio="1100">{{ fmtDuration(historyEstimated(row)) }}</td>
+              <td class="actual-cell">
+                <button class="actual-toggle" @click.stop="toggleActualPopover(row)">
+                  <span>{{ fmtDuration(row.actual && row.actual.wall_total) }}</span>
+                  <span v-if="row.segments > 1" class="pill small"
+                        :title="t('ui.history.segments_hint')">
+                    {{ t('ui.history.segments', {n: row.segments}) }}
+                  </span>
+                  <span v-if="actualDriftPct(row) !== null"
+                        :class="['small', Math.abs(actualDriftPct(row)) >= 20 ? 'warn' : 'muted']">
+                    {{ actualDriftPct(row) > 0 ? '+' : '' }}{{ fmtPct(actualDriftPct(row)) }} %
+                  </span>
+                  <span v-if="row.actual" class="chevron"
+                        :class="{open: actualPopover.open && actualPopover.rowKey === historyRowKey(row)}">▾</span>
+                </button>
+              </td>
+              <td data-prio="1300">
                 <span v-for="c in historyColors(row)" :key="'hc-'+c.head"
                       class="swatch" :style="{background: c.color}"
                       :title="'T' + c.head + ' · ACE ' + c.ace + ' / slot ' + c.slot"></span>
               </td>
-              <td>{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
-              <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
-              <td><span class="pill">{{ row.status || '–' }}</span></td>
+              <td data-prio="1300">{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
+              <td data-prio="1500">{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
+              <td data-prio="1100"><span class="pill">{{ row.status || '–' }}</span></td>
               <td>
                 <button v-if="row.filename" class="reprint-btn"
                         :disabled="isPrinting || history.reprinting !== ''"
@@ -1014,9 +1030,35 @@
                 </button>
               </td>
             </tr>
+            <tr v-if="row.actual && actualPopover.open
+                      && actualPopover.rowKey === historyRowKey(row)"
+                class="actual-pop-row">
+              <td colspan="9">
+                <div class="actual-pop">
+                  <div class="actual-pop-head">
+                    <b>{{ t('ui.history.actual') }}</b>
+                    <span>{{ fmtDuration(row.actual.wall_total) }}</span>
+                  </div>
+                  <div class="comp-bar">
+                    <span v-for="b in compBarSegments(row)" :key="'cb-'+b.key"
+                          class="comp-seg" :class="'comp-seg-'+b.key"
+                          :style="{width: b.pct + '%'}"
+                          :title="t('ui.analysis.bucket.' + b.key) + ': ' + fmtDuration(b.seconds)"></span>
+                  </div>
+                  <table class="actual-pop-table">
+                    <tr v-for="b in actualBucketRows(row)" :key="'br-'+b.key">
+                      <td>{{ t('ui.analysis.bucket.' + b.key) }}</td>
+                      <td>{{ fmtDuration(b.seconds) }}</td>
+                      <td>{{ fmtPct(b.pct_of_wall) }} %</td>
+                      <td class="muted small">{{ t('ui.analysis.source.' + b.source) }}</td>
+                    </tr>
+                  </table>
+                </div>
+              </td>
+            </tr>
             <tr v-if="history.detail && history.detail.id === row.id"
                 class="history-detail">
-              <td colspan="8">
+              <td colspan="9">
                 <div v-if="row.multiace">
                   <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
                      · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>

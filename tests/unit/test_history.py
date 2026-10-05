@@ -264,15 +264,92 @@ class TestEstimateAccuracy:
             {"estimate": {"total_s": "soon"}, "duration": 1}) is None
 
 
+class TestMetaWhitelist:
+    def test_only_whitelisted_keys_pass_through(self):
+        out = jh.join_history([{
+            "job_id": "1", "filename": "a.gcode", "start_time": 1000.0,
+            "metadata": {"estimated_time": 100, "layer_count": 20,
+                         "secret_internal_field": "drop me"},
+        }], [])
+        assert out[0]["meta"] == {"estimated_time": 100, "layer_count": 20}
+
+    def test_a_job_with_no_metadata_gets_an_empty_dict(self):
+        out = jh.join_history(
+            [{"job_id": "1", "filename": "a.gcode", "start_time": 1000.0}],
+            [])
+        assert out[0]["meta"] == {}
+
+
+class TestEventsFolding:
+    def test_events_fold_through_update_record_like_any_other_field(
+            self, data_dir):
+        r = jh.append_record(data_dir, rec(events=[]))
+        jh.update_record(data_dir, r["id"], events=[
+            {"t": 1.0, "kind": "pause"}, {"t": 2.0, "kind": "resume"}])
+        got = jh.load_records(data_dir)
+        assert got[0]["events"] == [
+            {"t": 1.0, "kind": "pause"}, {"t": 2.0, "kind": "resume"}]
+
+    def test_a_later_update_replaces_the_whole_events_array(self, data_dir):
+        """The writer always flushes its full accumulated list (like
+        `swaps`), so a follow-up REPLACES rather than appends - folding
+        must not duplicate entries."""
+        r = jh.append_record(data_dir, rec(events=[{"t": 1.0, "kind": "a"}]))
+        jh.update_record(data_dir, r["id"],
+                         events=[{"t": 1.0, "kind": "a"},
+                                 {"t": 2.0, "kind": "b"}])
+        got = jh.load_records(data_dir)
+        assert len(got[0]["events"]) == 2
+
+
+class TestBoundEvents:
+    def test_under_budget_is_untouched(self):
+        events = [{"t": float(i), "kind": "toolhead_change", "s": 1.0}
+                  for i in range(10)]
+        assert jh.bound_events(events) == events
+
+    def test_error_pause_resume_always_survive(self):
+        events = ([{"t": float(i), "kind": "toolhead_change", "s": 1.0}
+                   for i in range(jh.MAX_EVENTS + 50)]
+                  + [{"t": 1.0, "kind": "error", "code": 45},
+                     {"t": 2.0, "kind": "pause"},
+                     {"t": 3.0, "kind": "resume"}])
+        out = jh.bound_events(events)
+        kinds = [e["kind"] for e in out]
+        assert kinds.count("error") == 1
+        assert kinds.count("pause") == 1
+        assert kinds.count("resume") == 1
+
+    def test_toolhead_change_downsamples_but_totals_stay_exact(self):
+        events = [{"t": float(i), "kind": "toolhead_change", "s": 2.0}
+                  for i in range(jh.MAX_EVENTS + 100)]
+        out = jh.bound_events(events)
+        assert len(out) <= jh.MAX_EVENTS + 1
+        agg = [e for e in out if e["kind"] == "toolhead_change_agg"]
+        assert sum(e["n"] for e in agg) == len(events)
+        assert sum(e["s"] for e in agg) == pytest.approx(
+            sum(e["s"] for e in events))
+
+    def test_the_result_stays_time_ordered(self):
+        events = [{"t": float(i), "kind": "toolhead_change", "s": 1.0}
+                  for i in range(jh.MAX_EVENTS + 50)]
+        out = jh.bound_events(events)
+        ts = [e.get("t") or 0.0 for e in out]
+        assert ts == sorted(ts)
+
+
 class TestMockFixture:
     def test_the_mock_history_matches_the_join_shape(self):
         path = (Path(__file__).resolve().parents[1] / "fixtures"
                 / "mock_history.json")
         data = json.loads(path.read_text(encoding="utf-8"))
         for row in data["jobs"]:
-            assert {"filename", "start_time", "status", "multiace"} <= set(row)
+            assert {"filename", "start_time", "status", "multiace",
+                    "meta"} <= set(row)
             assert row["multiace"]["id"] == row["id"]
             assert "swaps" in row["multiace"]
+        with_events = [r for r in data["jobs"] if r["multiace"].get("events")]
+        assert with_events, "at least one mock job should carry events"
 
     def test_the_mock_history_calibrates(self):
         """A dev running mock mode should see the calibration path work,

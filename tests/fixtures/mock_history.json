@@ -14,6 +14,13 @@
       "filament_used": 12000,
       "ambiguous": false,
       "id": "mock-job-0",
+      "meta": {
+        "estimated_time": 18270,
+        "layer_count": 412,
+        "filament_used_mm": 92500,
+        "slicer": "OrcaSlicer",
+        "slicer_version": "2.1.0"
+      },
       "multiace": {
         "id": "mock-job-0",
         "filename": "lantern_4c.gcode",
@@ -21,6 +28,19 @@
         "end_time": 1786511160.0,
         "result": "completed",
         "plan": "optimize",
+        "events": [
+          {"t": 1786492820.0, "kind": "warmup_end"},
+          {"t": 1786492900.0, "kind": "swap", "head": 0, "ace": 0, "slot": 0,
+           "s": 78.2, "swap_kind": "first_load"},
+          {"t": 1786498400.0, "kind": "swap", "head": 1, "ace": 1, "slot": 0,
+           "s": 214.0, "swap_kind": "cross_ace_inline"},
+          {"t": 1786502600.0, "kind": "pause", "cause": "user"},
+          {"t": 1786502780.0, "kind": "resume"},
+          {"t": 1786505400.0, "kind": "swap", "head": 0, "ace": 0, "slot": 1,
+           "s": 226.5, "swap_kind": "same_ace"},
+          {"t": 1786509800.0, "kind": "swap", "head": 1, "ace": 1, "slot": 3,
+           "s": 208.9, "swap_kind": "cross_ace_inline"}
+        ],
         "toolchanges": 4,
         "load_retries": 0,
         "neighbor_retracts": {},
@@ -109,6 +129,12 @@
       "filament_used": 12900,
       "ambiguous": false,
       "id": "mock-job-1",
+      "meta": {
+        "estimated_time": 5460,
+        "layer_count": 180,
+        "slicer": "OrcaSlicer",
+        "slicer_version": "2.1.0"
+      },
       "multiace": {
         "id": "mock-job-1",
         "filename": "bracket_2c.gcode",
@@ -194,6 +220,10 @@
       "filament_used": 13800,
       "ambiguous": false,
       "id": "mock-job-2",
+      "meta": {
+        "estimated_time": 3110,
+        "layer_count": 96
+      },
       "multiace": {
         "id": "mock-job-2",
         "filename": "vase_1c.gcode",

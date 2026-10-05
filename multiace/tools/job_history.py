@@ -30,6 +30,21 @@ JOIN_WINDOW_S = 90.0
 #: §4.3 will not call a kind calibrated on fewer samples than this.
 MIN_CALIBRATION_SAMPLES = 5
 
+#: A per-job events array lives on the printer's flash too (plan §2.1) -
+#: bounded the same way jobs.jsonl is, with a drop policy rather than a
+#: hard truncation: every error/pause/resume/print_* survives, only the
+#: high-volume toolhead_change kind gets downsampled.
+MAX_EVENTS = 400
+
+#: Print-analysis plan §2.2 - a whitelist, not the whole Moonraker
+#: metadata blob (~2 KB/job, which would mean ~100 KB on every History
+#: load on a printer SoC).
+META_KEYS = ("estimated_time", "layer_count", "object_height", "size",
+             "filament_total", "filament_weight_total", "filament_used_mm",
+             "filament_colour", "filament_type", "filament_name",
+             "thumbnails", "nozzle_diameter", "layer_height", "slicer",
+             "slicer_version")
+
 
 def _jobs_path(data_dir):
     return os.path.join(data_dir, "jobs.jsonl")
@@ -174,6 +189,47 @@ def delete_record(data_dir, job_id):
     return True
 
 
+def bound_events(events):
+    """Apply the §2.1 drop policy once an events list is over MAX_EVENTS.
+
+    Every error/pause/resume/print_* survives untouched; only
+    `toolhead_change` - the kind that can run into the thousands on one
+    print - gets folded into per-minute `toolhead_change_agg` entries
+    (`{"kind": "toolhead_change_agg", "n": ..., "s": ...}`), so the totals
+    stay exact even once the individual events are gone.
+    """
+    events = list(events or [])
+    if len(events) <= MAX_EVENTS:
+        return events
+    keep = [e for e in events if e.get("kind") != "toolhead_change"]
+    toolhead = [e for e in events if e.get("kind") == "toolhead_change"]
+    buckets = {}
+    order = []
+    for e in toolhead:
+        try:
+            minute = int(float(e.get("t") or 0.0) // 60)
+        except (TypeError, ValueError):
+            minute = 0
+        if minute not in buckets:
+            buckets[minute] = {"kind": "toolhead_change_agg",
+                               "t": e.get("t"), "n": 0, "s": 0.0}
+            order.append(minute)
+        b = buckets[minute]
+        b["n"] += 1
+        try:
+            b["s"] += float(e.get("s") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    agg = []
+    for minute in order:
+        b = buckets[minute]
+        b["s"] = round(b["s"], 1)
+        agg.append(b)
+    out = keep + agg
+    out.sort(key=lambda e: float(e.get("t") or 0.0))
+    return out
+
+
 def clear_records(data_dir):
     try:
         os.remove(_jobs_path(data_dir))
@@ -211,6 +267,7 @@ def join_history(moonraker_jobs, multiace_records, window_s=JOIN_WINDOW_S):
     for job in (moonraker_jobs or []):
         name = _basename(job.get("filename"))
         start = float(job.get("start_time") or 0.0)
+        md = job.get("metadata") or {}
         cands = []
         for i, rec in enumerate(remaining):
             if i in used:
@@ -232,6 +289,7 @@ def join_history(moonraker_jobs, multiace_records, window_s=JOIN_WINDOW_S):
             "print_duration": job.get("print_duration"),
             "status":     job.get("status"),
             "filament_used": job.get("filament_used"),
+            "meta":       {k: md[k] for k in META_KEYS if k in md},
             "multiace":   None,
             "ambiguous":  False,
         }

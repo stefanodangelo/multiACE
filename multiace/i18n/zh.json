@@ -363,6 +363,11 @@
       "date": "日期",
       "file": "文件",
       "duration": "时长",
+      "estimated": "预计",
+      "actual": "实际",
+      "actual_hint": "该打印实际花费的时长，包含暂停和换料。点击查看明细。",
+      "segments": "{n} 段",
+      "segments_hint": "断电后续打印 — 这些片段已合并为一次打印；计数器是打印机自身的累计值，不是各行相加。",
       "colors": "颜色",
       "swaps": "换料",
       "filament": "耗材",
@@ -382,6 +387,23 @@
       "reprint_msg": "再次打印“{name}”？将直接使用打印机上现有的文件 - 不会重新检查装载或重新预检。",
       "reprint_ok": "重新打印",
       "reprint_started": "已开始重新打印：{name}"
+    },
+    "analysis": {
+      "bucket": {
+        "depositing": "出料中",
+        "filament_swap": "换料",
+        "toolhead_swap": "切换工具头",
+        "warmup": "加热 / 回零",
+        "paused_error": "暂停 — 故障",
+        "paused_user": "暂停 — 手动",
+        "crash_gap": "断电恢复"
+      },
+      "source": {
+        "measured": "实测",
+        "derived": "推算",
+        "residual": "余量",
+        "reconstructed": "重建"
+      }
     },
     "virtual": {
       "title": "假设装载（不影响打印机）",

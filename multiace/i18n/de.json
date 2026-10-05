@@ -530,6 +530,11 @@
       "date": "Datum",
       "file": "Datei",
       "duration": "Dauer",
+      "estimated": "Geschätzt",
+      "actual": "Tatsächlich",
+      "actual_hint": "Tatsächliche Dauer dieses Drucks inklusive Pausen und Wechsel. Klicken für die Aufschlüsselung.",
+      "segments": "{n} Segmente",
+      "segments_hint": "Nach Stromausfall fortgesetzt - diese Segmente sind zu einem Druck zusammengefügt; die Zähler sind die kumulierten Werte des Druckers, keine Summe der Zeilen.",
       "colors": "Farben",
       "swaps": "Wechsel",
       "filament": "Filament",
@@ -549,6 +554,23 @@
       "reprint_msg": "\"{name}\" erneut drucken? Es wird die Datei verwendet, wie sie bereits auf dem Drucker liegt - Beladung und Preflight werden nicht erneut geprüft.",
       "reprint_ok": "Erneut drucken",
       "reprint_started": "Erneuter Druck gestartet: {name}"
+    },
+    "analysis": {
+      "bucket": {
+        "depositing": "Materialauftrag",
+        "filament_swap": "Filamentwechsel",
+        "toolhead_swap": "Werkzeugwechsel",
+        "warmup": "Aufheizen / Homing",
+        "paused_error": "Pause — Fehler",
+        "paused_user": "Pause — durch dich",
+        "crash_gap": "Wiederherstellung"
+      },
+      "source": {
+        "measured": "gemessen",
+        "derived": "abgeleitet",
+        "residual": "Restwert",
+        "reconstructed": "rekonstruiert"
+      }
     },
     "virtual": {
       "title": "Was-wäre-wenn-Bestückung (rührt den Drucker nicht an)",

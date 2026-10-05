@@ -66,6 +66,24 @@ def _load_job_history():
 
 job_history = _load_job_history()
 
+def _load_print_analysis():
+    """The stitch/breakdown module (multiace/tools/print_analysis.py) -
+    same load-by-path reasoning as job_history.py above."""
+    import importlib.util
+    for cand in (Path("/home/lava/printer_data/config/tools/print_analysis.py"),
+                 Path(__file__).resolve().parents[2] / "tools"
+                 / "print_analysis.py"):
+        if not cand.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "multiace_print_analysis", cand)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    return None
+
+print_analysis = _load_print_analysis()
+
 def _import_sibling(mod_name: str):
     """Import a top-level multiACE module (multiace/<name>.py).
 
@@ -2521,6 +2539,53 @@ async def _moonraker_history(limit: int) -> list[dict]:
     jobs = (data.get("result") or {}).get("jobs") or []
     return jobs if isinstance(jobs, list) else []
 
+def _attach_actual(jobs: list[dict]) -> list[dict]:
+    """Stitch power-loss-resumed segments (plan §1.3) and attach the cheap
+    `actual` summary - wall_total, the bucket seconds, segments - to the
+    representative (most recent) row of each logical print, so the
+    History table needs no second request (plan §2.5). The earlier
+    segment row(s) of a stitched print are dropped from the list: showing
+    both the crashed segment and the resumed completion as two separate
+    rows is the exact double-count confusion this computation exists to
+    fix.
+
+    Best-effort: if print_analysis.py is not installed, rows are returned
+    unchanged rather than failing the whole endpoint.
+    """
+    if print_analysis is None or not jobs:
+        return jobs
+    try:
+        prints = print_analysis.stitch_segments(jobs)
+    except Exception:
+        return jobs
+    merged_away = set()
+    actual_by_id = {}
+    for p in prints:
+        repr_seg = p.segments[-1]
+        for seg in p.segments[:-1]:
+            merged_away.add(id(seg))
+        try:
+            bd = print_analysis.breakdown(p)
+        except Exception:
+            continue
+        actual_by_id[id(repr_seg)] = {
+            "wall_total": bd.wall_total,
+            "buckets": {k: b.seconds for k, b in bd.buckets.items()},
+            "warnings": bd.warnings,
+            "segments": len(p.segments),
+        }
+    out = []
+    for row in jobs:
+        if id(row) in merged_away:
+            continue
+        info = actual_by_id.get(id(row))
+        if info:
+            row = dict(row)
+            row["segments"] = info.pop("segments")
+            row["actual"] = info
+        out.append(row)
+    return out
+
 @app.get("/api/history")
 async def history_list(request: Request, limit: int = 50) -> dict:
     """Moonraker's job history joined with multiACE's own records.
@@ -2533,10 +2598,12 @@ async def history_list(request: Request, limit: int = 50) -> dict:
     limit = max(1, min(int(limit or 50), 200))
     if _mock_enabled(request):
         mock = _mock_load("mock_history.json") or {}
-        return {"jobs": (mock.get("jobs") or [])[:limit], "mock": True}
+        jobs = _attach_actual((mock.get("jobs") or [])[:limit])
+        return {"jobs": jobs, "mock": True}
     records = _require_history().load_records(MULTIACE_DATA_DIR, limit=limit)
     jobs = _require_history().join_history(await _moonraker_history(limit), records)
-    return {"jobs": jobs[:limit],
+    jobs = _attach_actual(jobs[:limit])
+    return {"jobs": jobs,
             "printer_ui": _printer_ui_url("#/history")}
 
 class _ReprintRequest(BaseModel):
