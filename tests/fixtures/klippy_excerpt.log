@@ -1,0 +1,38 @@
+10-03 02:00:00.000 Stats 1000.0: gcodein=0 mcu_awake=0.002 print_time=995.000 buffer_time=2.150 print_stall=0 sysload=0.42 cputime=50.000 memavail=498000
+10-03 02:00:01.000 Stats 1001.0: gcodein=0 mcu_awake=0.002 print_time=996.000 buffer_time=2.100 print_stall=0 sysload=0.41 cputime=50.100 memavail=497950
+10-03 02:30:00.000 _refresh_slot_overrides: no change
+10-03 02:30:00.050 _refresh_slot_overrides: no change
+10-03 02:30:00.100 _refresh_slot_overrides: no change
+10-03 02:30:00.150 _refresh_slot_overrides: no change
+10-03 02:30:00.200 _refresh_slot_overrides: no change
+10-03 02:30:00.250 _refresh_slot_overrides: no change
+10-03 02:30:00.300 _refresh_slot_overrides: no change
+10-03 02:30:00.350 _refresh_slot_overrides: no change
+10-03 02:30:00.400 _refresh_slot_overrides: no change
+10-03 02:30:00.450 _refresh_slot_overrides: no change
+10-03 02:30:00.500 _refresh_slot_overrides: no change
+10-03 02:30:00.550 _refresh_slot_overrides: no change
+10-03 02:30:00.600 _refresh_slot_overrides: no change
+10-03 02:30:00.650 _refresh_slot_overrides: no change
+10-03 02:30:00.700 _refresh_slot_overrides: no change
+10-03 02:30:00.750 _refresh_slot_overrides: no change
+10-03 02:30:00.800 _refresh_slot_overrides: no change
+10-03 02:30:00.850 _refresh_slot_overrides: no change
+10-03 02:30:00.900 _refresh_slot_overrides: no change
+10-03 02:30:00.950 _refresh_slot_overrides: no change
+10-03 02:30:01.000 _refresh_slot_overrides: no change
+10-03 02:30:01.050 _refresh_slot_overrides: no change
+10-03 02:30:01.100 _refresh_slot_overrides: no change
+10-03 02:30:01.150 _refresh_slot_overrides: no change
+10-03 02:30:01.200 _refresh_slot_overrides: no change
+10-03 03:09:30.894 Extruder extruder2 pickup failed, detected that extruder2 pogopin not connected. multi-act grip_states unknown
+10-03 03:09:31.000 Stats 1562.0: gcodein=0 mcu_awake=0.002 print_time=1557.000 buffer_time=0.000 print_stall=1 sysload=0.55 cputime=78.000 memavail=495000
+10-03 04:15:00.123 Timer too close: waketime=182023.016683, timer_read_time=182023.008667
+10-03 04:15:00.200 MCU 'mcu' shutdown: Timer too close
+10-03 04:15:05.000 Starting SD card print (position 0)
+10-03 05:00:00.000 ACE comms lost, attempting reconnect
+10-03 05:00:02.000 Try connecting ACE 0...
+10-03 05:00:05.000 reconnect[2] attempt
+10-03 06:00:00.000 [spool] print summary: head0=12.3g head1=8.1g
+10-03 06:00:01.000 [spool] print total: 20.4g
+10-03 06:30:00.000 Finished SD card print (position 924812)

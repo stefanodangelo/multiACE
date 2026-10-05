@@ -6606,18 +6606,29 @@ createApp({
       if (!est || !actual) return null;
       return Math.round(((actual - est) / est) * 1000) / 10;
     }
-    function actualBucketRows(row) {
-      const buckets = (row && row.actual && row.actual.buckets) || {};
+    // Shared by the History popover (plan §3.2) AND the full analysis
+    // modal's "where the time went" section (plan §4.3: "same segments,
+    // shared renderer") - both read a plain {bucket: {seconds, pct_of_wall,
+    // source}} map, the popover's from row.actual.buckets, the modal's
+    // from the Analysis payload's breakdown.buckets.
+    function bucketRowsFrom(buckets) {
+      const b = buckets || {};
       return ACTUAL_BUCKET_ORDER
-        .map(key => ({key, ...(buckets[key] || {seconds: 0, pct_of_wall: 0,
-                                                  source: "derived"})}))
-        .filter(b => b.seconds > 0);
+        .map(key => ({key, ...(b[key] || {seconds: 0, pct_of_wall: 0,
+                                          source: "derived"})}))
+        .filter(x => x.seconds > 0);
     }
-    // The 100%-width stacked bar above the popover's table (plan §3.2) -
-    // same segments, rendered as widths rather than rows.
+    // The 100%-width stacked bar above the table - same segments,
+    // rendered as widths rather than rows.
+    function compBarFrom(buckets) {
+      return bucketRowsFrom(buckets).map(b => ({key: b.key, pct: b.pct_of_wall,
+                                                seconds: b.seconds}));
+    }
+    function actualBucketRows(row) {
+      return bucketRowsFrom(row && row.actual && row.actual.buckets);
+    }
     function compBarSegments(row) {
-      return actualBucketRows(row).map(b => ({key: b.key, pct: b.pct_of_wall,
-                                              seconds: b.seconds}));
+      return compBarFrom(row && row.actual && row.actual.buckets);
     }
     function toggleActualPopover(row) {
       const key = historyRowKey(row);
@@ -6625,6 +6636,85 @@ createApp({
       actualPopover.rowKey = actualPopover.open ? key : "";
     }
     watch(() => tab.value, v => { if (v === "history" && !history.loaded) loadHistory(); });
+
+    // =================================================================
+    // Print analysis report (print-analysis plan §4) - a per-job report
+    // in a modal, built on the same breakdown §3 already computes plus a
+    // klippy.log enrichment pass. Fetched on open, not preloaded with the
+    // History list: the full payload carries every event and (optionally)
+    // a log scan, which is exactly the cost plan §2.5 keeps OUT of
+    // row.actual.
+    // =================================================================
+    const analysisModal = reactive({
+      open: false, loading: false, error: "", jobId: "", data: null,
+    });
+    // "when a print is not in progress (but doesn't have to complete)" -
+    // every terminal status is analysable; only the row that IS the
+    // live job is blocked, matched by filename rather than by id since
+    // the live job may not even have a History row yet.
+    function isLiveJob(row) {
+      if (!isPrinting.value || !row) return false;
+      const a = String(row.filename || "").split(/[\\/]/).pop();
+      const b = String(printCtl.filename || "").split(/[\\/]/).pop();
+      return !!a && a === b;
+    }
+    function canAnalyse(row) {
+      return !!row && !isLiveJob(row);
+    }
+    async function openAnalysis(row) {
+      if (!canAnalyse(row)) return;
+      const jobId = row.job_id || row.id;
+      if (!jobId) return;
+      analysisModal.open = true;
+      analysisModal.loading = true;
+      analysisModal.error = "";
+      analysisModal.data = null;
+      analysisModal.jobId = jobId;
+      try {
+        const r = await fetch(`${API}/history/${encodeURIComponent(jobId)}/analysis`);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        analysisModal.data = j;
+      } catch (e) {
+        analysisModal.error = e.message || String(e);
+      } finally {
+        analysisModal.loading = false;
+      }
+    }
+    function closeAnalysis() { analysisModal.open = false; }
+    // A plain <a target="_blank">, not window.open() - plan §4.5, so
+    // there is no popup blocker to fight.
+    function analysisStandaloneUrl() {
+      return analysisModal.jobId
+        ? `${API}/history/${encodeURIComponent(analysisModal.jobId)}/analysis.html`
+        : "";
+    }
+    // Incidents (plan §4.2.4): grouped by cause, newest first, each with
+    // its evidence quoted verbatim - here that's the error event's own
+    // message, not a paraphrase.
+    function analysisIncidents() {
+      const events = (analysisModal.data && analysisModal.data.events) || [];
+      return events.filter(e => e.kind === "error").slice().reverse();
+    }
+    function analysisLogAvailable() {
+      const log = analysisModal.data && analysisModal.data.log;
+      return !!(log && log.available !== false);
+    }
+    // The three new charts (plan §4.3) - analysis_charts.js is loaded as
+    // a plain <script>, so a missing/blocked load degrades to an empty
+    // chart rather than a template crash.
+    function analysisTimelineSvg() {
+      if (!analysisModal.data || typeof MultiAceAnalysisCharts === "undefined") return "";
+      return MultiAceAnalysisCharts.timeline(analysisModal.data, {width: 740});
+    }
+    function analysisHeadBarsSvg() {
+      if (!analysisModal.data || typeof MultiAceAnalysisCharts === "undefined") return "";
+      return MultiAceAnalysisCharts.headBars(analysisModal.data, {width: 740});
+    }
+    function analysisHealthSvg() {
+      if (!analysisModal.data || typeof MultiAceAnalysisCharts === "undefined") return "";
+      return MultiAceAnalysisCharts.healthStrip(analysisModal.data, {width: 740});
+    }
     // Reprint: start the file exactly as it already sits on the printer -
     // no preflight, no rewrite. The swaps baked into it from its first run
     // still apply; a stale loadout since then is the user's call, not ours.
@@ -7387,6 +7477,10 @@ createApp({
       historyAccuracy, reprintJob,
       actualPopover, historyRowKey, historyEstimated, actualDriftPct,
       actualBucketRows, compBarSegments, toggleActualPopover, fmtPct,
+      analysisModal, canAnalyse, isLiveJob, openAnalysis, closeAnalysis,
+      analysisStandaloneUrl, analysisIncidents, analysisLogAvailable,
+      analysisTimelineSvg, analysisHeadBarsSvg, analysisHealthSvg,
+      bucketRowsFrom, compBarFrom,
       queue, loadQueue, launchQueued, deleteQueued, queueDriftTooltip,
       webcam, webcamShown, webcamSrc, webcamVideo, loadWebcam, startWebrtc,
       consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,

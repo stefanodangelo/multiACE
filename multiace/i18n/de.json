@@ -553,9 +553,19 @@
       "reprint_title": "Diese Datei erneut drucken?",
       "reprint_msg": "\"{name}\" erneut drucken? Es wird die Datei verwendet, wie sie bereits auf dem Drucker liegt - Beladung und Preflight werden nicht erneut geprüft.",
       "reprint_ok": "Erneut drucken",
-      "reprint_started": "Erneuter Druck gestartet: {name}"
+      "reprint_started": "Erneuter Druck gestartet: {name}",
+      "analyse": "Analysieren",
+      "analyse_hint": "Den vollständigen Druckanalyse-Bericht für diesen Auftrag öffnen.",
+      "analyse_blocked_live": "Dieser Druck läuft noch - Analyse erst nach Abschluss möglich."
     },
     "analysis": {
+      "title": "Druckanalyse",
+      "loading": "Analyse wird geladen…",
+      "close": "Schließen",
+      "open_standalone": "Eigenständigen Bericht öffnen",
+      "not_recorded": "Für diesen Druck nicht erfasst.",
+      "no_findings": "Keine Befunde für diesen Druck.",
+      "log_rotated": "Ein Teil dieses Zeitfensters ist bereits aus dem aufbewahrten Log herausrotiert.",
       "bucket": {
         "depositing": "Materialauftrag",
         "filament_swap": "Filamentwechsel",
@@ -570,6 +580,74 @@
         "derived": "abgeleitet",
         "residual": "Restwert",
         "reconstructed": "rekonstruiert"
+      },
+      "section": {
+        "outcome": "Ergebnis",
+        "timeline": "Zeitverlauf",
+        "breakdown": "Wo die Zeit hinging",
+        "incidents": "Vorfälle",
+        "filament": "Filament",
+        "host_health": "Host-Zustand",
+        "findings": "Befunde & nächste Schritte"
+      },
+      "outcome": {
+        "file": "Datei",
+        "result": "Ergebnis",
+        "segments": "Segmente",
+        "first_start": "Erster Start",
+        "finish": "Fertigstellung",
+        "estimate": "Geschätzt",
+        "moving_time": "Materialauftragszeit",
+        "filament": "Filament",
+        "toolchanges": "Werkzeugwechsel",
+        "swaps": "Filamentwechsel"
+      },
+      "confidence": {
+        "measured": "gemessen",
+        "inferred": "aus gemessenen Daten abgeleitet",
+        "suspected": "vermutet — nur Korrelation"
+      },
+      "find": {
+        "pickup_pogopin": {
+          "title": "Werkzeugaufnahme fehlgeschlagen: Pogo-Pin nicht verbunden",
+          "action": "Pogo-Pin-Ausrichtung und Andockdruck am betroffenen Kopf prüfen."
+        },
+        "pickup_detached": {
+          "title": "Werkzeugaufnahme fehlgeschlagen: Kopf nicht angedockt",
+          "action": "Werkzeugkopf neu setzen und den Parksensor prüfen."
+        },
+        "pickup_conflict": {
+          "title": "Werkzeugaufnahme fehlgeschlagen: widersprüchlicher Park-/Aufnahmestatus",
+          "action": "Greifsensor-Verkabelung des Kopfes prüfen — meldet gleichzeitig geparkt und aufgenommen."
+        },
+        "host_stall_fatal": {
+          "title": "Ein Host-Stall hat ein MCU-Shutdown ausgelöst",
+          "action": "Host-Last während des Drucks reduzieren (weniger Hintergrundprozesse, schnellerer Speicher) und auf Wiederholung achten."
+        },
+        "host_stall_warning": {
+          "title": "Host-Timing war knapp, hat sich aber erholt",
+          "action": "Noch keine Maßnahme nötig — im Auge behalten, falls dies häufiger auftritt."
+        },
+        "log_flood": {
+          "title": "Eine Log-Meldung wiederholt sich deutlich schneller als normal",
+          "action": "Quelle finden und beruhigen — eine Log-Flut kann die unten genannten Stalls selbst verursachen."
+        },
+        "log_flood_stall_link": {
+          "title": "Die obige Log-Flut könnte zu den Host-Stalls beitragen",
+          "action": "Als Hinweis behandeln, nicht als Beweis — erst die Flut beheben, dann erneut auf Stalls prüfen."
+        },
+        "ace_comms_flap": {
+          "title": "ACE-Kommunikation wiederholt abgebrochen und neu verbunden",
+          "action": "USB-Kabel und Hub zwischen Drucker und ACE-Einheit prüfen."
+        },
+        "estimate_drift": {
+          "title": "Tatsächliche Zeit weicht um mehr als 20% von der Slicer-Schätzung ab",
+          "action": "Die Schätzung dieser Datei bis zur Neukalibrierung des Modells als unzuverlässig betrachten."
+        },
+        "log_coverage_partial": {
+          "title": "Ein Teil des Zeitfensters dieses Drucks ist bereits aus dem aufbewahrten Log herausrotiert",
+          "action": "Nichts zu beheben — frühere Belege für diesen Druck sind möglicherweise einfach nicht mehr verfügbar."
+        }
       }
     },
     "virtual": {

@@ -140,3 +140,37 @@ class TestI18nParity:
         for loc in LOCALES:
             missing = new_keys - key_sets[loc]
             assert not missing, f"{loc}.json is missing: {sorted(missing)}"
+
+    def test_pr2s_own_new_keys_are_translated_everywhere(self, key_sets):
+        """Print-analysis plan PR2 (the full report modal + standalone
+        HTML) - same regression guard as PR1's, for the ~50 keys this PR
+        added: the Analyse column/button, the seven report sections, the
+        outcome-table labels, the confidence qualifiers, and one
+        title+action pair per findings-engine rule (plan §4.4/§7)."""
+        new_keys = {
+            "ui.history.analyse", "ui.history.analyse_hint",
+            "ui.history.analyse_blocked_live",
+            "ui.analysis.title", "ui.analysis.loading", "ui.analysis.close",
+            "ui.analysis.open_standalone", "ui.analysis.not_recorded",
+            "ui.analysis.no_findings", "ui.analysis.log_rotated",
+            "ui.analysis.section.outcome", "ui.analysis.section.timeline",
+            "ui.analysis.section.breakdown", "ui.analysis.section.incidents",
+            "ui.analysis.section.filament", "ui.analysis.section.host_health",
+            "ui.analysis.section.findings",
+            "ui.analysis.outcome.file", "ui.analysis.outcome.result",
+            "ui.analysis.outcome.segments", "ui.analysis.outcome.first_start",
+            "ui.analysis.outcome.finish", "ui.analysis.outcome.estimate",
+            "ui.analysis.outcome.moving_time", "ui.analysis.outcome.filament",
+            "ui.analysis.outcome.toolchanges", "ui.analysis.outcome.swaps",
+            "ui.analysis.confidence.measured", "ui.analysis.confidence.inferred",
+            "ui.analysis.confidence.suspected",
+        }
+        for id_ in ("pickup_pogopin", "pickup_detached", "pickup_conflict",
+                    "host_stall_fatal", "host_stall_warning", "log_flood",
+                    "log_flood_stall_link", "ace_comms_flap",
+                    "estimate_drift", "log_coverage_partial"):
+            new_keys.add(f"ui.analysis.find.{id_}.title")
+            new_keys.add(f"ui.analysis.find.{id_}.action")
+        for loc in LOCALES:
+            missing = new_keys - key_sets[loc]
+            assert not missing, f"{loc}.json is missing: {sorted(missing)}"

@@ -386,9 +386,19 @@
       "reprint_title": "重新打印该文件？",
       "reprint_msg": "再次打印“{name}”？将直接使用打印机上现有的文件 - 不会重新检查装载或重新预检。",
       "reprint_ok": "重新打印",
-      "reprint_started": "已开始重新打印：{name}"
+      "reprint_started": "已开始重新打印：{name}",
+      "analyse": "分析",
+      "analyse_hint": "打开此任务的完整打印分析报告。",
+      "analyse_blocked_live": "该打印仍在进行 - 完成后才能分析。"
     },
     "analysis": {
+      "title": "打印分析",
+      "loading": "正在加载分析…",
+      "close": "关闭",
+      "open_standalone": "打开独立报告",
+      "not_recorded": "此打印未记录该项。",
+      "no_findings": "此打印没有发现问题。",
+      "log_rotated": "此时间窗口的部分内容已从保留的日志中轮转移除。",
       "bucket": {
         "depositing": "出料中",
         "filament_swap": "换料",
@@ -403,6 +413,74 @@
         "derived": "推算",
         "residual": "余量",
         "reconstructed": "重建"
+      },
+      "section": {
+        "outcome": "结果",
+        "timeline": "时间线",
+        "breakdown": "时间去向",
+        "incidents": "异常事件",
+        "filament": "耗材",
+        "host_health": "主机状态",
+        "findings": "发现与建议"
+      },
+      "outcome": {
+        "file": "文件",
+        "result": "结果",
+        "segments": "分段数",
+        "first_start": "首次开始",
+        "finish": "完成时间",
+        "estimate": "预计",
+        "moving_time": "出料时间",
+        "filament": "耗材",
+        "toolchanges": "换头次数",
+        "swaps": "换料次数"
+      },
+      "confidence": {
+        "measured": "实测",
+        "inferred": "由实测数据推算",
+        "suspected": "疑似 — 仅为相关性"
+      },
+      "find": {
+        "pickup_pogopin": {
+          "title": "取料失败：Pogo-pin 未连接",
+          "action": "检查受影响工具头的 Pogo-pin 对位和对接压力。"
+        },
+        "pickup_detached": {
+          "title": "取料失败：工具头已脱离",
+          "action": "重新安装工具头，并确认停靠传感器读数正常。"
+        },
+        "pickup_conflict": {
+          "title": "取料失败：停靠/取出状态冲突",
+          "action": "检查该工具头的夹持传感器接线 — 同时报告已停靠与已取出。"
+        },
+        "host_stall_fatal": {
+          "title": "主机延迟导致 MCU 关机",
+          "action": "打印期间降低主机负载（减少后台任务、使用更快的存储），并留意是否再次发生。"
+        },
+        "host_stall_warning": {
+          "title": "主机时序紧张但已恢复",
+          "action": "目前无需处理 — 如果频繁出现请持续关注。"
+        },
+        "log_flood": {
+          "title": "某条日志消息的重复频率远高于正常水平",
+          "action": "找出并抑制来源 — 日志刷屏本身可能导致下方的延迟问题。"
+        },
+        "log_flood_stall_link": {
+          "title": "上述日志刷屏可能是主机延迟的诱因之一",
+          "action": "仅作为线索，而非已证实的原因 — 先处理刷屏问题，再复查延迟情况。"
+        },
+        "ace_comms_flap": {
+          "title": "ACE 通信多次中断并重新连接",
+          "action": "检查打印机与 ACE 单元之间的 USB 线缆和集线器。"
+        },
+        "estimate_drift": {
+          "title": "实际用时与切片软件预计相差超过 20%",
+          "action": "在重新校准模型之前，应认为此文件的预计用时不可靠。"
+        },
+        "log_coverage_partial": {
+          "title": "此次打印的部分时间窗口已从保留日志中轮转移除",
+          "action": "无需处理 — 此次打印更早的证据可能已不再可用。"
+        }
       }
     },
     "virtual": {
