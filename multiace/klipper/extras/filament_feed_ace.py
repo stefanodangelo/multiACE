@@ -1334,6 +1334,34 @@ class FilamentFeed:
                                     logging.info(
                                         "[feed_loading] head %d loads from ACE slot %d (slot!=head)",
                                         _head_idx, _ace_slot)
+
+                                if self.ace._head_source.get(_head_idx) is None:
+                                    # Stub the identity in before the physical
+                                    # push, not after (the end-of-load block
+                                    # below only fills it in once verified).
+                                    # Otherwise every mm the 1Hz spool sampler
+                                    # sees during the push lands in the gap
+                                    # where head_source is still None from the
+                                    # prior unload, and book_spool_use() drops
+                                    # it - only the earlier toolchange retract
+                                    # gets booked, so the spool drifts negative
+                                    # every colour change (2026-10-04
+                                    # postmortem, head 0 / -92%). ace_index and
+                                    # slot are all book_spool_use needs to
+                                    # resolve the binding.
+                                    self.ace._head_source[_head_idx] = {
+                                        'ace_index': self.ace._active_device_index,
+                                        'slot': _ace_slot,
+                                        'type': '',
+                                        'color': '',
+                                        'brand': '',
+                                    }
+                                    self.ace._save_head_source()
+                                    logging.info(
+                                        '[multiACE] FEED_AUTO LOAD: head_source[%d] -> '
+                                        'ACE %d / Slot %d (early, pre-feed stub)'
+                                        % (_head_idx, self.ace._active_device_index, _ace_slot))
+
                                 load_retries = self.ace.head_load_retry[_head_idx]
                                 load_retry_retract = self.ace.head_load_retry_retract[_head_idx]
 
