@@ -174,3 +174,19 @@ class TestI18nParity:
         for loc in LOCALES:
             missing = new_keys - key_sets[loc]
             assert not missing, f"{loc}.json is missing: {sorted(missing)}"
+
+    def test_pr3s_own_new_keys_are_translated_everywhere(self, key_sets):
+        """Favourites (print-analysis plan PR3) - the rail tab, the
+        History star/unstar column, and the Favourites tab's own
+        strings (plan §7: "ui.favorites.* - title, empty,
+        not_in_window, tombstone")."""
+        new_keys = {
+            "ui.tabs.favorites",
+            "ui.history.star", "ui.history.unstar",
+            "ui.favorites.title", "ui.favorites.empty",
+            "ui.favorites.not_in_window", "ui.favorites.tombstone",
+            "ui.favorites.open_hint",
+        }
+        for loc in LOCALES:
+            missing = new_keys - key_sets[loc]
+            assert not missing, f"{loc}.json is missing: {sorted(missing)}"

@@ -958,6 +958,41 @@
         <pre v-if="macroLog" class="macro-log">{{ macroLog }}</pre>
       </transition>
     </section>
+    <!-- FAVOURITES: starred prints (print-analysis plan §5), a card grid
+         of their own rather than a History filter - each card deep-links
+         back to its History row (plan §5.5). Server-side storage, so a
+         star set on the desktop shows on the phone too. -->
+    <section v-show="tab==='favorites'">
+      <div class="row">
+        <h3>{{ t('ui.favorites.title') }}</h3>
+        <button @click="loadFavorites" :disabled="favorites.busy">
+          {{ favorites.busy ? t('ui.common.saving') : t('ui.common.reload') }}
+        </button>
+      </div>
+      <p v-if="favorites.error" class="error">{{ favorites.error }}</p>
+      <p v-else-if="favorites.loaded && !favorites.items.length" class="muted">
+        {{ t('ui.favorites.empty') }}
+      </p>
+      <div v-else class="favorites-grid">
+        <button v-for="fav in favorites.items" :key="fav.key" class="fav-card"
+                :title="t('ui.favorites.open_hint') + ': ' + fav.filename"
+                @click="openFavorite(fav)">
+          <span class="fav-thumb">
+            <img :src="favoriteThumbUrl(fav)" alt="" loading="lazy">
+            <span class="fav-star" :title="t('ui.history.unstar')"
+                  @click.stop="unstarFavorite(fav)">★</span>
+            <span v-if="!findFavoriteRow(fav)" class="pill small fav-tombstone"
+                  :title="t('ui.favorites.not_in_window')">
+              {{ t('ui.favorites.tombstone') }}
+            </span>
+          </span>
+          <span class="fav-name">{{ fav.filename }}</span>
+          <span class="fav-date muted small">
+            {{ fav.start_time ? new Date(fav.start_time * 1000).toLocaleString() : '' }}
+          </span>
+        </button>
+      </div>
+    </section>
     <!-- HISTORY: Moonraker's job list joined with multiACE's own record.
          Moonraker owns duration and result; multiACE owns the plan, the
          assignment and the swaps. Never a copy of Moonraker's data. -->
@@ -977,6 +1012,7 @@
       <table v-else class="history-table">
         <thead>
           <tr>
+            <th class="star-col"></th>
             <th>{{ t('ui.history.date') }}</th>
             <th>{{ t('ui.history.file') }}</th>
             <th data-prio="1100">{{ t('ui.history.estimated') }}</th>
@@ -991,7 +1027,13 @@
         </thead>
         <tbody>
           <template v-for="row in history.jobs" :key="row.id || row.job_id">
-            <tr class="history-row" @click="openHistoryDetail(row)">
+            <tr class="history-row" :class="{'row-flash': rowFlashKey === historyRowKey(row)}"
+                :data-jobkey="historyRowKey(row)" @click="openHistoryDetail(row)">
+              <td class="star-col">
+                <button class="star-btn" :class="{starred: isFavorite(row)}"
+                        :title="isFavorite(row) ? t('ui.history.unstar') : t('ui.history.star')"
+                        @click.stop="toggleFavorite(row)">★</button>
+              </td>
               <td>{{ new Date((row.start_time || 0) * 1000).toLocaleString() }}</td>
               <td>{{ row.filename }}
                 <span v-if="row.ambiguous" class="muted small"
@@ -1043,7 +1085,7 @@
             <tr v-if="row.actual && actualPopover.open
                       && actualPopover.rowKey === historyRowKey(row)"
                 class="actual-pop-row">
-              <td colspan="10">
+              <td colspan="11">
                 <div class="actual-pop">
                   <div class="actual-pop-head">
                     <b>{{ t('ui.history.actual') }}</b>
@@ -1068,7 +1110,7 @@
             </tr>
             <tr v-if="history.detail && history.detail.id === row.id"
                 class="history-detail">
-              <td colspan="10">
+              <td colspan="11">
                 <div v-if="row.multiace">
                   <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
                      · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>

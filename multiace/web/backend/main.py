@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import websockets
 
@@ -1019,6 +1021,14 @@ async def _mr_delete(path: str, timeout: float = 30.0) -> None:
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.delete(f"{MOONRAKER_URL}{path}")
         r.raise_for_status()
+
+async def _mr_get_bytes(path: str) -> tuple[bytes, str]:
+    """Raw bytes + content-type, for proxying a file (the thumbnail
+    endpoint, plan §5.3) rather than parsing a JSON response."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{MOONRAKER_URL}{path}")
+        r.raise_for_status()
+        return r.content, r.headers.get("content-type", "image/png")
 
 _mock_cache: dict[str, tuple[float, Any]] = {}
 
@@ -2776,6 +2786,150 @@ async def history_analysis_html(job_id: str, request: Request,
     analysis = await _build_analysis(job_id, request, logs, limit_s)
     doc = _require_print_analysis().render_html(analysis)
     return Response(content=doc, media_type="text/html")
+
+# ---------------------------------------------------------------------------
+# Favourites (print-analysis plan §5 / PR3): starred prints, server-side so
+# a star set on the desktop shows on the phone too (plan §5.2).
+#
+# Mock mode keeps its own in-process list rather than touching
+# MULTIACE_DATA_DIR: like every other mock endpoint it has to work with no
+# printer attached, but unlike reprint/queue-register (which inherently
+# need Moonraker and are refused outright in mock mode) starring is a pure
+# data operation the dev-UI flow in plan §9 needs to actually exercise.
+# ---------------------------------------------------------------------------
+
+_mock_favorites_list: list[dict] | None = None
+
+def _mock_favorites() -> list[dict]:
+    global _mock_favorites_list
+    if _mock_favorites_list is None:
+        data = _mock_load("mock_favorites.json") or {}
+        favs = data.get("favorites") if isinstance(data, dict) else None
+        _mock_favorites_list = list(favs) if isinstance(favs, list) else []
+    return _mock_favorites_list
+
+def _mock_toggle_favorite(key: str, on: bool, filename: str | None,
+                          start_time: float | None) -> list[dict]:
+    favs = _mock_favorites()
+    favs[:] = [f for f in favs if f.get("key") != key]
+    if on:
+        favs.insert(0, {"key": key, "filename": filename or "",
+                        "start_time": start_time, "ts": time.time()})
+    return favs
+
+@app.get("/api/favorites")
+async def favorites_list(request: Request) -> dict:
+    if _mock_enabled(request):
+        return {"favorites": list(_mock_favorites()), "mock": True,
+                "max": job_history.MAX_FAVORITES if job_history else 200}
+    favs = _require_history().load_favorites(MULTIACE_DATA_DIR)
+    return {"favorites": favs, "max": _require_history().MAX_FAVORITES}
+
+class _FavoriteToggle(BaseModel):
+    key: str
+    on: bool
+    filename: str | None = None
+    start_time: float | None = None
+
+@app.post("/api/favorites")
+async def favorites_toggle(request: Request, req: _FavoriteToggle) -> dict:
+    key = (req.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key required")
+    if _mock_enabled(request):
+        favs = _mock_toggle_favorite(key, req.on, req.filename, req.start_time)
+        return {"ok": True, "favorites": favs, "mock": True}
+    favs = _require_history().toggle_favorite(
+        MULTIACE_DATA_DIR, key, req.on, req.filename, req.start_time)
+    return {"ok": True, "favorites": favs}
+
+# ---------------------------------------------------------------------------
+# Thumbnails (plan §5.3): the browser cannot fetch Moonraker's own
+# /server/files/gcodes/<relative_path> directly (different port, and the
+# nginx conf does not permit the cross-origin request), so this proxies
+# it - resolving the path server-side from job_id rather than ever
+# accepting one from the caller, which is what makes path traversal
+# structurally impossible rather than merely filtered.
+# ---------------------------------------------------------------------------
+
+#: A single neutral placeholder - a card grid must never show a broken-
+#: image icon, whether the job has no thumbnail, Moonraker is unreachable,
+#: or (in mock mode) there is no real gcode file server to proxy at all.
+_THUMB_PLACEHOLDER_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 225">'
+    '<rect width="300" height="225" fill="#1e2225"/>'
+    '<path d="M110 150 L140 110 L165 135 L195 95 L225 150 Z" '
+    'fill="#272c30"/><circle cx="110" cy="90" r="14" fill="#272c30"/>'
+    '</svg>'
+)
+
+#: 32 entries, per plan §5.3 - a card grid requests many thumbnails at
+#: once on a machine with no spare I/O.
+_THUMB_CACHE_MAX = 32
+_thumb_cache: "OrderedDict[tuple, tuple[bytes, str]]" = OrderedDict()
+
+def _thumb_cache_get(key: tuple):
+    hit = _thumb_cache.get(key)
+    if hit is not None:
+        _thumb_cache.move_to_end(key)
+    return hit
+
+def _thumb_cache_put(key: tuple, value: tuple) -> None:
+    _thumb_cache[key] = value
+    _thumb_cache.move_to_end(key)
+    while len(_thumb_cache) > _THUMB_CACHE_MAX:
+        _thumb_cache.popitem(last=False)
+
+def _pick_thumbnail(thumbnails: list | None, target_px: int) -> dict | None:
+    """The largest thumbnail whose width is <= target_px, falling back to
+    the smallest available one rather than none at all when every
+    thumbnail is bigger than asked."""
+    cands = [t for t in (thumbnails or [])
+             if isinstance(t, dict) and t.get("relative_path")]
+    if not cands:
+        return None
+    cands.sort(key=lambda t: int(t.get("width") or 0))
+    fitting = [t for t in cands if int(t.get("width") or 0) <= target_px]
+    return fitting[-1] if fitting else cands[0]
+
+def _thumb_placeholder() -> Response:
+    return Response(content=_THUMB_PLACEHOLDER_SVG, media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-store"})
+
+@app.get("/api/thumbnail")
+async def thumbnail(request: Request, job_id: str = "", size: int = 300) -> Response:
+    size = max(16, min(int(size or 300), 1200))
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return _thumb_placeholder()
+    rows = await _history_rows_for_analysis(request)
+    row = next((r for r in rows
+                if str(r.get("job_id") or "") == job_id
+                or str(r.get("id") or "") == job_id), None)
+    if row is None:
+        return _thumb_placeholder()
+    thumb = _pick_thumbnail((row.get("meta") or {}).get("thumbnails"), size)
+    if thumb is None:
+        return _thumb_placeholder()
+    if _mock_enabled(request):
+        # No real gcode file server to proxy against in mock mode - the
+        # placeholder IS the mocked thumbnail.
+        return _thumb_placeholder()
+    cache_key = (job_id, size, row.get("start_time"))
+    etag = hashlib.sha1(("%s:%s:%s" % cache_key).encode()).hexdigest()
+    cached = _thumb_cache_get(cache_key)
+    if cached is None:
+        rel = str(thumb.get("relative_path") or "")
+        url = "/server/files/gcodes/" + quote(rel, safe="/")
+        try:
+            cached = await _mr_get_bytes(url)
+        except Exception:
+            return _thumb_placeholder()
+        _thumb_cache_put(cache_key, cached)
+    body, ctype = cached
+    return Response(content=body, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=86400",
+                             "ETag": etag})
 
 # ---------------------------------------------------------------------------
 # Print queue: staged, already-rewritten gcode waiting to be launched.

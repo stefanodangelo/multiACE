@@ -17,6 +17,7 @@
       "dry": "Dry",
       "config": "Config",
       "display": "Display",
+      "favorites": "Favourites",
       "history": "History",
       "queue": "Queue",
       "spools": "Spools"
@@ -563,7 +564,16 @@
       "reprint_started": "Reprint started: {name}",
       "analyse": "Analyse",
       "analyse_hint": "Open the full print-analysis report for this job.",
-      "analyse_blocked_live": "This print is still running - analyse it once it finishes."
+      "analyse_blocked_live": "This print is still running - analyse it once it finishes.",
+      "star": "Star this print",
+      "unstar": "Remove from favourites"
+    },
+    "favorites": {
+      "title": "Favourites",
+      "empty": "No favourites yet. Star a print from History to pin it here.",
+      "not_in_window": "Could not find this print in your history - it may have fallen outside the retained window.",
+      "tombstone": "No longer in history",
+      "open_hint": "Jump to this print in History"
     },
     "analysis": {
       "title": "Print analysis",

@@ -17,6 +17,7 @@
       "dry": "Trocknen",
       "config": "Konfiguration",
       "display": "Display",
+      "favorites": "Favoriten",
       "history": "Verlauf",
       "queue": "Warteschlange",
       "spools": "Spulen"
@@ -556,7 +557,16 @@
       "reprint_started": "Erneuter Druck gestartet: {name}",
       "analyse": "Analysieren",
       "analyse_hint": "Den vollständigen Druckanalyse-Bericht für diesen Auftrag öffnen.",
-      "analyse_blocked_live": "Dieser Druck läuft noch - Analyse erst nach Abschluss möglich."
+      "analyse_blocked_live": "Dieser Druck läuft noch - Analyse erst nach Abschluss möglich.",
+      "star": "Druck favorisieren",
+      "unstar": "Aus Favoriten entfernen"
+    },
+    "favorites": {
+      "title": "Favoriten",
+      "empty": "Noch keine Favoriten. Markiere einen Druck im Verlauf mit einem Stern, um ihn hier anzupinnen.",
+      "not_in_window": "Dieser Druck wurde im Verlauf nicht gefunden - er liegt möglicherweise außerhalb des aufbewahrten Zeitraums.",
+      "tombstone": "Nicht mehr im Verlauf",
+      "open_hint": "Zu diesem Druck im Verlauf springen"
     },
     "analysis": {
       "title": "Druckanalyse",

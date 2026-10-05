@@ -19,7 +19,13 @@
         "layer_count": 412,
         "filament_used_mm": 92500,
         "slicer": "OrcaSlicer",
-        "slicer_version": "2.1.0"
+        "slicer_version": "2.1.0",
+        "thumbnails": [
+          {"width": 32, "height": 32, "size": 1200,
+           "relative_path": ".thumbs/lantern_4c-32x32.png"},
+          {"width": 300, "height": 300, "size": 18000,
+           "relative_path": ".thumbs/lantern_4c-300x300.png"}
+        ]
       },
       "multiace": {
         "id": "mock-job-0",

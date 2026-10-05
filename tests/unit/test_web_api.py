@@ -1161,6 +1161,152 @@ class TestAnalysisEndpoints:
         assert wall_hm in html_doc
 
 
+class TestFavoritesEndpoints:
+    """Favourites (print-analysis plan §5 / PR3) - server-side storage so
+    a star set on the desktop shows on the phone too."""
+
+    def test_mock_favorites_is_served(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/favorites?mock=1").json()
+        assert j["mock"] is True
+        assert any(f["key"] == "mr:000000" for f in j["favorites"])
+
+    def test_a_blank_key_is_a_bad_request(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/favorites", json={"key": "  ", "on": True})
+        assert r.status_code == 400
+
+    def test_mock_toggle_on_then_off_round_trips(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/favorites?mock=1",
+                   json={"key": "mr:999", "on": True,
+                         "filename": "x.gcode", "start_time": 1.0})
+        assert r.status_code == 200
+        assert any(f["key"] == "mr:999" for f in r.json()["favorites"])
+        r2 = c.post("/api/favorites?mock=1",
+                    json={"key": "mr:999", "on": False})
+        assert not any(f["key"] == "mr:999" for f in r2.json()["favorites"])
+
+    def test_mock_toggling_never_touches_the_real_data_dir(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        data_dir = tmp_path / "favs_mock"
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(data_dir))
+        c.post("/api/favorites?mock=1", json={"key": "mr:1", "on": True})
+        assert not data_dir.exists()
+
+    def test_real_mode_persists_to_disk(self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        data_dir = str(tmp_path / "favs")
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", data_dir)
+        r = c.post("/api/favorites", json={"key": "mr:1", "on": True,
+                                           "filename": "a.gcode",
+                                           "start_time": 1000.0})
+        assert r.status_code == 200
+        j = c.get("/api/favorites").json()
+        assert any(f["key"] == "mr:1" for f in j["favorites"])
+        assert (Path(data_dir) / "favorites.json").exists()
+
+
+class TestThumbnailEndpoint:
+    """Plan §5.3: the browser cannot reach Moonraker's file server
+    directly (different port, no CORS), so this proxies it - resolving
+    the path server-side from job_id only, never from a caller-supplied
+    path, which is what makes traversal structurally impossible."""
+
+    def test_no_job_id_is_a_placeholder(self, client):
+        c, main, cfg, calls = client
+        r = c.get("/api/thumbnail")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+
+    def test_an_unknown_job_id_is_a_placeholder(self, client):
+        c, main, cfg, calls = client
+        r = c.get("/api/thumbnail?mock=1&job_id=nope")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+
+    def test_mock_mode_never_proxies_even_with_a_real_thumbnail(self, client):
+        c, main, cfg, calls = client
+        r = c.get("/api/thumbnail?mock=1&job_id=000000&size=300")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+
+    def test_a_crafted_job_id_never_reaches_moonraker(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(tmp_path / "th1"))
+
+        async def fail_get_bytes(path):
+            raise AssertionError("must never be called for an unknown job_id")
+        monkeypatch.setattr(main, "_mr_get_bytes", fail_get_bytes)
+
+        r = c.get("/api/thumbnail?job_id=" +
+                  "..%2F..%2F..%2F..%2Fetc%2Fpasswd")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+
+    def test_a_real_thumbnail_is_proxied_with_cache_headers(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(tmp_path / "th2"))
+
+        async def fake_moonraker_history(limit):
+            return [{"job_id": "T1", "filename": "thumb.gcode",
+                     "start_time": 1000.0, "end_time": 2000.0,
+                     "total_duration": 1000, "print_duration": 1000,
+                     "status": "completed",
+                     "metadata": {"thumbnails": [
+                         {"width": 300, "height": 300,
+                          "relative_path": ".thumbs/thumb-300x300.png"}]}}]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        async def fake_get_bytes(path):
+            assert path == "/server/files/gcodes/.thumbs/thumb-300x300.png"
+            return (b"\x89PNGDATA", "image/png")
+        monkeypatch.setattr(main, "_mr_get_bytes", fake_get_bytes)
+
+        r = c.get("/api/thumbnail?job_id=T1&size=300")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        assert r.content == b"\x89PNGDATA"
+        assert r.headers["cache-control"] == "public, max-age=86400"
+        assert r.headers.get("etag")
+
+    def test_a_cached_thumbnail_is_not_refetched(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(tmp_path / "th3"))
+        fetched = []
+
+        async def fake_moonraker_history(limit):
+            return [{"job_id": "T2", "filename": "thumb2.gcode",
+                     "start_time": 1000.0, "end_time": 2000.0,
+                     "total_duration": 1000, "print_duration": 1000,
+                     "status": "completed",
+                     "metadata": {"thumbnails": [
+                         {"width": 300, "relative_path": ".thumbs/t2.png"}]}}]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        async def fake_get_bytes(path):
+            fetched.append(path)
+            return (b"bytes", "image/png")
+        monkeypatch.setattr(main, "_mr_get_bytes", fake_get_bytes)
+
+        c.get("/api/thumbnail?job_id=T2&size=300")
+        c.get("/api/thumbnail?job_id=T2&size=300")
+        assert len(fetched) == 1
+
+    def test_picks_the_largest_thumbnail_that_fits(self, client):
+        c, main, cfg, calls = client
+        thumbs = [{"width": 32, "relative_path": "a"},
+                  {"width": 300, "relative_path": "b"},
+                  {"width": 600, "relative_path": "c"}]
+        assert main._pick_thumbnail(thumbs, 300)["relative_path"] == "b"
+        assert main._pick_thumbnail(thumbs, 16)["relative_path"] == "a"
+        assert main._pick_thumbnail([], 300) is None
+
+
 class TestPrinterIdleGuard:
     """§13.4: applying an update mid-print aborts the job, cuts the heaters
     and leaves the nozzle set into cold plastic."""

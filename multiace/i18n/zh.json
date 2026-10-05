@@ -17,6 +17,7 @@
       "dry": "烘干",
       "config": "配置",
       "display": "显示屏",
+      "favorites": "收藏",
       "history": "历史",
       "queue": "队列"
     },
@@ -389,7 +390,16 @@
       "reprint_started": "已开始重新打印：{name}",
       "analyse": "分析",
       "analyse_hint": "打开此任务的完整打印分析报告。",
-      "analyse_blocked_live": "该打印仍在进行 - 完成后才能分析。"
+      "analyse_blocked_live": "该打印仍在进行 - 完成后才能分析。",
+      "star": "收藏此打印",
+      "unstar": "取消收藏"
+    },
+    "favorites": {
+      "title": "收藏",
+      "empty": "还没有收藏。在历史记录中为打印任务加星标即可固定在此处。",
+      "not_in_window": "在历史记录中未找到此打印任务，可能已超出保留窗口。",
+      "tombstone": "已不在历史记录中",
+      "open_hint": "跳转到历史记录中的此打印任务"
     },
     "analysis": {
       "title": "打印分析",

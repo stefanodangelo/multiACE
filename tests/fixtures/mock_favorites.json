@@ -1,0 +1,18 @@
+{
+  "_comment": "Mock /api/favorites payload (MULTIACE_MOCK_MODE=1). Shape mirrors job_history.load_favorites(): newest-ts-first, each entry carrying the stable key plus filename/start_time so a favourite can still be re-matched if the key ever stops resolving.",
+  "_generated": "2026-10-05",
+  "favorites": [
+    {
+      "key": "mr:000000",
+      "filename": "lantern_4c.gcode",
+      "start_time": 1786492800.0,
+      "ts": 1786520000.0
+    },
+    {
+      "key": "mr:000099",
+      "filename": "no_longer_in_history.gcode",
+      "start_time": 1780000000.0,
+      "ts": 1780003600.0
+    }
+  ]
+}

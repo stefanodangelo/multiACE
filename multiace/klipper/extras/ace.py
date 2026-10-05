@@ -17,8 +17,8 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.99.16b"
-MULTIACE_CODENAME = "Second Take"
+MULTIACE_VERSION = "0.99.17b"
+MULTIACE_CODENAME = "Star Turn"
 
 ACE_API_VERSION = 1
 
