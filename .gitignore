@@ -83,3 +83,6 @@ $RECYCLE.BIN/
 .claude/
 
 !README.md
+# A committed test fixture, not a runtime log - *.log above would
+# otherwise silently drop it from the repo.
+!tests/fixtures/klippy_excerpt.log

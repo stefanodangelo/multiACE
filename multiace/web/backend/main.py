@@ -84,6 +84,24 @@ def _load_print_analysis():
 
 print_analysis = _load_print_analysis()
 
+def _load_klippy_analysis():
+    """The klippy.log enrichment module (multiace/tools/klippy_analysis.py)
+    - same load-by-path reasoning as job_history.py above."""
+    import importlib.util
+    for cand in (Path("/home/lava/printer_data/config/tools/klippy_analysis.py"),
+                 Path(__file__).resolve().parents[2] / "tools"
+                 / "klippy_analysis.py"):
+        if not cand.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "multiace_klippy_analysis", cand)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    return None
+
+klippy_analysis = _load_klippy_analysis()
+
 def _import_sibling(mod_name: str):
     """Import a top-level multiACE module (multiace/<name>.py).
 
@@ -179,6 +197,11 @@ MULTIACE_DATA_DIR = os.environ.get(
     "MULTIACE_DATA_DIR",
     "/home/lava/printer_data/multiace",
 )
+# Layer 3 of the print-analysis plan (§2.3): the OEM's own rotated klippy
+# logs. NOT /home/lava/printer_data/logs/klippy.log - on this printer OS
+# that path carries only a stale/symlinked copy; the live, actually
+# rotating logs this feature reads live at /oem/klippylogs/.
+KLIPPY_LOGS_DIR = os.environ.get("MULTIACE_KLIPPY_LOGS_DIR", "/oem/klippylogs")
 # The printer's own web UI keys its views on ?printer=<id>. It is per
 # installation, so it is configurable rather than hardcoded to whatever hash
 # happens to be in one machine's URL - the History tab's "open in the
@@ -2669,6 +2692,90 @@ async def history_swap_stats() -> dict:
         _require_history().load_records(MULTIACE_DATA_DIR))
     return {"stats": stats,
             "min_samples": _require_history().MIN_CALIBRATION_SAMPLES}
+
+# ---------------------------------------------------------------------------
+# Print analysis report (print-analysis plan §4 / PR2)
+# ---------------------------------------------------------------------------
+
+def _require_print_analysis():
+    if print_analysis is None:
+        raise HTTPException(
+            status_code=503,
+            detail="print_analysis.py is not installed - re-run "
+                   "install_multiace.sh")
+    return print_analysis
+
+async def _history_rows_for_analysis(request: Request) -> list[dict]:
+    """Every row reachable for analysis - not just the 50-row default
+    window `/api/history` serves, since the print being analysed may be
+    older than that (plan §4.1 explicitly allows analysing any finished
+    print, not just a recent one)."""
+    if _mock_enabled(request):
+        mock = _mock_load("mock_history.json") or {}
+        return list(mock.get("jobs") or [])
+    limit = _require_history().MAX_JOBS
+    records = _require_history().load_records(MULTIACE_DATA_DIR, limit=limit)
+    return _require_history().join_history(
+        await _moonraker_history(limit), records)
+
+def _find_print_for_job(prints, job_id: str):
+    for p in prints:
+        for seg in p.segments:
+            if (seg.get("job_id") and str(seg.get("job_id")) == job_id) \
+                    or (seg.get("id") and str(seg.get("id")) == job_id):
+                return p
+    return None
+
+async def _build_analysis(job_id: str, request: Request,
+                          logs: int, limit_s: float) -> dict:
+    pa = _require_print_analysis()
+    rows = await _history_rows_for_analysis(request)
+    try:
+        prints = pa.stitch_segments(rows)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"analysis failed: {e}")
+    target = _find_print_for_job(prints, job_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    log_payload = None
+    if logs and klippy_analysis is not None and not _mock_enabled(request):
+        start = target.first_start
+        end = target.last_end or time.time()
+        try:
+            log_payload = klippy_analysis.analyse_logs(
+                KLIPPY_LOGS_DIR, start, end,
+                max_seconds=max(0.1, float(limit_s)))
+        except Exception as e:
+            _trace.info("klippy log analysis failed: %s" % e)
+            log_payload = None
+    return pa.analyse(target.segments, log_payload)
+
+@app.get("/api/history/{job_id}/analysis")
+async def history_analysis(job_id: str, request: Request,
+                           logs: int = 1, limit_s: float = 6.0) -> dict:
+    """The full print-analysis payload (plan §2.4/§2.5): the §1 breakdown
+    plus §4.4's findings, optionally enriched with a klippy.log pass
+    (Layer 3, `?logs=1`, budgeted by `?limit_s`).
+
+    Not gated on job status here - the frontend's canAnalyse() is the
+    gate (a cancelled print is often the most interesting one to
+    analyse), and the live job is never reachable by this id anyway since
+    Moonraker's history only assigns one once the job has ended.
+    """
+    return await _build_analysis(job_id, request, logs, limit_s)
+
+@app.get("/api/history/{job_id}/analysis.html")
+async def history_analysis_html(job_id: str, request: Request,
+                                logs: int = 1, limit_s: float = 6.0) -> Response:
+    """Plan §4.5: the same payload as the JSON endpoint, rendered
+    server-side into one self-contained document - for printing, for
+    attaching to a bug report, for sending to whoever sold you the
+    toolhead. A plain `<a target="_blank">` in the modal footer, not
+    `window.open`, so there is no popup blocker to fight."""
+    analysis = await _build_analysis(job_id, request, logs, limit_s)
+    doc = _require_print_analysis().render_html(analysis)
+    return Response(content=doc, media_type="text/html")
 
 # ---------------------------------------------------------------------------
 # Print queue: staged, already-rewritten gcode waiting to be launched.

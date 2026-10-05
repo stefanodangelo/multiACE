@@ -560,9 +560,19 @@
       "reprint_title": "Reprint this file?",
       "reprint_msg": "Start printing \"{name}\" again? This uses the file as it already is on the printer - it will not re-check the loadout or re-run preflight.",
       "reprint_ok": "Reprint",
-      "reprint_started": "Reprint started: {name}"
+      "reprint_started": "Reprint started: {name}",
+      "analyse": "Analyse",
+      "analyse_hint": "Open the full print-analysis report for this job.",
+      "analyse_blocked_live": "This print is still running - analyse it once it finishes."
     },
     "analysis": {
+      "title": "Print analysis",
+      "loading": "Loading analysis…",
+      "close": "Close",
+      "open_standalone": "Open standalone report",
+      "not_recorded": "Not recorded for this print.",
+      "no_findings": "No findings for this print.",
+      "log_rotated": "Part of this window has already rotated out of the retained log.",
       "bucket": {
         "depositing": "Depositing",
         "filament_swap": "Filament changes",
@@ -577,6 +587,74 @@
         "derived": "derived",
         "residual": "residual",
         "reconstructed": "reconstructed"
+      },
+      "section": {
+        "outcome": "Outcome",
+        "timeline": "Timeline",
+        "breakdown": "Where the time went",
+        "incidents": "Incidents",
+        "filament": "Filament",
+        "host_health": "Host health",
+        "findings": "Findings & next steps"
+      },
+      "outcome": {
+        "file": "File",
+        "result": "Result",
+        "segments": "Segments",
+        "first_start": "First start",
+        "finish": "Finish",
+        "estimate": "Estimated",
+        "moving_time": "Moving time",
+        "filament": "Filament",
+        "toolchanges": "Toolchanges",
+        "swaps": "Swaps"
+      },
+      "confidence": {
+        "measured": "measured",
+        "inferred": "inferred from measured data",
+        "suspected": "suspected — correlation only"
+      },
+      "find": {
+        "pickup_pogopin": {
+          "title": "Extruder pickup failed: pogo-pin not connected",
+          "action": "Check the pogo-pin alignment and dock pressure on the affected head."
+        },
+        "pickup_detached": {
+          "title": "Extruder pickup failed: head detached",
+          "action": "Re-seat the toolhead and confirm the park sensor reads correctly."
+        },
+        "pickup_conflict": {
+          "title": "Extruder pickup failed: conflicting park/pick status",
+          "action": "Inspect the head's grip sensor wiring — it is reporting both parked and picked at once."
+        },
+        "host_stall_fatal": {
+          "title": "A host stall caused an MCU shutdown",
+          "action": "Reduce host load while printing (fewer background jobs, faster storage) and watch for a repeat."
+        },
+        "host_stall_warning": {
+          "title": "Host timing was tight but recovered",
+          "action": "No action needed yet — keep an eye on it if this becomes frequent."
+        },
+        "log_flood": {
+          "title": "One log message is repeating far faster than normal",
+          "action": "Find and quiet the source — a flooding log can itself cause the stalls below."
+        },
+        "log_flood_stall_link": {
+          "title": "The log flood above may be contributing to the host stalls",
+          "action": "Treat as a lead, not a proven cause — fix the flood first, then recheck for stalls."
+        },
+        "ace_comms_flap": {
+          "title": "ACE communication dropped and reconnected repeatedly",
+          "action": "Check the USB cable and hub between the printer and the ACE unit."
+        },
+        "estimate_drift": {
+          "title": "Actual time differs from the slicer estimate by more than 20%",
+          "action": "Expect this file's estimate to be unreliable until the model is recalibrated."
+        },
+        "log_coverage_partial": {
+          "title": "Part of this print's time window has already rotated out of the retained log",
+          "action": "Nothing to fix — earlier evidence for this print may simply be unavailable now."
+        }
       }
     },
     "virtual": {

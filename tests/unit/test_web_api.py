@@ -1033,6 +1033,134 @@ class TestHistoryEndpoints:
         assert calls == []
 
 
+class TestAnalysisEndpoints:
+    """print-analysis plan §2.4/§2.5/§4.5 (PR2) - the report endpoints
+    layered on top of the §1-§2 data layer PR1 already shipped."""
+
+    def test_mock_analysis_is_served(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/history/mock-job-0/analysis?mock=1").json()
+        assert j["print"]["filename"] == "lantern_4c.gcode"
+        assert j["breakdown"]["wall_total"] > 0
+        assert j["log"] == {"available": False}
+        assert isinstance(j["findings"], list)
+
+    def test_mock_analysis_html_is_served(self, client):
+        c, main, cfg, calls = client
+        r = c.get("/api/history/mock-job-0/analysis.html?mock=1")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        assert "lantern_4c.gcode" in r.text
+
+    def test_an_unknown_job_analysis_is_a_404(self, client):
+        c, main, cfg, calls = client
+        assert c.get("/api/history/nope/analysis?mock=1").status_code == 404
+        assert c.get("/api/history/nope/analysis.html?mock=1").status_code == 404
+
+    def test_a_real_jobs_layer1_error_produces_a_finding(
+            self, client, tmp_path, monkeypatch):
+        """A pickup error recorded by ace.py's own event writer must
+        surface as a costed, measured finding - no log reading needed."""
+        c, main, cfg, calls = client
+        data_dir = str(tmp_path / "analysis_hist")
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", data_dir)
+        monkeypatch.setattr(main, "KLIPPY_LOGS_DIR", str(tmp_path / "nologs"))
+
+        rec = main.job_history.append_record(data_dir, {
+            "filename": "err.gcode", "start_time": 1000.0, "result": "printing",
+            "events": [
+                {"t": 1050.0, "kind": "error", "code": 45, "head": 2,
+                 "msg": "extruder2 pogopin not connected"},
+                {"t": 1050.0, "kind": "pause"},
+                {"t": 1150.0, "kind": "resume"},
+            ],
+        })
+        job_id = rec["id"]
+        main.job_history.update_record(data_dir, job_id, end_time=1600.0,
+                                       result="completed")
+
+        async def fake_moonraker_history(limit):
+            return [{"job_id": "e1", "filename": "err.gcode",
+                     "start_time": 1000.0, "end_time": 1600.0,
+                     "total_duration": 600, "print_duration": 500,
+                     "status": "completed"}]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        j = c.get("/api/history/e1/analysis").json()
+        f = next(f for f in j["findings"] if f["id"] == "pickup_pogopin")
+        assert f["confidence"] == "measured"
+        assert f["cost_s"] == pytest.approx(100.0)
+        assert f["heads"] == [2]
+
+    def test_analysis_reads_klippy_logs_when_enabled(
+            self, client, tmp_path, monkeypatch):
+        """Layer 3: a real klippy.log pass over the job's own time window
+        surfaces the host-stall/shutdown it recorded, as a finding."""
+        c, main, cfg, calls = client
+        import shutil
+        fixture = (Path(__file__).resolve().parents[1] / "fixtures"
+                   / "klippy_excerpt.log")
+        log_dir = tmp_path / "klippylogs"
+        log_dir.mkdir()
+        dst = log_dir / "klippy.log"
+        shutil.copy(fixture, dst)
+        mtime = time.mktime((2026, 10, 3, 23, 59, 0, 0, 0, -1))
+        os.utime(dst, (mtime, mtime))
+        monkeypatch.setattr(main, "KLIPPY_LOGS_DIR", str(log_dir))
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(tmp_path / "hist2"))
+
+        start = time.mktime((2026, 10, 3, 2, 10, 0, 0, 0, -1))
+        end = time.mktime((2026, 10, 3, 6, 0, 0, 0, 0, -1))
+
+        async def fake_moonraker_history(limit):
+            return [{"job_id": "L1", "filename": "longprint.gcode",
+                     "start_time": start, "end_time": end,
+                     "total_duration": end - start,
+                     "print_duration": end - start, "status": "completed"}]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        j = c.get("/api/history/L1/analysis").json()
+        assert j["log"] != {"available": False}
+        assert len(j["log"]["mcu_shutdowns"]) == 1
+        assert any(f["id"] == "host_stall_fatal" for f in j["findings"])
+        assert any(f["id"] == "pickup_pogopin" for f in j["findings"])
+
+    def test_logs_0_skips_layer_3_entirely(
+            self, client, tmp_path, monkeypatch):
+        c, main, cfg, calls = client
+        import shutil
+        fixture = (Path(__file__).resolve().parents[1] / "fixtures"
+                   / "klippy_excerpt.log")
+        log_dir = tmp_path / "klippylogs"
+        log_dir.mkdir()
+        dst = log_dir / "klippy.log"
+        shutil.copy(fixture, dst)
+        mtime = time.mktime((2026, 10, 3, 23, 59, 0, 0, 0, -1))
+        os.utime(dst, (mtime, mtime))
+        monkeypatch.setattr(main, "KLIPPY_LOGS_DIR", str(log_dir))
+        monkeypatch.setattr(main, "MULTIACE_DATA_DIR", str(tmp_path / "hist3"))
+
+        start = time.mktime((2026, 10, 3, 2, 10, 0, 0, 0, -1))
+        end = time.mktime((2026, 10, 3, 6, 0, 0, 0, 0, -1))
+
+        async def fake_moonraker_history(limit):
+            return [{"job_id": "L2", "filename": "longprint2.gcode",
+                     "start_time": start, "end_time": end,
+                     "total_duration": end - start,
+                     "print_duration": end - start, "status": "completed"}]
+        monkeypatch.setattr(main, "_moonraker_history", fake_moonraker_history)
+
+        j = c.get("/api/history/L2/analysis?logs=0").json()
+        assert j["log"] == {"available": False}
+
+    def test_the_standalone_html_agrees_numerically_with_the_json(self, client):
+        c, main, cfg, calls = client
+        j = c.get("/api/history/mock-job-0/analysis?mock=1").json()
+        html_doc = c.get("/api/history/mock-job-0/analysis.html?mock=1").text
+        wall_hm = main.print_analysis._fmt_hm(j["breakdown"]["wall_total"])
+        assert wall_hm in html_doc
+
+
 class TestPrinterIdleGuard:
     """§13.4: applying an update mid-print aborts the job, cuts the heaters
     and leaves the nozzle set into cold plastic."""

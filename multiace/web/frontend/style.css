@@ -1973,6 +1973,54 @@ body:has(.panel) .overlay .dialog {
 .swim-block.swim-feeder_pin { height: 6px; align-self: center; opacity: .7; }
 .swim-block.swim-first_load { border-style: dashed; }
 
+/* --- Print analysis report (print-analysis plan §4, PR2) --------------
+   Sized from .preflight-dialog (96vw/92vh) - a report with a timeline,
+   per-head bars and a findings list needs the same room a preflight
+   plan does, not a 500px confirm box. */
+.analysis-dialog .analysis-outcome { border-collapse: collapse; width: 100%; max-width: 640px; font-size: .9rem; }
+.analysis-dialog .analysis-outcome th { text-align: left; color: var(--muted); font-weight: 400;
+  padding: .15rem .8rem .15rem 0; width: 9rem; }
+.analysis-dialog .analysis-outcome td { padding: .15rem 0; }
+.analysis-dialog h4 { margin: 1.1rem 0 .4rem; font-size: .9rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .03em; }
+.analysis-chart { overflow-x: auto; margin: .2rem 0 .4rem; }
+.analysis-chart svg { display: block; max-width: 100%; }
+.analysis-incidents, .analysis-findings { list-style: none; margin: 0; padding: 0; }
+.analysis-incidents li { padding: .4rem 0; border-bottom: 1px solid var(--border); }
+.analysis-incidents .evidence, .analysis-findings .evidence {
+  font-family: var(--mono); font-size: .78rem; margin: .2rem 0 0; padding-left: 1rem; }
+.analysis-findings > li { padding: .5rem 0; border-bottom: 1px solid var(--border); }
+.analysis-findings .finding-head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+.analysis-findings .finding-high strong,
+.analysis-findings .finding-high .finding-head b { color: var(--error); }
+.analysis-findings .finding-medium .finding-head b { color: var(--warn); }
+.pill.confidence-measured { border-color: var(--accent); color: var(--accent); }
+.pill.confidence-inferred { border-color: var(--muted); color: var(--muted); }
+.pill.confidence-suspected { border-color: var(--warn); color: var(--warn); background: transparent; }
+
+/* The Analyse column button - same shape as .reprint-btn, its neighbour. */
+.analyse-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--fg);
+  padding: .25rem .6rem; border-radius: 4px; font-size: .8rem; cursor: pointer;
+}
+.analyse-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.analyse-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* analysis_charts.js SVG classes - hue is never the only cue (plan
+   §4.3): toolhead swap and the error/health markers also get a hatch,
+   a distinct shape or a dashed stroke, matching .comp-seg-* and
+   .swim-block's own rule. */
+.ac-tl-printing { fill: var(--ink-700); }
+.ac-tl-paused { fill: var(--warn); }
+.ac-tl-swap { fill: var(--accent); }
+.ac-tl-toolhead { fill: var(--ink-700); }
+.ac-tl-error-tick { stroke: var(--error); stroke-width: 2; }
+.ac-headbar { fill: var(--accent); }
+.ac-health-line { stroke: var(--accent); stroke-width: 1.5; }
+.ac-health-stall-tick { stroke: var(--warn); stroke-width: 2; }
+.ac-health-timer-close { fill: var(--error); }
+.ac-health-shutdown { stroke: var(--error); stroke-width: 2; stroke-dasharray: 4 3; }
+
 /* --- G-code preview (plan section 7) ---------------------------------- */
 /* Parsed and rendered entirely client-side (gcode_preview.js +
    gcode_preview_worker.js) - no upload, no printer required. WebGL2 with

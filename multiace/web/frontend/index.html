@@ -986,6 +986,7 @@
             <th data-prio="1500">{{ t('ui.history.filament') }}</th>
             <th data-prio="1100">{{ t('ui.history.result') }}</th>
             <th></th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -1021,6 +1022,15 @@
               <td data-prio="1500">{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
               <td data-prio="1100"><span class="pill">{{ row.status || '–' }}</span></td>
               <td>
+                <button class="analyse-btn"
+                        :disabled="!canAnalyse(row)"
+                        :title="canAnalyse(row) ? t('ui.history.analyse_hint')
+                                                : t('ui.history.analyse_blocked_live')"
+                        @click.stop="openAnalysis(row)">
+                  {{ t('ui.history.analyse') }}
+                </button>
+              </td>
+              <td>
                 <button v-if="row.filename" class="reprint-btn"
                         :disabled="isPrinting || history.reprinting !== ''"
                         :title="t('ui.history.reprint_hint')"
@@ -1033,7 +1043,7 @@
             <tr v-if="row.actual && actualPopover.open
                       && actualPopover.rowKey === historyRowKey(row)"
                 class="actual-pop-row">
-              <td colspan="9">
+              <td colspan="10">
                 <div class="actual-pop">
                   <div class="actual-pop-head">
                     <b>{{ t('ui.history.actual') }}</b>
@@ -1058,7 +1068,7 @@
             </tr>
             <tr v-if="history.detail && history.detail.id === row.id"
                 class="history-detail">
-              <td colspan="9">
+              <td colspan="10">
                 <div v-if="row.multiace">
                   <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
                      · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>
@@ -2872,6 +2882,128 @@ reboot</pre>
       </div>
     </div>
   </div>
+  <!-- PRINT ANALYSIS REPORT: a per-job report in a modal (print-analysis
+       plan §4), built on the same §1-§2 breakdown the History popover
+       already shows at a glance, plus findings and (optionally) a
+       klippy.log pass. Sized from the preflight dialog precedent. -->
+  <div v-if="analysisModal.open" class="overlay" @click.self="closeAnalysis">
+    <div class="dialog preflight-dialog analysis-dialog">
+      <div class="row">
+        <h3>{{ t('ui.analysis.title') }}</h3>
+      </div>
+      <div class="preflight-body">
+        <p v-if="analysisModal.loading" class="muted">{{ t('ui.analysis.loading') }}</p>
+        <p v-else-if="analysisModal.error" class="error">{{ analysisModal.error }}</p>
+        <template v-else-if="analysisModal.data">
+          <!-- 1. Outcome - deliberately boring: one table, no chart. -->
+          <h4>{{ t('ui.analysis.section.outcome') }}</h4>
+          <table class="analysis-outcome">
+            <tr><th>{{ t('ui.analysis.outcome.file') }}</th>
+                <td>{{ analysisModal.data.print.filename || '–' }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.result') }}</th>
+                <td><span class="pill">{{ analysisModal.data.print.status || '–' }}</span></td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.segments') }}</th>
+                <td>{{ analysisModal.data.print.segments }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.first_start') }}</th>
+                <td>{{ analysisModal.data.print.first_start
+                        ? new Date(analysisModal.data.print.first_start * 1000).toLocaleString() : '–' }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.finish') }}</th>
+                <td>{{ analysisModal.data.print.last_end
+                        ? new Date(analysisModal.data.print.last_end * 1000).toLocaleString() : '–' }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.estimate') }}</th>
+                <td>{{ fmtDuration(analysisModal.data.meta.estimated_time) }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.moving_time') }}</th>
+                <td>{{ fmtDuration((analysisModal.data.breakdown.buckets.depositing || {}).seconds) }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.filament') }}</th>
+                <td>{{ analysisModal.data.meta.filament_used_mm
+                        ? Math.round(analysisModal.data.meta.filament_used_mm / 1000) + ' m' : '–' }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.toolchanges') }}</th>
+                <td>{{ analysisModal.data.events.filter(e => e.kind === 'toolhead_change'
+                        || e.kind === 'toolhead_change_agg').length }}</td></tr>
+            <tr><th>{{ t('ui.analysis.outcome.swaps') }}</th>
+                <td>{{ analysisModal.data.events.filter(e => e.kind === 'swap').length }}</td></tr>
+          </table>
+
+          <!-- 2. Timeline -->
+          <h4>{{ t('ui.analysis.section.timeline') }}</h4>
+          <div class="analysis-chart" v-html="analysisTimelineSvg()"></div>
+
+          <!-- 3. Where the time went - shared renderer with the History
+               popover (plan §4.3 / §3.2): same compBarFrom/bucketRowsFrom. -->
+          <h4>{{ t('ui.analysis.section.breakdown') }}</h4>
+          <div class="comp-bar">
+            <span v-for="b in compBarFrom(analysisModal.data.breakdown.buckets)" :key="'acb-'+b.key"
+                  class="comp-seg" :class="'comp-seg-'+b.key" :style="{width: b.pct + '%'}"
+                  :title="t('ui.analysis.bucket.' + b.key) + ': ' + fmtDuration(b.seconds)"></span>
+          </div>
+          <table class="actual-pop-table">
+            <tr v-for="b in bucketRowsFrom(analysisModal.data.breakdown.buckets)" :key="'ab-'+b.key">
+              <td>{{ t('ui.analysis.bucket.' + b.key) }}</td>
+              <td>{{ fmtDuration(b.seconds) }}</td>
+              <td>{{ fmtPct(b.pct_of_wall) }} %</td>
+              <td class="muted small">{{ t('ui.analysis.source.' + b.source) }}</td>
+            </tr>
+          </table>
+
+          <!-- 4. Incidents - grouped by cause, newest first, evidence
+               quoted verbatim from the event record. -->
+          <h4>{{ t('ui.analysis.section.incidents') }}</h4>
+          <p v-if="!analysisIncidents().length" class="muted small">{{ t('ui.analysis.not_recorded') }}</p>
+          <ul v-else class="analysis-incidents">
+            <li v-for="(e, i) in analysisIncidents()" :key="'inc-'+i">
+              <b>{{ new Date(e.t * 1000).toLocaleString() }}</b>
+              <span class="pill small">code {{ e.code }}</span>
+              <span v-if="e.head !== undefined && e.head !== null" class="muted small">T{{ e.head }}</span>
+              <div class="muted small evidence">{{ e.msg || e.coded || '' }}</div>
+            </li>
+          </ul>
+
+          <!-- 5. Filament -->
+          <h4>{{ t('ui.analysis.section.filament') }}</h4>
+          <div class="analysis-chart" v-html="analysisHeadBarsSvg()"></div>
+          <p v-if="analysisModal.data.meta.filament_colour" class="muted small">
+            {{ analysisModal.data.meta.filament_type || '' }} · {{ analysisModal.data.meta.filament_colour }}
+          </p>
+
+          <!-- 6. Host health - only rendered when Layer 3 returned data. -->
+          <h4>{{ t('ui.analysis.section.host_health') }}</h4>
+          <p v-if="!analysisLogAvailable()" class="muted small">{{ t('ui.analysis.not_recorded') }}</p>
+          <template v-else>
+            <div class="analysis-chart" v-html="analysisHealthSvg()"></div>
+            <p v-if="analysisModal.data.log.rotated_away" class="muted small">
+              {{ t('ui.analysis.log_rotated') }}
+            </p>
+          </template>
+
+          <!-- 7. Findings & next steps -->
+          <h4>{{ t('ui.analysis.section.findings') }}</h4>
+          <p v-if="!analysisModal.data.findings.length" class="muted small">{{ t('ui.analysis.no_findings') }}</p>
+          <ul v-else class="analysis-findings">
+            <li v-for="f in analysisModal.data.findings" :key="f.id" :class="'finding-' + f.severity">
+              <div class="finding-head">
+                <span class="pill small" :class="'confidence-' + f.confidence">
+                  {{ t('ui.analysis.confidence.' + f.confidence) }}
+                </span>
+                <b>{{ t(f.title_key) }}</b>
+                <span v-if="f.cost_s" class="muted small">{{ fmtDuration(f.cost_s) }}</span>
+              </div>
+              <p class="muted small">{{ t(f.action_key) }}</p>
+              <ul v-if="f.evidence && f.evidence.length" class="evidence">
+                <li v-for="(e, i) in f.evidence" :key="i">{{ e }}</li>
+              </ul>
+            </li>
+          </ul>
+        </template>
+      </div>
+      <div class="preflight-actions">
+        <a v-if="analysisModal.data" :href="analysisStandaloneUrl()" target="_blank" rel="noopener">
+          {{ t('ui.analysis.open_standalone') }}
+        </a>
+        <div class="spacer"></div>
+        <button @click="closeAnalysis">{{ t('ui.analysis.close') }}</button>
+      </div>
+    </div>
+  </div>
   <!-- APPLY CHANGES: what was written, what it needs, and the one button
        that does it. Saving no longer ends in a vague "please reboot". -->
   <div v-if="applyModal.open && !panelMode" class="overlay">
@@ -2955,6 +3087,7 @@ reboot</pre>
      unmounted HTML skeleton whenever unpkg.com was unreachable. -->
 <script src="vendor/vue.global.prod.js"></script>
 <script src="gcode_preview.js"></script>
+<script src="analysis_charts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
