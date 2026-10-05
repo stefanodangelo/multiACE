@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Second Take"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "ba1f3fe"
+MULTIACE_BUILD_TAG = "ce265a0"
 MULTIACE_BUNDLE_SHA1 = "9ba7849"
 
 def _load_i18n_catalog(i18n_dir, lang):
@@ -97,6 +97,10 @@ AIRLOG_EMIT_S = 10.0
 AIRLOG_CHEW_DELTA = 25000.
 AIRLOG_CHEW_WINDOWS = 2
 AIRLOG_CHEW_MIN_MOVING = 3
+
+AIRLOG_CHEW_WARMUP_WINDOWS = 3
+AIRLOG_CHEW_HARD_CEILING = 70000.
+AIRLOG_CHEW_RATIO = 2.0
 
 STALL_SRC_THRESHOLD = 0.020
 
@@ -949,6 +953,8 @@ class MultiAce:
 
         self._airlog_chew_run = {}
         self._airlog_chew_latched = set()
+        self._airlog_chew_baseline = {}
+        self._airlog_chew_samples = {}
         self._pickcheck_active = False
 
         self._apply_log_levels()
@@ -1776,11 +1782,19 @@ class MultiAce:
 
     def _airlog_chew_eval(self, head, delta, nmove):
         """CHEW detector on a closed airlog window (AIRLOG_CHEW_* const
-        note). >= AIRLOG_CHEW_WINDOWS consecutive windows with a delta >=
-        AIRLOG_CHEW_DELTA while the head genuinely extrudes = the lever
-        hammering against a bind (white stripe #2 read 7x 40-48k while the
-        stripe printed). WARN always; resumable PAUSE only with [ace]
-        resistance_pause on. Never raises."""
+        note). >= AIRLOG_CHEW_WINDOWS consecutive windows with a delta that
+        is BOTH >= AIRLOG_CHEW_DELTA and >= AIRLOG_CHEW_RATIO times this
+        head's own learned baseline = the lever hammering against a bind.
+        Some heads idle well above the flat 25000 floor as a matter of
+        normal coil noise (field data: one head sat at a 25k-51k delta,
+        median ~33k, for an entire healthy 1d16h print - the flat floor
+        alone falsely paused it 5x). The first AIRLOG_CHEW_WARMUP_WINDOWS
+        closed windows per head always feed the baseline unconditionally
+        (so a head that is simply "loud" at rest gets its own normal level
+        learned instead of being judged against every other head's floor);
+        AIRLOG_CHEW_HARD_CEILING is an unconditional safety net that can
+        still fire during warmup, before any baseline exists. WARN always;
+        resumable PAUSE only with [ace] resistance_pause on. Never raises."""
         try:
             if (self._swap_in_progress or self._pickcheck_active
                     or getattr(self, '_swap_phase', 'idle')
@@ -1788,15 +1802,47 @@ class MultiAce:
 
                 self._airlog_chew_run.pop(head, None)
                 return
-            if (delta is None or nmove < AIRLOG_CHEW_MIN_MOVING
-                    or delta < AIRLOG_CHEW_DELTA):
+            if delta is None or nmove < AIRLOG_CHEW_MIN_MOVING:
                 self._airlog_chew_run.pop(head, None)
                 return
+
+            baseline = self._airlog_chew_baseline.get(head)
+            samples = self._airlog_chew_samples.get(head, 0)
+            hard_hit = delta >= AIRLOG_CHEW_HARD_CEILING
+
+            if samples < AIRLOG_CHEW_WARMUP_WINDOWS and not hard_hit:
+                self._airlog_chew_baseline[head] = (
+                    delta if baseline is None else
+                    (1. - RESISTANCE_BASELINE_ALPHA) * baseline
+                    + RESISTANCE_BASELINE_ALPHA * delta)
+                self._airlog_chew_samples[head] = samples + 1
+                self._airlog_chew_run.pop(head, None)
+                return
+
+            if hard_hit:
+                suspect = True
+            elif baseline is None:
+                suspect = delta >= AIRLOG_CHEW_DELTA
+            else:
+                suspect = (delta >= AIRLOG_CHEW_DELTA
+                           and delta >= AIRLOG_CHEW_RATIO * baseline)
+
+            if not suspect:
+                self._airlog_chew_baseline[head] = (
+                    delta if baseline is None else
+                    (1. - RESISTANCE_BASELINE_ALPHA) * baseline
+                    + RESISTANCE_BASELINE_ALPHA * delta)
+                self._airlog_chew_run.pop(head, None)
+                return
+
             run = self._airlog_chew_run.get(head, 0) + 1
             self._airlog_chew_run[head] = run
             logging.warning(
                 '[multiACE] [airlog] CHEW window head=%d delta=%.0f '
-                'run=%d/%d' % (head, delta, run, AIRLOG_CHEW_WINDOWS))
+                'baseline=%s run=%d/%d' % (
+                    head, delta,
+                    ('%.0f' % baseline) if baseline is not None else '-',
+                    run, AIRLOG_CHEW_WINDOWS))
             if run < AIRLOG_CHEW_WINDOWS or head in self._airlog_chew_latched:
                 return
             self._airlog_chew_latched.add(head)
@@ -3137,6 +3183,8 @@ class MultiAce:
             self._resistance_paused_heads.clear()
             self._airlog_chew_run.clear()
             self._airlog_chew_latched.clear()
+            self._airlog_chew_baseline.clear()
+            self._airlog_chew_samples.clear()
         elif _src_head is not None:
             _src_lanes = [l for l, h in getattr(
                 self, '_resistance_lane_head', {}).items() if h == _src_head]
