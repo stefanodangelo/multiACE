@@ -703,6 +703,7 @@ class MultiAce:
         self._slot_overrides_file = (
             "/home/lava/printer_data/config/extended/multiace/slot_overrides.json")
         self._slot_overrides_mtime = 0.0
+        self._slot_overrides_err_logged = 0.0
 
         self._orig_set_ptc = None
         self._raw_set_ptc = None
@@ -883,6 +884,8 @@ class MultiAce:
 
         self._spool_audit_pairs = set()
         self._spool_print_base = {}
+        self._spool_session_stock_base_mm = None
+        self._spool_unbound_heads = set()
         self._load_spool_db()
         self._feedlog_last = {}
         self._feedlog_timer = None
@@ -3054,6 +3057,18 @@ class MultiAce:
 
     def _on_print_start(self, *args):
 
+        self._spool_print_base = {}
+        self._spool_audit_pairs = set()
+        self._spool_unbound_heads = set()
+        try:
+            _ps = self.printer.lookup_object('print_stats', None)
+            self._spool_session_stock_base_mm = (
+                float(_ps.get_status(self.reactor.monotonic())
+                      .get('filament_used') or 0.)
+                if _ps is not None else None)
+        except Exception:
+            self._spool_session_stock_base_mm = None
+
         self._print_has_gcode_loads = self._sniff_print_gcode_loads()
         logging.info('[multiACE] print gcode carries multiACE loads: %s'
                      % self._print_has_gcode_loads)
@@ -3288,18 +3303,44 @@ class MultiAce:
 
             _ps = self.printer.lookup_object('print_stats', None)
             if _ps is not None:
-                stock_mm = float(_ps.get_status(
+                stock_mm_total = float(_ps.get_status(
                     self.reactor.monotonic()).get('filament_used') or 0.)
+                # print_stats.filament_used is cumulative across a
+                # power-loss resume (a new klippy process keeps restoring
+                # it from the file position), while booked_mm only ever
+                # covers spools touched THIS klippy session (both
+                # _spool_print_base and the audit-pairs set are reset at
+                # klippy start / print start). Comparing the two windows
+                # directly produced a meaningless -92% on a resumed print
+                # (2026-10-04 postmortem). Subtract this session's own
+                # stock baseline so both sides cover the same window.
+                session_base = self._spool_session_stock_base_mm
+                if session_base is not None:
+                    stock_mm = stock_mm_total - session_base
+                    window_note = ''
+                else:
+                    stock_mm = stock_mm_total
+                    window_note = ' (no session baseline - may include prior sessions)'
+                partial_note = ''
+                if self._spool_unbound_heads:
+                    partial_note = (' - PARTIAL: head(s) %s had no spool '
+                                    'binding, their consumption is not '
+                                    'included in booked_mm'
+                                    % ', '.join(str(h) for h in
+                                                sorted(self._spool_unbound_heads)))
                 logging.info(
                     '[multiACE] [spool] print total: booked %.0fmm vs '
-                    'print_stats.filament_used %.0fmm (%s)'
+                    'print_stats.filament_used %.0fmm this session (%s)%s%s'
                     % (booked_mm, stock_mm,
                        ('%+.0f%%' % (100. * (booked_mm - stock_mm) / stock_mm))
-                       if stock_mm > 1. else 'no stock reference'))
+                       if stock_mm > 1. else 'no stock reference',
+                       window_note, partial_note))
         except Exception as e:
             logging.info('[multiACE] [spool] summary failed (ignored): %s' % e)
         self._spool_audit_pairs = set()
         self._spool_print_base = {}
+        self._spool_unbound_heads = set()
+        self._spool_session_stock_base_mm = None
         if getattr(self, '_spool_dirty', False):
             self._spool_dirty = False
             self._save_spool_db()
@@ -7059,8 +7100,23 @@ class MultiAce:
                 except OSError:
                     pass
         except Exception as e:
-            logging.info(
-                '[multiACE] _refresh_slot_overrides: keeping previous, error: %s' % e)
+            # Record the mtime we tried (even on failure) so the 1 Hz
+            # _refresh_slot_overrides_if_changed poll doesn't see a
+            # permanent mismatch and retry (and re-log) every tick for
+            # the rest of the print - a stuck permission error on this
+            # file flooded the log at ~1/s for 51h and forced a log
+            # rotation every ~2h (2026-10-04 postmortem). Only a fresh
+            # file touch (new mtime) should trigger another attempt.
+            try:
+                self._slot_overrides_mtime = _os.path.getmtime(self._slot_overrides_file)
+            except OSError:
+                pass
+            now = self.reactor.monotonic()
+            if now - self._slot_overrides_err_logged >= 300.0:
+                self._slot_overrides_err_logged = now
+                logging.info(
+                    '[multiACE] _refresh_slot_overrides: keeping previous, error: %s '
+                    '(suppressing repeats for 5 min)' % e)
 
     def _refresh_slot_overrides_if_changed(self):
         """Cheap mtime poll - reloads only when slot_overrides.json
@@ -9435,6 +9491,12 @@ class MultiAce:
                 return
             spool = self._spools.get(sid) if sid else None
             if spool is None:
+                # Real source/key resolved, but nothing is bound to it -
+                # distinct from the "src is falsy" early-return above (that
+                # one is a transient mid-unload gap, not a binding gap).
+                # Track it so the print-end summary can say the coverage
+                # is partial instead of implying a complete -N% figure.
+                self._spool_unbound_heads.add(head)
                 return
             prev_used = float(spool.get('used_mm') or 0.)
 
@@ -9449,6 +9511,20 @@ class MultiAce:
             if (head, sid) not in self._spool_audit_pairs:
                 self._spool_audit_pairs.add((head, sid))
                 self._spool_print_base.setdefault(sid, prev_used)
+                if self._spool_session_stock_base_mm is None:
+                    # First booking this klippy session - e.g. a power-loss
+                    # resume, where _on_print_start never re-fires. Backfill
+                    # here so the print-end summary still compares booked_mm
+                    # against THIS session's stock delta, not the whole
+                    # (possibly multi-session) cumulative print_stats figure.
+                    try:
+                        _ps = self.printer.lookup_object('print_stats', None)
+                        self._spool_session_stock_base_mm = (
+                            float(_ps.get_status(self.reactor.monotonic())
+                                  .get('filament_used') or 0.)
+                            if _ps is not None else 0.)
+                    except Exception:
+                        self._spool_session_stock_base_mm = 0.
 
                 logging.info(
                     '[multiACE] [spool] booking: head %d -> spool #%s (%s), '
