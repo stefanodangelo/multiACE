@@ -6274,7 +6274,7 @@ createApp({
     // tooltip does not exist there. The collapse control exists for the
     // printer's own 1024x600 panel, where 168px is worth reclaiming.
     // =================================================================
-    const RAIL_ICONS = {dashboard: "▤", monitor: "▣", history: "◷",
+    const RAIL_ICONS = {dashboard: "▤", monitor: "▣", favorites: "★", history: "◷",
                         queue: "☰", spools: "◍", config: "⚙", plugin: "◫"};
     const railCollapsed = ref(localStorage.getItem("multiace.rail") === "1");
     function toggleRail() { railCollapsed.value = !railCollapsed.value; }
@@ -6298,6 +6298,8 @@ createApp({
                   label: t("ui.tabs.monitor")});
       items.push({key: "spools", icon: RAIL_ICONS.spools,
                   label: t("ui.tabs.spools")});
+      items.push({key: "favorites", icon: RAIL_ICONS.favorites,
+                  label: t("ui.tabs.favorites")});
       items.push({key: "history", icon: RAIL_ICONS.history,
                   label: t("ui.tabs.history")});
       items.push({key: "queue", icon: RAIL_ICONS.queue,
@@ -6550,11 +6552,12 @@ createApp({
     const ACTUAL_BUCKET_ORDER = ["depositing", "filament_swap",
       "toolhead_swap", "warmup", "paused_error", "paused_user", "crash_gap"];
 
-    async function loadHistory() {
+    async function loadHistory(opts) {
+      const limit = (opts && opts.limit) || 50;
       history.busy = true;
       history.error = "";
       try {
-        const r = await fetch(`${API}/history?limit=50`);
+        const r = await fetch(`${API}/history?limit=${limit}`);
         const j = await r.json();
         if (!r.ok) throw new Error(j.detail || `${r.status}`);
         history.jobs = j.jobs || [];
@@ -6744,6 +6747,126 @@ createApp({
       } finally {
         history.reprinting = "";
       }
+    }
+
+    // =================================================================
+    // Favourites (print-analysis plan §5) - starred prints, server-side
+    // (not localStorage, which is view-state-only here - see
+    // job_history.py's favourites docstring) so a star shows on every
+    // device. Card grid of its own rather than a History filter, each
+    // card deep-linking back to its History row (plan §5.5).
+    // =================================================================
+    const favorites = reactive({
+      loaded: false, busy: false, error: "", items: [], max: 200,
+    });
+    //: The stable key a favourite is stored under - "mr:"+job_id when
+    //: Moonraker has one (survives a row losing its multiACE join),
+    //: else "ma:"+id. NOT historyRowKey(), which falls back to filename
+    //: and exists for a different purpose (tracking an open popover).
+    function favoriteKey(row) {
+      if (!row) return "";
+      if (row.job_id) return "mr:" + row.job_id;
+      if (row.id) return "ma:" + row.id;
+      return "";
+    }
+    function isFavorite(row) {
+      const key = favoriteKey(row);
+      return !!key && favorites.items.some(f => f.key === key);
+    }
+    async function loadFavorites() {
+      favorites.busy = true;
+      favorites.error = "";
+      try {
+        const r = await fetch(`${API}/favorites`);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        favorites.items = j.favorites || [];
+        favorites.max = j.max || favorites.max;
+        favorites.loaded = true;
+      } catch (e) {
+        favorites.error = e.message || String(e);
+      } finally {
+        favorites.busy = false;
+      }
+    }
+    async function _postFavorite(key, on, filename, startTime) {
+      const r = await fetch(`${API}/favorites`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({key, on, filename: filename || null,
+                              start_time: startTime || null}),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `${r.status}`);
+      favorites.items = j.favorites || [];
+    }
+    async function toggleFavorite(row) {
+      const key = favoriteKey(row);
+      if (!key) return;
+      try {
+        await _postFavorite(key, !isFavorite(row), row.filename, row.start_time);
+      } catch (e) {
+        favorites.error = e.message || String(e);
+      }
+    }
+    async function unstarFavorite(fav) {
+      try {
+        await _postFavorite(fav.key, false);
+      } catch (e) {
+        favorites.error = e.message || String(e);
+      }
+    }
+    watch(() => tab.value, v => {
+      if (!favorites.loaded && (v === "favorites" || v === "history")) loadFavorites();
+      if (v === "favorites" && !history.loaded) loadHistory();
+    });
+    //: A favourite's own job_id, for the thumbnail proxy (plan §5.3) -
+    //: an "ma:"-keyed favourite (no Moonraker job) has none, so it just
+    //: renders the placeholder like any other job with no thumbnail.
+    function favoriteThumbUrl(fav) {
+      const jobId = (fav.key || "").startsWith("mr:") ? fav.key.slice(3) : "";
+      return `${API}/thumbnail?job_id=${encodeURIComponent(jobId)}&size=300`;
+    }
+    //: Re-matched the same way the backend's join_history would: by key
+    //: first, falling back to filename + a start-time window, so a
+    //: favourite surviving a job_id change (or key format change) still
+    //: finds its row rather than showing a false tombstone.
+    function findFavoriteRow(fav) {
+      const byKey = history.jobs.find(row => favoriteKey(row) === fav.key);
+      if (byKey) return byKey;
+      return history.jobs.find(row => row.filename === fav.filename
+        && Math.abs((row.start_time || 0) - (fav.start_time || 0)) <= 90) || null;
+    }
+    const rowFlashKey = ref("");
+    function flashRow(key) {
+      rowFlashKey.value = key;
+      setTimeout(() => {
+        if (rowFlashKey.value === key) rowFlashKey.value = "";
+      }, 1200);
+    }
+    // The sequencing that matters (plan §5.5): History may not be loaded
+    // yet, the job may be older than the default limit=50 window, or it
+    // may genuinely be gone (Moonraker's own DB reset) - each needs its
+    // own branch, and the last one needs a message rather than a silent
+    // no-op.
+    async function openFavorite(fav) {
+      tab.value = "history";
+      if (!history.loaded) await loadHistory();
+      let row = findFavoriteRow(fav);
+      if (!row) {
+        await loadHistory({limit: 200});
+        row = findFavoriteRow(fav);
+      }
+      if (!row) {
+        setMacroLog(t("ui.favorites.not_in_window"));
+        return;
+      }
+      history.detail = row;
+      await nextTick();
+      const key = historyRowKey(row);
+      const el = document.querySelector(`[data-jobkey="${key}"]`);
+      el?.scrollIntoView({block: "center", behavior: "smooth"});
+      flashRow(key);
     }
 
     // =================================================================
@@ -7481,6 +7604,8 @@ createApp({
       analysisStandaloneUrl, analysisIncidents, analysisLogAvailable,
       analysisTimelineSvg, analysisHeadBarsSvg, analysisHealthSvg,
       bucketRowsFrom, compBarFrom,
+      favorites, loadFavorites, isFavorite, toggleFavorite, unstarFavorite,
+      favoriteThumbUrl, findFavoriteRow, openFavorite, rowFlashKey,
       queue, loadQueue, launchQueued, deleteQueued, queueDriftTooltip,
       webcam, webcamShown, webcamSrc, webcamVideo, loadWebcam, startWebrtc,
       consoleLines, consoleFollow, consoleInput, consoleBusy, consoleEl,

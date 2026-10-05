@@ -17,12 +17,12 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.99.16b"
-MULTIACE_CODENAME = "Second Take"
+MULTIACE_VERSION = "0.99.17b"
+MULTIACE_CODENAME = "Star Turn"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "b7ba963"
+MULTIACE_BUILD_TAG = "678b66f"
 MULTIACE_BUNDLE_SHA1 = "2ba938d"
 
 def _load_i18n_catalog(i18n_dir, lang):

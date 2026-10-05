@@ -1896,8 +1896,26 @@ body:has(.panel) .overlay .dialog {
 .history-table .swatch { margin-right: 2px; }
 .reprint-btn { font-size: .8rem; padding: .2rem .5rem; }
 
+/* The leading star column (favourites plan §5.6) - a property of the
+   row, not an action on the file, so it sits leading rather than with
+   reprint/analyse on the right. */
+.star-col { width: 2rem; text-align: center; }
+.star-btn {
+  background: transparent; border: none; color: var(--border);
+  font-size: 1.05rem; line-height: 1; cursor: pointer; padding: .1rem .2rem;
+  border-radius: 4px;
+}
+.star-btn:hover { color: var(--muted); background: rgba(127, 127, 127, .1); }
+.star-btn.starred { color: var(--accent); }
+.star-btn.starred:hover { color: var(--accent); filter: brightness(1.2); }
+
+/* A History row that was just jumped to from a favourite card (plan
+   §5.5) - one brief highlight, not a persistent state. */
+@keyframes row-flash { from { background: rgba(21, 189, 198, .35); } to { background: transparent; } }
+.row-flash { animation: row-flash 1.2s ease-out; }
+
 /* --- Column priority (print-analysis plan §6) -------------------------
-   11 columns do not fit at 1280px with a 168px rail. The always-shown
+   12 columns do not fit at 1280px with a 168px rail. The always-shown
    set stays visible at any width; everything else is gated by viewport
    and stays reachable in the detail row regardless, so hiding it here
    costs nothing. */
@@ -2018,6 +2036,44 @@ body:has(.panel) .overlay .dialog {
 .ac-headbar { fill: var(--accent); }
 .ac-health-line { stroke: var(--accent); stroke-width: 1.5; }
 .ac-health-stall-tick { stroke: var(--warn); stroke-width: 2; }
+
+/* --- Favourites (print-analysis plan §5) -------------------------------
+   Explicitly a card grid, not a table - this tab is for recognising a
+   print by its thumbnail, not scanning columns of numbers. */
+.favorites-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: .9rem;
+}
+/* A <button>, not a <div> with @click - keyboard and screen-reader
+   support for free, matching the accessibility floor the rest of the
+   app holds to. */
+.fav-card {
+  display: flex; flex-direction: column; text-align: left;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0; overflow: hidden; cursor: pointer; color: var(--fg); font: inherit;
+}
+.fav-card:hover { border-color: var(--accent); }
+.fav-thumb {
+  position: relative; display: block; width: 100%; aspect-ratio: 4 / 3;
+  background: var(--ink-900); overflow: hidden;
+}
+.fav-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fav-star {
+  position: absolute; top: .3rem; right: .3rem; color: var(--accent);
+  background: rgba(18, 20, 22, .7); border-radius: 4px; padding: .1rem .3rem;
+  font-size: .95rem; line-height: 1;
+}
+.fav-star:hover { filter: brightness(1.25); }
+.fav-tombstone {
+  position: absolute; bottom: .3rem; left: .3rem; right: .3rem;
+  text-align: center; background: rgba(18, 20, 22, .8);
+}
+.fav-name {
+  padding: .5rem .6rem 0; font-size: .85rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fav-date { padding: .15rem .6rem .6rem; }
 .ac-health-timer-close { fill: var(--error); }
 .ac-health-shutdown { stroke: var(--error); stroke-width: 2; stroke-dasharray: 4 3; }
 

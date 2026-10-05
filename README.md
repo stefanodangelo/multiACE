@@ -8,6 +8,37 @@
 - Starting the ACE 2 Pro dryer directly above 50 °C can trigger a `ptc_error` in the ACE firmware, requiring a power cycle. Firmware limitation, hit by automatic humidity control whenever it restarts the heater at a stored higher target. Next release works around it with a soft ramp (50 °C, then raise to target after a few minutes).
 - Per-pair purge in the Web UI shows as unchecked even when active. Enable via `ACE_SET_PURGE MATRIX=1` in the Fluidd console; WebUI fix planned.
 
+## What's new in 0.99.17b "Star Turn" (since 0.99.16b)
+
+Print-analysis plan, in full: three features sharing one data layer, shipped
+as three PRs but documented together here since none of them had a
+changenote yet.
+
+- **Actual Duration** — the History table's Duration column splits into
+  **Estimated** and **Actual**, the latter the true wall-clock time a print
+  cost (pauses, swaps, toolchanges and all), with a segment-count chip when
+  a power-loss resume stitched two Moonraker job rows into one logical
+  print. A chevron opens a breakdown popover: a 100%-width composition bar
+  plus an absolute/percentage table for depositing time, filament and
+  toolhead changes, heating/homing, error vs. user pauses, and crash
+  recovery.
+- **Print Analysis** — an "Analyse" column on every finished History row
+  (cancelled and errored prints included) opens a full per-job report:
+  outcome summary, a time-proportional timeline chart, the same
+  time-breakdown as above, incidents with verbatim log evidence, filament
+  booked-vs-used per head, host-health signals pulled from `klippy.log`
+  when available, and a findings list (each one tagged `measured`,
+  `inferred` or `suspected`, sorted by cost) with a suggested next step.
+  Every report also renders as a standalone, shareable HTML page.
+- **Favourites** — star any finished print from the History table; starred
+  prints get their own card-grid tab (with thumbnail, name and date) ahead
+  of History in the nav rail. A card jumps straight back to its History
+  row, briefly highlighted. Starring is server-side, so it survives a
+  cleared browser and shows up on every device, not just the one that set
+  it; a favourite whose job can no longer be found (e.g. Moonraker's own
+  history was reset) is kept and shown as a tombstone rather than silently
+  dropped.
+
 ## What's new in 0.99.16b "Second Take" (since 0.99.15b)
 
 - **Reprint from history** — reprint a file exactly as it's already staged on the printer, no preflight or rewrite re-run, from the print history.

@@ -338,7 +338,76 @@ class TestBoundEvents:
         assert ts == sorted(ts)
 
 
+class TestFavorites:
+    """Favourites plan §5.2 - server-side so a star shows on every
+    device, bounded the same way MAX_JOBS bounds the history file."""
+
+    def test_round_trips_through_write_and_load(self, data_dir):
+        jh.write_favorites(data_dir, [{"key": "mr:1", "filename": "a.gcode",
+                                       "start_time": 1000.0, "ts": 2000.0}])
+        assert jh.load_favorites(data_dir) == [
+            {"key": "mr:1", "filename": "a.gcode",
+             "start_time": 1000.0, "ts": 2000.0}]
+
+    def test_a_missing_file_is_no_favorites_not_an_error(self, data_dir):
+        assert jh.load_favorites(data_dir) == []
+
+    def test_a_corrupt_file_is_no_favorites_not_a_crash(self, data_dir):
+        Path(data_dir, "favorites.json").write_text("{not json",
+                                                      encoding="utf-8")
+        assert jh.load_favorites(data_dir) == []
+
+    def test_newest_first(self, data_dir):
+        jh.write_favorites(data_dir, [
+            {"key": "a", "ts": 100.0}, {"key": "b", "ts": 300.0},
+            {"key": "c", "ts": 200.0}])
+        assert [f["key"] for f in jh.load_favorites(data_dir)] == \
+            ["b", "c", "a"]
+
+    def test_toggle_on_adds_a_favorite(self, data_dir):
+        favs = jh.toggle_favorite(data_dir, "mr:1", True, "a.gcode", 1000.0)
+        assert len(favs) == 1
+        assert favs[0]["key"] == "mr:1"
+        assert favs[0]["filename"] == "a.gcode"
+        assert favs[0]["start_time"] == 1000.0
+
+    def test_toggle_off_removes_it(self, data_dir):
+        jh.toggle_favorite(data_dir, "mr:1", True, "a.gcode", 1000.0)
+        assert jh.toggle_favorite(data_dir, "mr:1", False) == []
+
+    def test_toggling_the_same_key_on_twice_does_not_duplicate(self, data_dir):
+        jh.toggle_favorite(data_dir, "mr:1", True, "a.gcode", 1000.0)
+        favs = jh.toggle_favorite(data_dir, "mr:1", True, "a.gcode", 1000.0)
+        assert len(favs) == 1
+
+    def test_bounded_at_max_favorites(self, data_dir, monkeypatch):
+        monkeypatch.setattr(jh, "MAX_FAVORITES", 3)
+        for i in range(5):
+            jh.toggle_favorite(data_dir, f"mr:{i}", True, "a.gcode", float(i))
+        favs = jh.load_favorites(data_dir)
+        assert len(favs) == 3
+        assert {f["key"] for f in favs} == {"mr:4", "mr:3", "mr:2"}
+
+    def test_the_write_is_atomic_tmp_then_replace(self, data_dir):
+        jh.write_favorites(data_dir, [{"key": "a", "ts": 1.0}])
+        assert not Path(data_dir, "favorites.json.tmp").exists()
+        assert Path(data_dir, "favorites.json").exists()
+
+    def test_an_unwritable_directory_never_raises(self, tmp_path):
+        blocked = tmp_path / "file"
+        blocked.write_text("x", encoding="utf-8")
+        assert jh.write_favorites(str(blocked / "sub"),
+                                  [{"key": "a"}]) is False
+
+
 class TestMockFixture:
+    def test_the_mock_favorites_matches_the_store_shape(self):
+        path = (Path(__file__).resolve().parents[1] / "fixtures"
+                / "mock_favorites.json")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for fav in data["favorites"]:
+            assert {"key", "filename", "start_time", "ts"} <= set(fav)
+
     def test_the_mock_history_matches_the_join_shape(self):
         path = (Path(__file__).resolve().parents[1] / "fixtures"
                 / "mock_history.json")

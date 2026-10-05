@@ -45,6 +45,11 @@ META_KEYS = ("estimated_time", "layer_count", "object_height", "size",
              "thumbnails", "nozzle_diameter", "layer_height", "slicer",
              "slicer_version")
 
+#: Favourites plan §5.2 - bounded the same way jobs.jsonl is: a star set
+#: is deliberate, user-kept state with no natural expiry, but it still
+#: has to fit on the printer's own flash.
+MAX_FAVORITES = 200
+
 
 def _jobs_path(data_dir):
     return os.path.join(data_dir, "jobs.jsonl")
@@ -52,6 +57,10 @@ def _jobs_path(data_dir):
 
 def _stats_path(data_dir):
     return os.path.join(data_dir, "swap_stats.json")
+
+
+def _favorites_path(data_dir):
+    return os.path.join(data_dir, "favorites.json")
 
 
 # ---------------------------------------------------------------------------
@@ -411,3 +420,69 @@ def estimate_accuracy(record):
         "error_s":     actual - predicted,
         "error_pct":   round(100.0 * (actual - predicted) / predicted, 1),
     }
+
+
+# ---------------------------------------------------------------------------
+# Favourites (§5.2)
+# ---------------------------------------------------------------------------
+#
+# Server-side, not localStorage: a star set on the desktop must show on
+# the phone, and must survive a cleared browser - localStorage is correct
+# for view state (the rail's collapse flag, the active tab) but a
+# favourite is data.
+#
+# Keyed by `key` ("mr:"+job_id when Moonraker has one, else "ma:"+id),
+# NOT by row.id alone - row.id only exists once a multiACE record joins,
+# job_id vanishes if Moonraker's own DB is reset, and an `ambiguous` row
+# carries neither. `filename`/`start_time` ride along so a favourite can
+# still be re-matched by the join_history rule if its key ever
+# disappears; a favourite whose job cannot be re-matched is kept and
+# rendered as a tombstone rather than silently dropped.
+
+def load_favorites(data_dir):
+    """Every starred print, newest first. A missing or corrupt file reads
+    as no favourites rather than an error - the same reasoning
+    load_records applies to a corrupt history line."""
+    try:
+        with open(_favorites_path(data_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    favs = (data or {}).get("favorites") if isinstance(data, dict) else None
+    if not isinstance(favs, list):
+        return []
+    out = [f for f in favs if isinstance(f, dict) and f.get("key")]
+    out.sort(key=lambda f: float(f.get("ts") or 0.0), reverse=True)
+    return out
+
+
+def write_favorites(data_dir, favorites):
+    """Atomic tmp+os.replace, same pattern as write_swap_stats - a
+    half-written favourites file on a printer that lost power must never
+    be read back as valid."""
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        tmp = _favorites_path(data_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"favorites": favorites}, f, indent=2, sort_keys=True)
+        os.replace(tmp, _favorites_path(data_dir))
+        return True
+    except Exception:
+        return False
+
+
+def toggle_favorite(data_dir, key, on, filename=None, start_time=None):
+    """Star/unstar one print by its stable key. Returns the updated list,
+    newest first.
+
+    Bounded at MAX_FAVORITES by dropping the oldest once a new star would
+    exceed it - same reasoning as MAX_JOBS, applied to a list instead of
+    a rotated file.
+    """
+    favs = [f for f in load_favorites(data_dir) if f.get("key") != key]
+    if on:
+        favs.insert(0, {"key": key, "filename": filename or "",
+                        "start_time": start_time, "ts": time.time()})
+        favs = favs[:MAX_FAVORITES]
+    write_favorites(data_dir, favs)
+    return favs
