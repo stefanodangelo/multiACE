@@ -78,5 +78,8 @@ $RECYCLE.BIN/
 .devdata/
 
 .github/plans/
+*.md
 
 .claude/
+
+!README.md
