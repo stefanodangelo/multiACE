@@ -1116,6 +1116,12 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
     guess (see swap_cost.SwapCostModel.purge_mm_for). Returns [] rather
     than raising on anything it cannot classify - an estimate is never
     worth failing a preflight over.
+
+    A toolchange back to a head that is already holding the right colour
+    costs nothing - ACE and pinned-feeder heads alike - the same way a
+    toolchange onto an unchanged ACE slot is dropped below: multiACE adds
+    only what ITS mechanism costs on top of the slicer's own toolchange
+    time, and a feeder revisiting its one colour does no ACE work at all.
     """
     colors = colors or {}
     materials = materials or {}
@@ -1137,8 +1143,16 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
         kind_in = e.get('kind')
         if kind_in == 'pin':
             # A stock feeder pinned to its own head: tool pickup only, no
-            # ACE work at all. This is the cheapest position a colour can
-            # occupy and the reason §3.1 cares about placement.
+            # ACE work at all - this is the cheapest position a colour can
+            # occupy and the reason §3.1 cares about placement. But a
+            # toolchange BACK to a feeder already holding this exact colour
+            # (the slicer revisits T often - e.g. alternating two other
+            # tools around it) costs nothing of multiACE's own, same as an
+            # unchanged ACE slot just below: drop it rather than re-billing
+            # a tool pickup the slicer's own toolchange time already covers.
+            if head_color.get(head) == t:
+                last_use[head] = i
+                continue
             out.append({
                 'i': i, 't': t, 'from_t': head_color.get(head), 'head': head,
                 'ace': None, 'slot': None, 'kind': 'feeder_pin',

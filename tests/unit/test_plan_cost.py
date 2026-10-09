@@ -108,6 +108,18 @@ class TestTimeline:
         assert tl[0]["kind"] == "feeder_pin"
         assert tl[0]["seconds"] < tl[1]["seconds"]
 
+    def test_returning_to_a_pinned_feeder_that_already_holds_it_costs_nothing(
+            self, model):
+        """T0 -> T1 -> T0 with T0 pinned to its own feeder: the slicer just
+        revisits the same tool around another one, so the third event is a
+        tool pickup the slicer's own toolchange time already covers, not a
+        second billable feeder_pin - same contract as the ACE case above."""
+        tl = pp.build_swap_timeline(
+            [0, 1, 0],
+            {0: {"kind": "pin", "head": 0}, 1: ace(1, 0, 1)},
+            cost_model=model)
+        assert len(tl) == 2
+
     def test_a_wide_window_on_a_bg_head_becomes_a_background_swap(self, model):
         """The blue-from-head-2 / green-preloaded-in-head-1 case: head 0 is
         free for 30 minutes before it is needed again."""
