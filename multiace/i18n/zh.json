@@ -266,7 +266,7 @@
       "est_waste": "{g} g 清料 ({pct} %)",
       "est_purge_in_slicer": "已包含在切片总量中",
       "est_swaps": "{inline} 次内联 / {bg} 次后台换料",
-      "est_per_color": "按颜色",
+      "est_per_color": "费用明细(按颜色)",
       "est_purge": "清料",
       "timeline": "换料时间线",
       "stage_for_later": "暂存以待稍后打印",

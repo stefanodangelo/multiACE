@@ -414,7 +414,7 @@
       "est_waste": "{g} g purge ({pct} %)",
       "est_purge_in_slicer": "already in the slicer total",
       "est_swaps": "{inline} inline / {bg} background swaps",
-      "est_per_color": "Per colour",
+      "est_per_color": "Cost breakdown (per colour)",
       "est_purge": "purge",
       "purge_pairs": "Purge per colour pair",
       "purge_overrides": "{n} override(s)",
