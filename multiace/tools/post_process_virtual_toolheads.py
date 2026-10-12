@@ -1072,17 +1072,31 @@ def _model_cost(cost_model, kind, ace=None, slot=None,
     return float(BG_SWAP_COST_INLINE_S)
 
 
-def _model_purge_mm(cost_model, from_color, to_color, material,
-                    from_t=None, to_t=None, flush_matrix=None):
-    """Millimetres to purge for one swap, model-first, constants otherwise.
+def _model_purge_mm(cost_model, kind, from_color, to_color, material,
+                    from_t=None, to_t=None, flush_matrix=None,
+                    from_key=None, to_key=None):
+    """Millimetres to purge for one swap - the SAME number
+    rewrite_head_mode_to_file/rewrite_to_file are about to stamp (see
+    _matrix_purge_mm), so the estimate never shows a different purge than
+    the one the engine will actually extrude.
 
-    Prefers `purge_mm_for` (slicer flush-matrix aware) when the installed
-    swap_cost.py has it; an older installed copy without that method still
-    gets its own `purge_mm` guess rather than silently losing purge -
-    matches this module's usual version-skew tolerance.
+    Prefers `resolve_swap_purge_mm` (pair overrides + purge_scale_pct,
+    §1.6/Config-tab) when the installed swap_cost.py has it; an older
+    installed copy without that method still gets its own `purge_mm`
+    guess rather than silently losing purge - matches this module's usual
+    version-skew tolerance.
     """
     if cost_model is None:
         return 0.0
+    stamp_mm = _matrix_purge_mm(flush_matrix, from_t, to_t)
+    fn = getattr(cost_model, "resolve_swap_purge_mm", None)
+    if fn is not None:
+        try:
+            return float(fn(kind, from_key=from_key, to_key=to_key,
+                            stamp_mm=stamp_mm, from_color=from_color,
+                            to_color=to_color, material=material))
+        except Exception:
+            pass
     fn = getattr(cost_model, "purge_mm_for", None)
     if fn is not None:
         try:
@@ -1219,6 +1233,13 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 note = ('no window before use - degrades to inline'
                         if head in bg_set else 'inline swap')
 
+        # The PHYSICAL pair ("ace:slot" on each side) a Config-tab purge
+        # override is keyed on - the slot a colour sits in, not its
+        # slicer T-index (from_t/t), since an override is set before
+        # knowing which colour will land where.
+        from_key = ("%s:%s" % prev_key) if prev_key else None
+        to_key = "%s:%s" % key
+
         out.append({
             'i': i, 't': t, 'from_t': from_t, 'head': head,
             'ace': e.get('ace'), 'slot': e.get('slot'), 'kind': kind,
@@ -1227,8 +1248,9 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 cost_model, kind, e.get('ace'), e.get('slot'),
                 from_color, to_color, material), 1),
             'purge_mm': round(_model_purge_mm(
-                cost_model, from_color, to_color, material,
-                from_t=from_t, to_t=t, flush_matrix=flush_matrix), 1),
+                cost_model, kind, from_color, to_color, material,
+                from_t=from_t, to_t=t, flush_matrix=flush_matrix,
+                from_key=from_key, to_key=to_key), 1),
             'note': note})
 
         head_key[head] = key
@@ -1701,16 +1723,38 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                     if ao is None:
                                         ao = ANTI_OOZE_NO_UNRETRACT
 
+                                    # Same §1.6 resolution as an inline
+                                    # swap (purge_mm_for, when given,
+                                    # applies the Config-tab scale/pair
+                                    # override on top of this matrix
+                                    # stamp) - a background swap used to
+                                    # bypass both.
                                     _bgp = _matrix_purge_mm(
                                         flush_matrix, rel_tool,
                                         body_tools[nxt_j])
+                                    if purge_mm_for is not None:
+                                        try:
+                                            _bgp = purge_mm_for(
+                                                ae_rel[0], nxt[0], nxt[1],
+                                                rel_tool, body_tools[nxt_j],
+                                                stamp_mm=_bgp)
+                                        except TypeError:
+                                            try:
+                                                _bgp = purge_mm_for(
+                                                    ae_rel[0], nxt[0], nxt[1],
+                                                    rel_tool,
+                                                    body_tools[nxt_j])
+                                            except Exception:
+                                                pass
+                                        except Exception:
+                                            pass
                                     fout.write(
                                         'ACE_BG_SWAP HEAD=%d ACE=%d '
                                         'SLOT=%d ANTI_OOZE=%s%s QUIET=1\n'
                                         % (ae_rel[0], nxt[0], nxt[1],
                                            _fmt_anti_ooze(ao),
-                                           (' PURGE=%d' % _bgp)
-                                           if _bgp is not None else ''))
+                                           (' PURGE=%d' % int(round(_bgp)))
+                                           if _bgp else ''))
                     bt_idx += 1
                 ae = ace_entry_of(n)
                 if not in_body:
@@ -1744,18 +1788,35 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         v = post_t_unret.get(line_no)
                         if v is None:
                             v = ANTI_OOZE_NO_UNRETRACT
-                        # Colour-aware purge (§3.4), emitted as an extra
+                        # Per-swap purge (§1.6/§3.4), emitted as an extra
                         # KEY=VAL that the plan-line regex already tolerates.
                         # It is a REQUEST: cmd_ACE_SWAP_HEAD clamps it
                         # against THIS machine's purge bin, because the file
                         # may have been sliced against a different one.
+                        # Stamped from the slicer's own flush matrix, same
+                        # as a background swap just above - an inline swap
+                        # used to get no per-pair stamp at all here and
+                        # fell through to the engine's flat default.
                         purge_kv = ''
-                        if purge_mm_for is not None and not is_feeder_target:
-                            try:
-                                pm = purge_mm_for(head, a, s,
-                                                  cur_t.get(head), n)
-                            except Exception:
-                                pm = None
+                        if not is_feeder_target:
+                            _stamp = _matrix_purge_mm(
+                                flush_matrix, cur_t.get(head), n)
+                            pm = None
+                            if purge_mm_for is not None:
+                                try:
+                                    pm = purge_mm_for(head, a, s,
+                                                      cur_t.get(head), n,
+                                                      stamp_mm=_stamp)
+                                except TypeError:
+                                    try:
+                                        pm = purge_mm_for(
+                                            head, a, s, cur_t.get(head), n)
+                                    except Exception:
+                                        pm = None
+                                except Exception:
+                                    pm = None
+                            elif _stamp is not None:
+                                pm = _stamp
                             if pm:
                                 purge_kv = ' PURGE=%d' % int(round(pm))
                         if is_feeder_target:

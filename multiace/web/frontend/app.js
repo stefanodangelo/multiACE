@@ -223,6 +223,9 @@ createApp({
       airprint_detection: false,
       quad_replenish: false,
       quad_first: false,
+      purge_matrix: true,
+      purge_scale_pct: 100,
+      purge_pair_mm: {},
       spools: {},
       spool_binding: {},
       auto_dry_masters: [],
@@ -320,6 +323,15 @@ createApp({
       state.airprint_detection = !!s.airprint_detection;
       state.quad_replenish = !!s.quad_replenish;
       state.quad_first = !!s.quad_first;
+      // Known issue (README): this checkbox never reflected the live
+      // value because applyState never copied it - fixed here alongside
+      // the two new purge fields below, which would otherwise have
+      // shipped with the exact same bug.
+      state.purge_matrix = s.purge_matrix !== false;
+      state.purge_scale_pct = (typeof s.purge_scale_pct === "number")
+        ? s.purge_scale_pct : 100;
+      state.purge_pair_mm = (s.purge_pair_mm && typeof s.purge_pair_mm === "object")
+        ? s.purge_pair_mm : {};
       state.spools = s.spools || {};
       state.spool_binding = s.spool_binding || {};
       state.auto_dry_masters = Array.isArray(s.auto_dry_masters)
@@ -2407,6 +2419,67 @@ createApp({
         });
       } catch (_) {}
       reloadState();
+    }
+    // §1.6 purge control (Config tab): global % scale on every resolved
+    // purge length. Live, same write-through pattern as setPurgeMatrix -
+    // the preflight estimate reads the SAME ace.cfg value, so turning
+    // this down shows up there immediately too.
+    async function setPurgeScale(pct) {
+      const n = Math.max(10, Math.min(200, Math.round(Number(pct) || 100)));
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PURGE", args: {SCALE: n}}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    // Per-physical-slot-pair purge overrides, "ace:slot>ace:slot=mm"
+    // comma-separated - see purgePairRows()/purgePairSpec() for the
+    // editable-table <-> spec-string conversion.
+    async function setPurgePairs(spec) {
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PURGE",
+                                args: {PAIRS: spec || ""}}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    // The purge-pair table is edited as ROWS ({from, to, mm}) rather than
+    // the raw spec string, so the UI can offer dropdowns instead of a
+    // free-text field the user has to get the syntax of right.
+    const purgePairDraft = reactive({from: "", to: "", mm: 60});
+    function purgePairRows() {
+      return Object.entries(state.purge_pair_mm || {}).map(([k, v]) => {
+        const [from, to] = k.split(">");
+        return {key: k, from, to, mm: v};
+      });
+    }
+    function purgeSlotOptions() {
+      const out = [];
+      for (const a of state.aces || []) {
+        for (let s = 0; s < 4; s++) out.push(`${a.idx}:${s}`);
+      }
+      return out;
+    }
+    function addPurgePairRow() {
+      if (!purgePairDraft.from || !purgePairDraft.to
+          || purgePairDraft.from === purgePairDraft.to) return;
+      const next = {...(state.purge_pair_mm || {})};
+      next[`${purgePairDraft.from}>${purgePairDraft.to}`] =
+        Number(purgePairDraft.mm) || 0;
+      setPurgePairs(Object.entries(next)
+        .map(([k, v]) => `${k}=${v}`).join(","));
+    }
+    function removePurgePairRow(key) {
+      const next = {...(state.purge_pair_mm || {})};
+      delete next[key];
+      setPurgePairs(Object.entries(next)
+        .map(([k, v]) => `${k}=${v}`).join(","));
     }
     async function setHeadAce(idx, ace) {
       await headSet("head-ace", {head: idx, ace: Number(ace)},
@@ -7523,7 +7596,7 @@ createApp({
       slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setRememberFilament, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
-      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
+      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, setPurgeScale, setPurgePairs, purgePairDraft, purgePairRows, purgeSlotOptions, addPurgePairRow, removePurgePairRow, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
       addFluiddCamera, fluiddCamBusy, fluiddCamMsg,
       spoolForm, spoolImportMode, spoolFileInput,
       spoolMaterials, spoolVendors, spoolSubtypes,

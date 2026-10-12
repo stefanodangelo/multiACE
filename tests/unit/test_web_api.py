@@ -502,14 +502,35 @@ class TestMockPreflight:
             assert est["total_s"] >= est["base_s"], name
             assert est["assumptions"], name
 
-    def test_the_estimate_never_double_counts_a_prime_tower(self, client):
-        """The fixture is a tower + flush print, so the purge is already
-        inside the slicer's own numbers."""
+    def test_the_estimate_adds_the_ace_purge_even_with_a_tower(self, client):
+        """The fixture is a tower + flush print, but that's the SLICER's
+        own purge (real filament already on the plate, never stripped by
+        the post-processor) - a separate physical event from the
+        ACE-swap purge through the chute, which is always added."""
         c, main, cfg, calls = client
         j = self._upload(c).json()
         est = j["plans"]["slicer"]["estimate"]
         assert est["purge"]["destination"] == "mixed"
-        assert est["purge"]["counted_in_total"] is False
+        assert est["purge"]["counted_in_total"] is True
+        assert est["purge"]["g"] > 0
+
+    def test_turning_the_purge_slider_down_lowers_the_estimate(self, client):
+        """The end-to-end version of the Config-tab purge control: a
+        lower purge_scale_pct in ace.cfg has to come out the other end
+        as less purge, less time and less money, through the real
+        pipeline (main.py -> preflight_core.py -> swap_cost.py ->
+        post_process_virtual_toolheads.py), not just at the model layer."""
+        c, main, cfg, calls = client
+        full = self._upload(c).json()["plans"]["slicer"]["estimate"]
+        cfg.write_text(BASE_CFG + "purge_scale_pct: 70\n", encoding="utf-8")
+        scaled = self._upload(c).json()["plans"]["slicer"]["estimate"]
+        assert scaled["purge"]["g"] < full["purge"]["g"]
+        assert scaled["total_s"] < full["total_s"]
+        # price_eur is €/kg * grams, so less purge means less money too -
+        # checked via totals.g rather than the rounded price_eur itself,
+        # which can round-trip to the same 2-decimal figure on a fixture
+        # this small even though the underlying grams did drop.
+        assert scaled["totals"]["g"] < full["totals"]["g"]
 
     def test_each_plan_carries_a_timeline(self, client):
         c, main, cfg, calls = client
@@ -545,6 +566,28 @@ class TestMockPreflight:
         c, main, cfg, calls = client
         j = c.get("/api/preflight/pysrc").json()
         assert j["cost_params"]["main"]["load_length"] == 2000
+
+    def test_purge_scale_pct_comes_from_the_config(self, client):
+        c, main, cfg, calls = client
+        cfg.write_text(BASE_CFG + "purge_scale_pct: 70\n", encoding="utf-8")
+        j = c.get("/api/preflight/pysrc").json()
+        assert j["cost_params"]["main"]["purge_scale_pct"] == 70
+
+    def test_purge_pair_mm_is_parsed_into_a_dict(self, client):
+        c, main, cfg, calls = client
+        cfg.write_text(
+            BASE_CFG + "purge_pair_mm: 0:0>0:1=60, 0:1>0:0=120\n",
+            encoding="utf-8")
+        j = c.get("/api/preflight/pysrc").json()
+        assert j["cost_params"]["main"]["purge_pair_mm"] == {
+            "0:0>0:1": 60.0, "0:1>0:0": 120.0}
+
+    def test_an_absent_purge_pair_mm_is_not_a_key(self, client):
+        """No `purge_pair_mm` line at all must not become an empty-dict
+        key that then overrides a model default elsewhere."""
+        c, main, cfg, calls = client
+        j = c.get("/api/preflight/pysrc").json()
+        assert "purge_pair_mm" not in j["cost_params"]["main"]
 
 
 class TestPreflightLargeFiles:

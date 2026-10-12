@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from .test_load_retry import ace_module  # noqa: F401  (module fixture)
+from .test_load_retry import ace_module, FakeGcmd  # noqa: F401
 
 
 @pytest.fixture
@@ -24,6 +24,10 @@ def ace(ace_module):
     a.swap_purge_min = 0
     a.purge_bin_capacity_mm = 0
     a.purge_color_aware = False
+    a.purge_scale_pct = 100
+    a.purge_pair_mm = {}
+    a._purge_scale_cfg = 100
+    a._purge_pair_mm_cfg = ''
     a._purge_length_override = None
     a._swap_purge_mm = None
     a.messages = []
@@ -134,8 +138,62 @@ class TestGetPurgeLength:
         ace._purge_length_override = 900
         assert ace.get_purge_length() == 40
 
-    def test_zero_means_use_the_stock_default(self, ace):
-        assert ace.get_purge_length() == 0
+    def test_zero_means_use_the_stock_default(self, ace, ace_module):
+        """swap_purge_length=0 (the shipped default) used to mean "say
+        nothing and let the macro's own 80 mm default apply" - that
+        default is now made explicit so purge_scale_pct can still act on
+        it (see effective_purge_mm)."""
+        assert ace.get_purge_length() == ace_module.STOCK_FLUSH_DEFAULT_MM
+
+    def test_the_stock_default_is_scaled_too(self, ace, ace_module):
+        ace.purge_scale_pct = 70
+        assert ace.get_purge_length() == pytest.approx(
+            ace_module.STOCK_FLUSH_DEFAULT_MM * 0.7, abs=1)
+
+    def test_an_explicit_zero_override_is_also_the_scaled_stock_default(
+            self, ace, ace_module):
+        """LENGTH=0 is documented as "use the stock default" - it has to
+        resolve the SAME way swap_purge_length's own 0 does, or it would
+        silently escape purge_scale_pct (a literal 0 here reads as "omit
+        LENGTH=" to the caller, which then falls through to the macro's
+        own UNSCALED 80 mm)."""
+        ace._purge_length_override = 0
+        ace.purge_scale_pct = 70
+        assert ace.get_purge_length() == pytest.approx(
+            ace_module.STOCK_FLUSH_DEFAULT_MM * 0.7, abs=1)
+
+    def test_a_pair_override_wins_over_swap_purge_length(self, ace):
+        ace.swap_purge_length = 35
+        ace.purge_pair_mm = {"0:0>0:1": 60}
+        got = ace.get_purge_length()
+        assert got == 35  # no from/to given here - get_purge_length's own
+                          # fallback path carries no pair context (see
+                          # the module docstring on effective_purge_mm)
+
+
+class TestSetPurgeCommand:
+    """ACE_SET_PURGE SCALE=/PAIRS= (§1.6/Config-tab) - the live,
+    write-through setters the Config tab calls, same pattern as
+    MATRIX=/PERSIST= already use."""
+
+    def test_scale_applies_immediately(self, ace):
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(SCALE=70, PERSIST=0))
+        assert ace.purge_scale_pct == 70
+        assert ace.get_purge_length() == pytest.approx(56, abs=1)
+
+    def test_pairs_applies_immediately(self, ace):
+        ace.cmd_ACE_SET_PURGE(
+            FakeGcmd(PAIRS="0:0>0:1=60,0:1>0:0=120", PERSIST=0))
+        assert ace.purge_pair_mm == {"0:0>0:1": 60.0, "0:1>0:0": 120.0}
+
+    def test_an_empty_pairs_clears_overrides(self, ace):
+        ace.purge_pair_mm = {"0:0>0:1": 60.0}
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(PAIRS="", PERSIST=0))
+        assert ace.purge_pair_mm == {}
+
+    def test_neither_option_raises(self, ace):
+        with pytest.raises(Exception):
+            ace.cmd_ACE_SET_PURGE(FakeGcmd())
 
 
 class TestCanExtrudeGate:

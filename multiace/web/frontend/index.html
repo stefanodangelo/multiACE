@@ -1654,7 +1654,7 @@
                  min="0" max="2000" step="1" placeholder="900">
         </div>
         <div class="config-row">
-          <label>Swap purge length</label>
+          <label>{{ t('ui.config.swap_purge_length') }}</label>
           <input type="number" v-model.number="configForm.swap_purge_length"
                  min="0" max="200" step="1" placeholder="0">
         </div>
@@ -1693,6 +1693,71 @@
                   :title="infoShown('purge_matrix') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
         </div>
         <p class="muted small config-row-hint" v-if="infoShown('purge_matrix')">{{ t('ui.config.purge_matrix_hint') }}</p>
+        <!-- §1.6 purge control: a global % scale and per-physical-slot-pair
+             overrides. Both are live write-through (ACE_SET_PURGE SCALE=/
+             PAIRS=) and read straight back out of ace.cfg by the preflight's
+             cost model, so turning the slider down shows a lower weight,
+             time and price there immediately, on top of whatever the real
+             print does. -->
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_scale') }}</label>
+          <input type="range" min="10" max="200" step="5"
+                 :value="state.purge_scale_pct"
+                 @change="setPurgeScale($event.target.value)"
+                 style="vertical-align: middle;">
+          <input type="number" min="10" max="200" step="5"
+                 :value="state.purge_scale_pct"
+                 @change="setPurgeScale($event.target.value)"
+                 style="width: 4.2rem; margin-left: .4rem;">
+          <span class="muted small">%</span>
+          <button type="button" class="info-btn"
+                  @click="toggleInfo('purge_scale')" :aria-expanded="infoShown('purge_scale')"
+                  :title="infoShown('purge_scale') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
+        </div>
+        <p class="muted small config-row-hint" v-if="infoShown('purge_scale')">{{ t('ui.config.purge_scale_hint') }}</p>
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_pairs') }}</label>
+          <button type="button" class="info-btn"
+                  @click="toggleInfo('purge_pairs')" :aria-expanded="infoShown('purge_pairs')"
+                  :title="infoShown('purge_pairs') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
+        </div>
+        <p class="muted small config-row-hint" v-if="infoShown('purge_pairs')">{{ t('ui.config.purge_pairs_hint') }}</p>
+        <table class="spool-table purge-pair-table" v-if="purgePairRows().length">
+          <tr>
+            <th>{{ t('ui.config.purge_pairs_from') }}</th>
+            <th>{{ t('ui.config.purge_pairs_to') }}</th>
+            <th>mm</th>
+            <th></th>
+          </tr>
+          <tr v-for="row in purgePairRows()" :key="'pp-' + row.key">
+            <td>{{ row.from }}</td>
+            <td>{{ row.to }}</td>
+            <td>{{ row.mm }}</td>
+            <td class="spool-actions">
+              <button type="button" class="danger"
+                      @click="removePurgePairRow(row.key)">×</button>
+            </td>
+          </tr>
+        </table>
+        <div class="spool-add">
+          <label>{{ t('ui.config.purge_pairs_from') }}
+            <select v-model="purgePairDraft.from">
+              <option value="">–</option>
+              <option v-for="s in purgeSlotOptions()" :key="'ppf-' + s" :value="s">{{ s }}</option>
+            </select>
+          </label>
+          <label>{{ t('ui.config.purge_pairs_to') }}
+            <select v-model="purgePairDraft.to">
+              <option value="">–</option>
+              <option v-for="s in purgeSlotOptions()" :key="'ppt-' + s" :value="s">{{ s }}</option>
+            </select>
+          </label>
+          <label>mm
+            <input type="number" min="0" max="2000" step="1"
+                   v-model.number="purgePairDraft.mm">
+          </label>
+          <button type="button" @click="addPurgePairRow()">{{ t('ui.config.purge_pairs_add') }}</button>
+        </div>
         <div class="config-sep"></div>
         <div class="config-row">
           <label>{{ t('ui.config.dryer_temp') }}</label>
@@ -2760,8 +2825,6 @@ reboot</pre>
                     · {{ t('ui.preflight.est_waste', {
                            g: selectedPlan().estimate.purge.g,
                            pct: wastePercent(selectedPlan().estimate) }) }}
-                    <span v-if="!selectedPlan().estimate.purge.counted_in_total">
-                      ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
                   </span>
                   · {{ t('ui.preflight.est_swaps', {
                          inline: selectedPlan().estimate.inline_swaps,

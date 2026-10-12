@@ -85,6 +85,16 @@ FEEDER_TAP_SOURCE = {'ace_index': None, 'slot': 'feeder'}
 RESCAN_BIND_WINDOW = 8.0
 GATE_AVAILABLE = 1
 
+#: What the stock INNER_FLUSH_FILAMENT macro (fluidd.cfg) purges when
+#: get_purge_length() omits LENGTH= - matches
+#: multiace.tools.swap_cost.STOCK_FLUSH_DEFAULT_MM, which the preflight
+#: estimate falls back to for the same swap. Returning this explicitly
+#: (scaled by purge_scale_pct) instead of 0/omitted keeps the Config-tab
+#: purge slider effective on a swap that has no other purge source
+#: configured - the single most common swap shape (swap_purge_length=0,
+#: purge_color_aware off, is the shipped default).
+STOCK_FLUSH_DEFAULT_MM = 80
+
 V2_FEED_LOG = False
 V2_FEED_LOG_INTERVAL = 2.0
 
@@ -360,6 +370,23 @@ class MultiAce:
         # real prints have been compared against what the bin actually
         # caught (§13.2's staged rollout).
         self.purge_color_aware = config.getboolean('purge_color_aware', False)
+
+        # --- §1.6 purge control (Config tab) ----------------------------
+        # A global percentage every resolved purge length is scaled by -
+        # 100 = unchanged, 70 = 30% less purge everywhere, inline swaps
+        # and background swaps alike. Live-settable (ACE_SET_PURGE
+        # SCALE=), same write-through pattern as purge_matrix.
+        self.purge_scale_pct = config.getfloat(
+            'purge_scale_pct', 100, minval=10, maxval=200)
+        self._purge_scale_cfg = self.purge_scale_pct
+        # Per-PHYSICAL-pair overrides ("ace:slot>ace:slot=mm", comma-
+        # separated) - set before a user knows which colour lands where,
+        # so keyed on the slot rather than the slicer's tool index. Wins
+        # over swap_purge_length and the stock default, but still scaled
+        # by purge_scale_pct above (see effective_purge_mm).
+        self.purge_pair_mm = self._parse_purge_pair_mm(
+            config.get('purge_pair_mm', ''))
+        self._purge_pair_mm_cfg = str(config.get('purge_pair_mm', '') or '')
 
         # --- print history (§4) ----------------------------------------
         # Bounded, append-only JSONL next to the other multiACE runtime
@@ -2406,25 +2433,81 @@ class MultiAce:
         Global feeder_swap_retract_length only."""
         return self.feeder_swap_retract_length
 
+    @staticmethod
+    def _parse_purge_pair_mm(text):
+        """'0:0>0:1=60, 0:1>0:0=120' -> {'0:0>0:1': 60.0, '0:1>0:0': 120.0}.
+
+        Tolerant by design, same as the rest of ace.cfg's free-text
+        fields: one malformed entry must not lose every other pair.
+        """
+        out = {}
+        for part in str(text or '').split(','):
+            part = part.strip()
+            if not part or '=' not in part:
+                continue
+            key, _, val = part.partition('=')
+            key = key.strip()
+            if not key:
+                continue
+            try:
+                out[key] = float(val.strip())
+            except ValueError:
+                continue
+        return out
+
+    def effective_purge_mm(self, requested_mm, from_key=None, to_key=None):
+        """`requested_mm`, after the §1.6 Config-tab purge controls: a
+        physical-pair override wins outright, then whatever is left is
+        scaled by purge_scale_pct. Does NOT clamp - callers already run
+        the result through clamp_purge_mm, which is the one place every
+        purge path has to cross regardless of source.
+        """
+        mm = requested_mm
+        if from_key is not None and to_key is not None and self.purge_pair_mm:
+            override = self.purge_pair_mm.get('%s>%s' % (from_key, to_key))
+            if override is not None:
+                mm = override
+        try:
+            mm = float(mm or 0.0)
+        except (TypeError, ValueError):
+            mm = 0.0
+        scale = max(0.0, float(self.purge_scale_pct or 0.0)) / 100.0
+        return mm * scale
+
     def get_purge_length(self):
         """Flush LENGTH for the stock INNER_FLUSH_FILAMENT. A per-swap
         override (multiACE Pro) wins, else the swap_purge_length config
-        value. 0 means 'use the stock default' (caller omits LENGTH=).
+        value, else STOCK_FLUSH_DEFAULT_MM - the same number the macro
+        itself defaults to when no LENGTH= is given, made explicit here
+        so purge_scale_pct (§1.6) can still act on it; 0 no longer means
+        "say nothing and let the macro decide", it means "nothing
+        configured, use that same default, just scaled".
 
         Clamped here, because this is the ONE place every purge path reads:
         a per-swap ceiling that some callers bypass is not a ceiling.
         """
         if getattr(self, '_swap_purge_mm', None) is not None:
-            # Already clamped and accounted by cmd_ACE_SWAP_HEAD.
+            # Already clamped and accounted by cmd_ACE_SWAP_HEAD - and
+            # already scaled by the rewrite's own resolve_swap_purge_mm,
+            # so effective_purge_mm must not run a second time here.
             return self._swap_purge_mm
         if self._purge_length_override is not None:
-            requested = self._purge_length_override
+            # LENGTH=0 is documented as "use the stock default" (see
+            # cmd_ACE_SET_PURGE_help) - same meaning as swap_purge_length's
+            # own 0 default just below, so both have to resolve to the
+            # SAME scaled number. Without this, an explicit LENGTH=0
+            # override would silently escape purge_scale_pct by staying
+            # a literal 0 here, which the caller still reads as "omit
+            # LENGTH=" and falls through to the macro's own unscaled
+            # 80 mm.
+            requested = self._purge_length_override or STOCK_FLUSH_DEFAULT_MM
         else:
-            requested = self.swap_purge_length
-        applied, reason = self.clamp_purge_mm(requested)
+            requested = self.swap_purge_length or STOCK_FLUSH_DEFAULT_MM
+        scaled = self.effective_purge_mm(requested)
+        applied, reason = self.clamp_purge_mm(scaled)
         if reason:
             self.log_always('[multiACE] purge %d mm -> %d mm: %s'
-                            % (requested, applied, reason))
+                            % (scaled, applied, reason))
         return applied
 
     # ------------------------------------------------------------------
@@ -11288,13 +11371,54 @@ class MultiAce:
         'RESET=1 to fall back to the swap_purge_length config value. '
         'MATRIX=0|1 ignores/honors the per-pair LENGTH stamps the '
         'preflight writes from the slicer flush matrix - MATRIX=0 = '
-        'fixed swap_purge_length for every flush. Writes the purge_matrix '
-        'config line (write-through); MATRIX=..  PERSIST=0 = RAM only, '
-        'the config value returns at restart. '
+        'fixed swap_purge_length for every flush. SCALE=<10-200> scales '
+        'every resolved purge length by that percentage (Config tab). '
+        'PAIRS=<"ace:slot>ace:slot=mm,..."> sets per-physical-pair purge '
+        'overrides, comma-separated; PAIRS= (empty) clears them all. '
+        'Writes the purge_matrix/purge_scale_pct/purge_pair_mm config '
+        'lines (write-through); PERSIST=0 = RAM only, the config value '
+        'returns at restart. '
         'Intended for multiACE Pro to set per-colour-pair purge from the '
         'slicer. LENGTH=0 = use the stock default (80mm).')
 
     def cmd_ACE_SET_PURGE(self, gcmd):
+        scale = gcmd.get_int('SCALE', None, minval=10, maxval=200)
+        if scale is not None:
+            persist = gcmd.get_int('PERSIST', 1, minval=0, maxval=1)
+            self.purge_scale_pct = float(scale)
+            _sc_suffix = ''
+            if persist:
+                err = self._cfg_write_ace_option(
+                    'purge_scale_pct', str(scale))
+                if err is None:
+                    self._purge_scale_cfg = float(scale)
+                else:
+                    _sc_suffix = (' - WARNING: config write failed (%s), '
+                                  'applied for this session only' % err)
+            else:
+                _sc_suffix = (' (volatile - until restart, config keeps '
+                              '%g)' % self._purge_scale_cfg)
+            self.log_always('[multiACE] purge scale set to %d%%%s'
+                            % (scale, _sc_suffix))
+
+        pairs = gcmd.get('PAIRS', None)
+        if pairs is not None:
+            persist = gcmd.get_int('PERSIST', 1, minval=0, maxval=1)
+            self.purge_pair_mm = self._parse_purge_pair_mm(pairs)
+            _pr_suffix = ''
+            if persist:
+                err = self._cfg_write_ace_option('purge_pair_mm', pairs)
+                if err is None:
+                    self._purge_pair_mm_cfg = pairs
+                else:
+                    _pr_suffix = (' - WARNING: config write failed (%s), '
+                                  'applied for this session only' % err)
+            else:
+                _pr_suffix = (' (volatile - until restart, config keeps '
+                              '%r)' % self._purge_pair_mm_cfg)
+            self.log_always('[multiACE] purge pair overrides: %s%s'
+                            % (self.purge_pair_mm or '(cleared)', _pr_suffix))
+
         matrix = gcmd.get_int('MATRIX', None, minval=0, maxval=1)
         if matrix is not None:
             persist = gcmd.get_int('PERSIST', 1, minval=0, maxval=1)
@@ -11341,9 +11465,10 @@ class MultiAce:
             return
         length = gcmd.get_int('LENGTH', None, minval=0, maxval=200)
         if length is None:
-            if matrix is None:
+            if matrix is None and scale is None and pairs is None:
                 raise gcmd.error(
-                    'ACE_SET_PURGE needs LENGTH=<mm>, RESET=1 or MATRIX=0|1')
+                    'ACE_SET_PURGE needs LENGTH=<mm>, RESET=1, MATRIX=0|1, '
+                    'SCALE=<10-200> or PAIRS=<spec>')
             return
         if not self.purge_matrix:
 
@@ -15843,10 +15968,14 @@ class MultiAce:
                                                False)),
             'quad_replenish': bool(getattr(self, 'quad_replenish', False)),
             'purge_matrix': bool(getattr(self, 'purge_matrix', True)),
+            'purge_scale_pct': getattr(self, 'purge_scale_pct', 100),
+            'purge_pair_mm': dict(getattr(self, 'purge_pair_mm', {}) or {}),
 
             'settings_volatile': [str(_n) for _n, _cur, _cfgv in (
                 ('purge_matrix', getattr(self, 'purge_matrix', None),
                  getattr(self, '_purge_matrix_cfg', None)),
+                ('purge_scale_pct', getattr(self, 'purge_scale_pct', None),
+                 getattr(self, '_purge_scale_cfg', None)),
                 ('pickup_cleaning', getattr(self, '_pickup_cleaning', None),
                  getattr(self, '_pickup_cleaning_cfg', None)),
                 ('airprint_detection',

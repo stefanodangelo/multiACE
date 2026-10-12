@@ -102,6 +102,15 @@ MATERIAL_MAX_FLOW_MM3_S = {
     "TPU": 3.5, "PC": 8.0, "PA": 8.0, "PVA": 4.0,
 }
 
+#: What the stock INNER_FLUSH_FILAMENT macro (fluidd.cfg) purges when
+#: nothing tells it otherwise - `ACE_SWAP_HEAD`/`get_purge_length()` omit
+#: LENGTH= and the macro's own `params.LENGTH | default(80.0)` applies.
+#: This is what a head-mode inline swap has always actually cost in
+#: filament, with no per-pair stamp and swap_purge_length at its 0 default -
+#: the number resolve_swap_purge_mm falls back to rather than silently
+#: modelling zero purge for the single most common swap shape.
+STOCK_FLUSH_DEFAULT_MM = 80.0
+
 
 # ---------------------------------------------------------------------------
 # Small colour helpers (self-contained: this module has no dependencies)
@@ -189,11 +198,17 @@ _DENSITY_RE = re.compile(r"^;\s*filament_density\s*[:=]\s*(.+)$", re.I)
 _DIAMETER_RE = re.compile(r"^;\s*filament_diameter\s*[:=]\s*(.+)$", re.I)
 _TYPE_RE = re.compile(r"^;\s*filament_type\s*[:=]\s*(.+)$", re.I)
 
-#: Header keys that mean the slicer built a prime/wipe tower. Purged
-#: material then lands on the tower, which the slicer already extruded -
-#: so its time and grams are ALREADY inside base_s and [g].
-_TOWER_KEYS = (
-    "enable_prime_tower", "prime_tower_enable", "wipe_tower",
+#: Header keys that explicitly switch the prime/wipe tower on or off.
+#: These are the only keys trusted to say "no tower" - an on/off switch
+#: that reads false is definitive.
+_TOWER_ENABLE_KEYS = ("enable_prime_tower", "prime_tower_enable",
+                      "wipe_tower")
+#: Tower GEOMETRY keys - width, brim, position. Some slicer forks
+#: (Snapmaker Orca among them) write these with their last non-zero value
+#: even when the tower itself is disabled, so they are consulted only when
+#: the header carries no explicit on/off switch at all (see
+#: purge_destination) - never used to override one that says "off".
+_TOWER_GEOMETRY_KEYS = (
     "prime_tower_width", "prime_tower_brim_width", "wipe_tower_x",
     "wipe_tower_width",
 )
@@ -256,22 +271,47 @@ def _any_key_truthy(text, keys):
     return False
 
 
+def _any_key_present(text, keys):
+    """True when one of `keys` appears in the header at all, whatever its
+    value - distinct from `_any_key_truthy`, which also asks whether that
+    value is "on". Used to tell "this fork wrote an explicit off-switch"
+    from "this fork wrote no switch at all, only geometry"."""
+    for key in keys:
+        if re.search(r"^;\s*%s\s*[:=]\s*(.+)$" % re.escape(key), text,
+                     re.I | re.M):
+            return True
+    return False
+
+
 def purge_destination(header_text):
-    """Where the purged filament ends up: 'tower' | 'flush' | 'mixed' |
-    'bin' | 'unknown'.
+    """Where the SLICER'S OWN purge (if it modelled one at all) ends up:
+    'tower' | 'flush' | 'mixed' | 'bin' | 'unknown'.
 
-    This is the one parse that changes the headline number. A prime tower
-    or a flush-into-support target means the slicer ALREADY extruded the
-    purge - its seconds are in `base_s` and its grams are in
-    `; filament used [g]`. Adding a modelled purge on top would
-    double-count the biggest single term in the estimate.
+    Informational only - see build_estimate for why this no longer gates
+    whether multiACE's own ACE-swap purge gets added. A prime tower or a
+    flush-into-support target means the slicer printed an actual wipe
+    tower or flushed into actual support/infill toolpaths, consuming real
+    filament the post-processor never strips, so its seconds are in
+    `base_s` and its grams are in `; filament used [g]` ALREADY - but that
+    is the slicer's own mechanism, a plate feature multiACE neither needs
+    nor controls. The ACE swap itself still retracts to the ACE, changes
+    spool and purges through the hotend's own chute (INNER_FLUSH_FILAMENT)
+    regardless of whether the slicer also built a tower - two separate
+    physical events, both real, so both get reported.
 
-    Read it from the file, never from a config default. When the header
-    carries no recognisable slicer settings at all, say 'unknown' and let
-    the caller show both totals rather than pick one.
+    Read it from the file, never from a config default. `enable_prime_tower`
+    (etc.) is trusted outright, even when false - a fork can write non-zero
+    tower WIDTH/geometry lines whether or not the tower is enabled (seen on
+    Snapmaker Orca with enable_prime_tower=0), so geometry is consulted only
+    when the header carries no explicit on/off switch at all. When the
+    header carries no recognisable slicer settings at all, say 'unknown'
+    rather than guessing 'bin'.
     """
     text = header_text or ""
-    tower = _any_key_truthy(text, _TOWER_KEYS)
+    if _any_key_present(text, _TOWER_ENABLE_KEYS):
+        tower = _any_key_truthy(text, _TOWER_ENABLE_KEYS)
+    else:
+        tower = _any_key_truthy(text, _TOWER_GEOMETRY_KEYS)
     flush = _any_key_truthy(text, _FLUSH_KEYS)
     if tower and flush:
         return "mixed"
@@ -504,6 +544,22 @@ class SwapCostModel(object):
             p.get("filament_diameter", DEFAULT_DIAMETER_MM)
             or DEFAULT_DIAMETER_MM)
 
+        #: §1.6/Config-tab purge control. A global percentage every
+        #: resolved purge length is scaled by (100 = unchanged, 70 = 30 %
+        #: less purge everywhere) - the one knob that makes "fewer swaps"
+        #: and "less purge per swap" both independently visible in the
+        #: estimate and in the real print. `purge_pair_mm` overrides
+        #: specific PHYSICAL transitions - keys are "ace:slot>ace:slot"
+        #: (the slot a colour sits in, not its slicer T-index, since a
+        #: user sets this before knowing which colour lands where) and
+        #: win over every other mm source in resolve_swap_purge_mm, but
+        #: the scale still applies on top: the slider is "purge, overall",
+        #: a pair override is "this transition, specifically" - stacking
+        #: them means turning the slider down always helps, even on a
+        #: swap that also has a pair override set.
+        self.purge_scale_pct = float(p.get("purge_scale_pct", 100) or 100)
+        self.purge_pair_mm = dict(p.get("purge_pair_mm") or {})
+
     # -- construction ---------------------------------------------------
 
     @classmethod
@@ -609,11 +665,20 @@ class SwapCostModel(object):
 
     def swap_seconds(self, kind, ace=None, slot=None, from_color=None,
                      to_color=None, material=None):
-        """Seconds this swap adds to the print's critical path.
+        """Mechanical + constant seconds this swap adds to the print's
+        critical path - NOT including purge time.
 
         `kind` is one of SWAP_KINDS - §3.1's whole point is that where a
         colour sits decides what a change to it costs, so the caller must
         classify the swap before asking.
+
+        Purge time used to be baked in here via the plain `purge_mm`
+        guess, which build_estimate then ALSO added on top from the
+        timeline's own (flush-matrix-aware) purge_mm - double-counting
+        purge seconds whenever both happened to be non-zero. Purge time
+        is now exclusively `build_estimate`'s job, computed once from
+        `resolve_swap_purge_mm` so every swap, inline or background,
+        tower print or not, is billed its purge exactly once.
         """
         if kind not in SWAP_KINDS:
             raise ValueError("unknown swap kind: %r" % (kind,))
@@ -621,12 +686,9 @@ class SwapCostModel(object):
         if (isinstance(measured, dict)
                 and int(measured.get("n", 0) or 0) >= self.min_calibration_samples
                 and measured.get("median_s") is not None):
-            base = float(measured["median_s"])
-        else:
-            base = self._mechanical_seconds(kind, ace, slot) \
-                + self._constant_seconds(kind)
-        return base + self.purge_seconds(
-            self.purge_mm(from_color, to_color, material), material)
+            return float(measured["median_s"])
+        return self._mechanical_seconds(kind, ace, slot) \
+            + self._constant_seconds(kind)
 
     def bg_window_minutes(self, ace=None, slot=None):
         """How much idle time a background swap actually needs, in minutes.
@@ -695,6 +757,63 @@ class SwapCostModel(object):
                 applied, _reason = self.clamp_purge_mm(mm)
                 return max(applied, self._material_floor(material))
         return self.purge_mm(from_color, to_color, material)
+
+    def resolve_swap_purge_mm(self, kind, from_key=None, to_key=None,
+                              stamp_mm=None, from_color=None, to_color=None,
+                              material=None):
+        """mm to purge for ONE swap - the single source of truth shared by
+        the rewrite (what the engine will actually extrude through the
+        chute) and the estimate (what the preflight predicts), so the two
+        never disagree. Resolution order, first match wins:
+
+          1. `feeder_pin` -> 0 (no ACE work at all, nothing to flush)
+          2. a Config-tab pair override for the PHYSICAL transition
+             `from_key` -> `to_key` (each "ace:slot", e.g. "0:1") -
+             `self.purge_pair_mm`
+          3. `purge_color_aware`, when explicitly enabled (§3.4) - the
+             colour-distance guess, kept exactly as before and orthogonal
+             to everything below it
+          4. `stamp_mm` - the slicer flush-matrix top-up the rewrite is
+             about to stamp for this swap (see
+             post_process_virtual_toolheads._matrix_purge_mm) - the
+             slicer's own number for this pair, preferred over a guess
+          5. `swap_purge_length`, when raised above its 0 default
+          6. `STOCK_FLUSH_DEFAULT_MM` - what the engine's own
+             INNER_FLUSH_FILAMENT macro purges when nothing above applies
+             and no LENGTH= stamp is written at all. This is the one
+             most swaps actually hit: the mm `purge_mm`/`purge_mm_for`
+             silently round down to 0 for (swap_purge_length=0,
+             purge_color_aware=off is the shipped default) actually never
+             reach the nozzle - the macro falls back to 80 mm regardless.
+
+        Whatever wins is then scaled by `purge_scale_pct` (100 = no
+        change) and run through `clamp_purge_mm` - a pair override is a
+        request like any other, not an escape from the purge-bin ceiling.
+        """
+        if kind == "feeder_pin":
+            return 0.0
+        floor = self._material_floor(material)
+        mm = None
+        if from_key is not None and to_key is not None and self.purge_pair_mm:
+            mm = self.purge_pair_mm.get("%s>%s" % (from_key, to_key))
+        if mm is None and self.purge_color_aware:
+            severity = transition_severity(from_color, to_color)
+            if severity is not None:
+                lo, hi = float(self.swap_purge_min), float(self.swap_purge_max)
+                if hi < lo:
+                    lo, hi = hi, lo
+                mm = lo + (hi - lo) * severity
+        if mm is None and stamp_mm:
+            mm = float(stamp_mm)
+        if mm is None and self.swap_purge_length > 0:
+            mm = float(self.swap_purge_length)
+        if mm is None:
+            mm = STOCK_FLUSH_DEFAULT_MM
+        mm = max(float(mm), floor)
+        scale = max(0.0, float(self.purge_scale_pct or 0.0)) / 100.0
+        mm *= scale
+        applied, _reason = self.clamp_purge_mm(mm)
+        return applied
 
     def _material_floor(self, material):
         if not material:
@@ -772,8 +891,8 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
 
     `timeline` is §3.2's per-event trace: a list of dicts with at least
     `kind`, and optionally `t`, `seconds`, `purge_mm`. Everything else -
-    grams, per-colour breakdown, the purge double-counting decision - is
-    derived here so backend and browser produce identical numbers.
+    grams, per-colour breakdown, the purge total - is derived here so
+    backend and browser produce identical numbers.
     """
     materials = materials or {}
     colors = colors or {}
@@ -785,6 +904,7 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
     added_s = 0.0
     purge_mm_total = 0.0
     per_tool_purge_mm = {}
+    purging_swaps = 0
 
     for ev in timeline or []:
         kind = ev.get("kind")
@@ -796,11 +916,19 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                 material=materials.get(ev.get("t")))
         purge = ev.get("purge_mm")
         if purge is None:
-            purge = model.purge_mm(colors.get(ev.get("from_t")),
-                                   colors.get(ev.get("t")),
-                                   materials.get(ev.get("t")))
+            # No post-processor-supplied number (an older installed copy,
+            # or a synthetic event built by a test) - resolve one the
+            # same way the rewrite would, just without a slicer-matrix
+            # stamp to prefer (see resolve_swap_purge_mm).
+            purge = model.resolve_swap_purge_mm(
+                kind if kind in SWAP_KINDS else "cross_ace_inline",
+                from_color=colors.get(ev.get("from_t")),
+                to_color=colors.get(ev.get("t")),
+                material=materials.get(ev.get("t")))
         added_s += float(seconds or 0.0)
         purge_mm_total += float(purge or 0.0)
+        if kind != "feeder_pin" and float(purge or 0.0) > 0:
+            purging_swaps += 1
         t = ev.get("t")
         if t is not None:
             per_tool_purge_mm[t] = per_tool_purge_mm.get(t, 0.0) + float(
@@ -817,35 +945,38 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
                                                      "cross_ace_inline"):
             counts["unknown_window"] += 1
 
+    # The ACE-chute purge (INNER_FLUSH_FILAMENT) is a physically SEPARATE
+    # event from anything the slicer itself did with its own flush
+    # volumes - a prime tower or a flush-into-support target is real
+    # filament the slicer already extruded on the plate (never stripped
+    # by the post-processor), but the ACE swap still retracts, changes
+    # spool and purges through the hotend on top of that. So this is
+    # added to every plan's total regardless of `dest` - see
+    # purge_destination's docstring for why double-counting was never
+    # actually the risk here.
     dest = header.purge_destination if header else "unknown"
-    purge_is_extra = dest in ("bin", "unknown")
+    added_purge_s = sum(model.purge_seconds(mm, materials.get(t))
+                        for t, mm in per_tool_purge_mm.items())
     if dest in ("tower", "flush", "mixed"):
-        # The slicer already extruded this material, in a place with
-        # unbounded capacity, at a flow rate it computed itself. Its
-        # seconds are in base_s and its grams are in [g]. Counting it
-        # again would double-count the biggest term in the estimate.
         label = {"tower": "prime tower", "flush": "flush into infill/support",
                  "mixed": "prime tower + flush"}[dest]
         assumptions.append(
-            "%s detected - purge is already in the slicer total, reported "
-            "but not added" % label)
-        added_purge_s = 0.0
-    else:
-        added_purge_s = sum(
-            model.purge_seconds(mm, materials.get(t))
-            for t, mm in per_tool_purge_mm.items())
-        if dest == "unknown":
-            assumptions.append(
-                "no prime-tower or flush setting found in the header - "
-                "purge destination unknown, both totals shown")
-        else:
-            assumptions.append(
-                "no prime tower and no flush target - purge goes to the "
-                "multiACE bin and is added to the total")
-
-    if not model.purge_color_aware and model.swap_purge_length == 0:
+            "%s detected - that's the slicer's own purge, separate from "
+            "the ACE-swap purge below" % label)
+    elif dest == "unknown":
         assumptions.append(
-            "swap_purge_length=0 and purge_color_aware off - no purge modelled")
+            "no prime-tower or flush setting found in the header - the "
+            "slicer's own purge destination is unknown (informational "
+            "only; the ACE-swap purge below is unaffected)")
+    if purging_swaps:
+        scale = float(model.purge_scale_pct or 100)
+        scale_note = "" if scale == 100 else " at %.0f%% of configured purge" % scale
+        assumptions.append(
+            "%d ACE swap(s) purge through the chute%s - %.1f g added to "
+            "the total, on top of anything the slicer itself printed"
+            % (purging_swaps, scale_note, sum(
+                model.purge_grams(mm, materials.get(t))
+                for t, mm in per_tool_purge_mm.items())))
 
     base_s = header.base_s if header else None
     total_s = None if base_s is None else base_s + added_s
@@ -864,15 +995,17 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
         print_g = header.grams_for(t, material) if header else 0.0
         pmm = per_tool_purge_mm.get(t, 0.0)
         pg = model.purge_grams(pmm, material)
-        tool_total_g = print_g + (pg if purge_is_extra else 0.0)
-        totals_mm += print_mm + (pmm if purge_is_extra else 0.0)
+        # The ACE-chute purge is always extra: it is never the slicer's
+        # own filament-used total, whatever purge_destination says (see
+        # the note above).
+        tool_total_g = print_g + pg
+        totals_mm += print_mm + pmm
         totals_g += tool_total_g
         row = {
             "t": t,
             "print_mm": _round(print_mm), "print_g": _round(print_g, 2),
             "purge_mm": _round(pmm), "purge_g": _round(pg, 2),
-            "total_m": _round((print_mm + (pmm if purge_is_extra else 0.0))
-                              / 1000.0, 2),
+            "total_m": _round((print_mm + pmm) / 1000.0, 2),
         }
         price_per_kg = prices.get(t)
         if price_per_kg is None:
@@ -912,7 +1045,11 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
         "pin_swaps": counts["pin"],
         "unknown_window_swaps": counts["unknown_window"],
         "purge": {"mm": _round(purge_mm_total), "g": _round(purge_g_total, 2),
-                  "destination": dest, "counted_in_total": purge_is_extra},
+                  "destination": dest,
+                  # Always True now: the ACE-chute purge is always added
+                  # to `totals`. Kept (rather than removed) because the
+                  # frontend and other consumers already key off it.
+                  "counted_in_total": True},
         "per_color": per_color,
         "totals": {"mm": _round(totals_mm), "m": _round(totals_mm / 1000.0, 2),
                    "g": _round(totals_g, 2),
@@ -922,9 +1059,4 @@ def build_estimate(model, header, timeline, *, materials=None, colors=None,
         "confidence": confidence,
         "assumptions": assumptions,
     }
-    if dest == "unknown":
-        # Show both rather than pick one: 'unknown' means we genuinely
-        # cannot tell whether the slicer already paid for the purge.
-        out["total_s_without_purge"] = _round(
-            None if total_s is None else total_s, 0)
     return out

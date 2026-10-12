@@ -6,10 +6,10 @@ Two things are worth pinning down here and nothing else is:
     really has to produce a longer estimate, and a background swap really
     has to be cheaper than an inline one, because the whole loadout
     planner (§3) optimises against these numbers;
-  * the HEADER parse, because §1.6's double-counting guard hangs off it.
-    A prime tower means the slicer already extruded the purge; adding a
-    modelled purge on top would double-count the biggest single term in
-    the estimate.
+  * the HEADER parse, because §1.6's purge_destination note hangs off it -
+    it has to tell a fork that writes `enable_prime_tower = 0` (tower
+    explicitly OFF) from one that writes no switch at all, since some
+    forks leave non-zero tower geometry lines in the header either way.
 """
 from pathlib import Path
 
@@ -268,6 +268,84 @@ class TestPurgeClamp:
         assert m.clamp_purge_mm(-50)[0] == 0.0
 
 
+class TestResolveSwapPurgeMm:
+    """§1.6/Config-tab: the one function the rewrite and the estimate both
+    call, so what the engine purges and what the preflight predicts never
+    disagree. Resolution order: feeder_pin -> pair override -> colour-aware
+    guess -> slicer matrix stamp -> swap_purge_length -> stock 80 mm."""
+
+    def test_feeder_pin_never_purges(self, model):
+        assert model.resolve_swap_purge_mm("feeder_pin") == 0.0
+
+    def test_the_stock_default_applies_when_nothing_else_does(self, model):
+        """The actual defect this fixes: swap_purge_length=0 and
+        purge_color_aware off (the shipped default) used to resolve to 0,
+        but the engine's own INNER_FLUSH_FILAMENT macro purges 80 mm in
+        that case - the estimate was modelling a purge that never
+        happened on the real printer."""
+        assert model.resolve_swap_purge_mm("cross_ace_inline") \
+            == sc.STOCK_FLUSH_DEFAULT_MM
+
+    def test_swap_purge_length_beats_the_stock_default(self):
+        m = sc.SwapCostModel.from_params(dict(CFG, swap_purge_length=35))
+        assert m.resolve_swap_purge_mm("cross_ace_inline") == 35
+
+    def test_a_matrix_stamp_beats_swap_purge_length(self):
+        m = sc.SwapCostModel.from_params(dict(CFG, swap_purge_length=35))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", stamp_mm=60) == 60
+
+    def test_color_aware_beats_the_matrix_stamp(self):
+        """§3.4 stays orthogonal to and ahead of the matrix stamp - an
+        explicit colour-aware config wins when enabled."""
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, purge_color_aware=True, swap_purge_min=20,
+                 swap_purge_max=150))
+        got = m.resolve_swap_purge_mm(
+            "cross_ace_inline", stamp_mm=60,
+            from_color="#000000", to_color="#ffffff")
+        assert got != 60
+
+    def test_a_pair_override_beats_everything(self):
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_color_aware=True, swap_purge_min=20,
+            swap_purge_max=150,
+            purge_pair_mm={"0:0>0:1": 45}))
+        got = m.resolve_swap_purge_mm(
+            "cross_ace_inline", from_key="0:0", to_key="0:1", stamp_mm=60,
+            from_color="#000000", to_color="#ffffff")
+        assert got == 45
+
+    def test_an_unmatched_pair_falls_through(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, purge_pair_mm={"0:0>0:1": 45}))
+        got = m.resolve_swap_purge_mm(
+            "cross_ace_inline", from_key="1:0", to_key="1:1")
+        assert got == sc.STOCK_FLUSH_DEFAULT_MM
+
+    def test_purge_scale_pct_scales_whatever_wins(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, swap_purge_length=100, purge_scale_pct=70))
+        assert m.resolve_swap_purge_mm("cross_ace_inline") == pytest.approx(70)
+
+    def test_purge_scale_pct_still_clamps_to_the_ceiling(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, swap_purge_length=100, swap_purge_max=50,
+                 purge_scale_pct=200))
+        assert m.resolve_swap_purge_mm("cross_ace_inline") == 50
+
+    def test_the_material_floor_still_applies(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, purge_material_matrix={"TPU": 90}))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", material="TPU") >= 90
+
+    def test_scale_cannot_go_negative(self):
+        m = sc.SwapCostModel.from_params(
+            dict(CFG, swap_purge_length=100, purge_scale_pct=-50))
+        assert m.resolve_swap_purge_mm("cross_ace_inline") == 0.0
+
+
 class TestDurationParsing:
     @pytest.mark.parametrize("text,seconds", [
         ("8m 30s", 510),
@@ -376,6 +454,19 @@ class TestPurgeDestination:
         assert sc.purge_destination(
             "; enable_prime_tower = 0\n; flush_into_infill = 0\n") == "bin"
 
+    def test_a_disabled_tower_with_leftover_geometry_is_still_not_a_tower(self):
+        """The actual defect this guards: Snapmaker Orca writes non-zero
+        `prime_tower_width`/`prime_tower_brim_width`/`wipe_tower_x` even
+        with `enable_prime_tower = 0` - geometry the slicer remembers for
+        next time, not evidence a tower was built THIS time. An explicit
+        enable switch, even a false one, must win over geometry."""
+        assert sc.purge_destination(
+            "; enable_prime_tower = 0\n"
+            "; prime_tower_width = 30\n"
+            "; prime_tower_brim_width = 5\n"
+            "; wipe_tower_x = 23.02\n"
+            "; flush_into_support = 1\n") == "flush"
+
     def test_no_slicer_settings_at_all_is_unknown_not_bin(self):
         """'cannot tell' and 'goes to the bin' are different answers."""
         assert sc.purge_destination("G1 X10 Y10\nM104 S200\n") == "unknown"
@@ -395,8 +486,8 @@ class TestPurgeDestination:
         assert sc.purge_destination("; flush_into_support: 1\n") == "flush"
 
     def test_a_colon_only_header_is_not_mistaken_for_a_bin_print(self):
-        """The dangerous asymmetry: guessing "bin" over-counts, guessing
-        "unknown" only shows both totals."""
+        """'cannot tell' and 'goes to the bin' are different answers, and
+        this header gives no actual evidence for either."""
         assert sc.purge_destination(
             "; enable_prime_tower: 1\n; layer_height: 0.2\n") != "bin"
 
@@ -436,16 +527,21 @@ class TestEstimateBlock:
         assert est["inline_swaps"] == 3
         assert est["bg_swaps"] == 2
 
-    def test_a_prime_tower_purge_is_reported_but_not_added(self, model):
-        """Its seconds are already in base_s and its grams already in [g] -
-        adding them would double-count the biggest term in the estimate."""
+    def test_a_prime_tower_purge_is_added_too(self, model):
+        """A prime tower is the SLICER'S OWN purge - real filament it
+        already extruded on the plate, never stripped by the
+        post-processor, and already inside base_s/[g]. The ACE swap
+        still retracts, changes spool and purges through the chute on
+        top of that: a separate physical event, so it is added
+        regardless of what the slicer did with its own tower."""
         header = self._header("; enable_prime_tower = 1\n")
         with_purge = sc.build_estimate(model, header,
                                        self._timeline(purge_mm=120))
         without = sc.build_estimate(model, header, self._timeline(purge_mm=0))
-        assert with_purge["added_s"] == without["added_s"]
+        assert with_purge["added_s"] > without["added_s"]
         assert with_purge["purge"]["mm"] == 360
-        assert with_purge["purge"]["counted_in_total"] is False
+        assert with_purge["purge"]["counted_in_total"] is True
+        assert with_purge["totals"]["g"] > without["totals"]["g"]
         assert any("prime tower" in a for a in with_purge["assumptions"])
 
     def test_a_bin_purge_really_is_added(self, model):
@@ -455,13 +551,46 @@ class TestEstimateBlock:
         assert est["added_s"] > plain["added_s"]
         assert est["purge"]["counted_in_total"] is True
 
-    def test_an_unknown_destination_shows_both_totals(self, model):
+    def test_an_unknown_destination_still_adds_the_ace_purge(self, model):
         est = sc.build_estimate(model, sc.parse_header(
             "; filament used [mm] = 1000.0\n"
             "; estimated printing time = 1h 0m 0s\n"),
             self._timeline(purge_mm=120))
+        plain = sc.build_estimate(model, sc.parse_header(
+            "; filament used [mm] = 1000.0\n"
+            "; estimated printing time = 1h 0m 0s\n"),
+            self._timeline(purge_mm=0))
         assert est["purge"]["destination"] == "unknown"
-        assert est["total_s_without_purge"] < est["total_s"]
+        assert est["added_s"] > plain["added_s"]
+
+    def test_fewer_swaps_costs_less_time_and_money(self, model):
+        """The whole point of the fix: a plan with fewer ACE swaps must
+        show a visibly lower price and a shorter time, not an identical
+        one with the purge quietly dropped from both."""
+        header = self._header("; enable_prime_tower = 0\n")
+        many = sc.build_estimate(model, header,
+                                 self._timeline(n_inline=20, purge_mm=100),
+                                 used_tools=[0, 1],
+                                 prices={0: 20.0, 1: 20.0})
+        few = sc.build_estimate(model, header,
+                                self._timeline(n_inline=2, purge_mm=100),
+                                used_tools=[0, 1],
+                                prices={0: 20.0, 1: 20.0})
+        assert many["total_s"] > few["total_s"]
+        assert many["totals"]["price_eur"] > few["totals"]["price_eur"]
+        assert many["totals"]["g"] > few["totals"]["g"]
+
+    def test_purge_scale_pct_scales_a_resolved_purge(self, model):
+        """build_estimate trusts a timeline's own `purge_mm` as-is (the
+        post-processor already resolved and scaled it) - the scale is
+        exercised at the resolver itself, which is what the rewrite and
+        the timeline builder both call."""
+        model.swap_purge_length = 100  # give resolve_swap_purge_mm a
+                                       # deterministic, non-fallback mm
+        full = model.resolve_swap_purge_mm("cross_ace_inline")
+        model.purge_scale_pct = 70.0
+        scaled = model.resolve_swap_purge_mm("cross_ace_inline")
+        assert scaled == pytest.approx(full * 0.7, rel=0.02)
 
     def test_per_colour_breakdown_carries_print_and_purge(self, model):
         est = sc.build_estimate(

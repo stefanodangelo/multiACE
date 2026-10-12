@@ -2042,6 +2042,7 @@ _SWAP_COST_KEYS = (
     "swap_retract_length", "seat_overshoot_length", "swap_anti_ooze_retract",
     "swap_purge_length", "swap_purge_min", "swap_purge_max",
     "purge_bin_capacity_mm", "filament_diameter", "max_flow_mm3_s",
+    "purge_scale_pct",
 )
 _SWAP_COST_BOOL_KEYS = ("purge_color_aware",)
 
@@ -2051,12 +2052,38 @@ def _as_float(value):
     except (TypeError, ValueError):
         return None
 
+def _parse_purge_pair_mm(text) -> dict:
+    """'0:0>0:1=60, 0:1>0:0=120' -> {'0:0>0:1': 60.0, '0:1>0:0': 120.0}.
+
+    Mirrors ace.py's MultiAce._parse_purge_pair_mm - the backend and the
+    printer parse the SAME ace.cfg field independently (no shared import
+    between them, same as the rest of this boundary), so the preflight's
+    estimate and the live printer always agree on what a pair override
+    means. Tolerant by design: one malformed entry must not lose the
+    rest.
+    """
+    out: dict = {}
+    for part in str(text or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        v = _as_float(val)
+        if v is not None:
+            out[key] = v
+    return out
+
 def _swap_cost_params() -> dict:
     """The cost model's inputs, straight out of [ace] / [ace N].
 
     A user who lengthens their bowden gets a longer estimate without
     touching any code - that is the whole point of deriving the mechanical
-    terms from the config instead of hardcoding them.
+    terms from the config instead of hardcoding them. Same for purge: a
+    user who turns the Config tab's purge slider down to 70% sees it in
+    both the estimate and the real print, because both read this.
     """
     try:
         text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
@@ -2072,6 +2099,8 @@ def _swap_cost_params() -> dict:
         raw = str(main.get(key, "")).strip().lower()
         if raw:
             out[key] = raw in ("1", "true", "yes", "on")
+    if "purge_pair_mm" in main:
+        out["purge_pair_mm"] = _parse_purge_pair_mm(main.get("purge_pair_mm"))
     per: dict = {}
     for ace_idx, section in (per_ace or {}).items():
         vals = {}

@@ -6,9 +6,32 @@
 
 - The camera feed in the Dashboard tab isn't working.
 - Starting the ACE 2 Pro dryer directly above 50 °C can trigger a `ptc_error` in the ACE firmware, requiring a power cycle. Firmware limitation, hit by automatic humidity control whenever it restarts the heater at a stored higher target. Next release works around it with a soft ramp (50 °C, then raise to target after a few minutes).
-- Per-pair purge in the Web UI shows as unchecked even when active. Enable via `ACE_SET_PURGE MATRIX=1` in the Fluidd console; WebUI fix planned.
 
 ## What's new in 0.99.17b "Star Turn" (since 0.99.16b)
+
+- **The preflight estimate now bills the ACE's own purge** — every ACE
+  swap retracts, changes spool and purges through the hotend's chute
+  (`INNER_FLUSH_FILAMENT`), which is real filament and real time the
+  estimate used to miss: a prime-tower/flush header falsely read as
+  "the slicer already paid for this" (a disabled Snapmaker Orca tower
+  still writes non-zero width lines, so a real print showed purge
+  grams bigger than its own total filament), and a swap with no purge
+  length configured silently modelled zero even though the engine's
+  own macro purges 80 mm by default. Both are fixed: the ACE's chute
+  purge is now always added on top of whatever the slicer's own
+  tower/flush did with its own filament, and a swap with nothing
+  configured reports that 80 mm default instead of a false zero. A
+  plan with fewer swaps now visibly costs less time and money, not an
+  identical total with the purge quietly dropped.
+- **Purge volume control (Config tab)** — a "Purge volume %" slider
+  scales every resolved purge length (10–200%, 100% = unchanged) live,
+  no restart, in both the preflight estimate and the real print; a
+  "Purge per slot pair" table overrides specific FROM‑slot→TO‑slot
+  transitions on top of that. An inline (foreground) ACE swap is now
+  also stamped from the slicer's own flush matrix the way a background
+  swap already was, instead of always purging the flat default.
+- Fixed the "Per-pair purge" (purge_matrix) Config-tab checkbox always
+  showing unchecked regardless of the live value (previous known issue).
 
 Print-analysis plan, in full: three features sharing one data layer, shipped
 as three PRs but documented together here since none of them had a

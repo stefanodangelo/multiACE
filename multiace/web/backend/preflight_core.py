@@ -316,38 +316,45 @@ def recompute_estimate(capture, *, mapping=None, target_ids=None):
 
 
 def make_purge_callback(cost_params, slicer_colors, slicer_types,
-                        purge_dest=None):
-    """A (head, ace, slot, from_t, to_t) -> mm callback for the rewrite.
+                        purge_dest=None, assignment=None):
+    """A (head, ace, slot, from_t, to_t, stamp_mm=None) -> mm callback for
+    the rewrite, resolving through swap_cost.resolve_swap_purge_mm (§1.6) -
+    the same function the estimate uses, so an inline swap purges exactly
+    what the preflight predicted.
 
-    Returns None unless colour-aware purge is explicitly enabled. That
-    default is deliberate: purge is the one thing multiACE commands the
-    hotend to extrude by a computed volume, and an over-purge that
-    overflows the bin ends a hotend. Until a few real prints have been
-    compared against what the bin actually caught, the feature only
-    REPORTS (via the estimate) and emits nothing.
+    `purge_dest` is accepted but no longer gates this: a prime tower or a
+    flush target is the SLICER's own purge, a separate physical event from
+    the ACE swap's own chute purge (see swap_cost.purge_destination), so
+    it never should have suppressed this. `assignment` (head-mode's
+    {t: entry}) resolves `from_t`'s own current PHYSICAL slot, for pair
+    overrides keyed by "ace:slot" - the Config-tab purge table is set
+    before a user knows which colour lands where, so it has to be keyed on
+    the slot, not the slicer's tool index.
     """
     if _swap_cost is None:
         return None
     params = cost_params or {}
     main = params.get("main", params) or {}
-    if not main.get("purge_color_aware"):
-        return None
-    if purge_dest in ("tower", "flush", "mixed"):
-        # The slicer already handles purge here, in a place with unbounded
-        # capacity and at a flow rate it computed itself. multiACE commands
-        # no extrusion at all in this mode - it only reports (§1.6's waste
-        # line), which is why the common case carries no hardware risk.
-        return None
     try:
         model = _swap_cost.SwapCostModel.from_params(
             main, params.get("per_ace") or {})
     except Exception:
         return None
+    assignment = assignment or {}
 
-    def purge_mm_for(head, ace, slot, from_t, to_t):
-        return model.purge_mm((slicer_colors or {}).get(from_t),
-                              (slicer_colors or {}).get(to_t),
-                              (slicer_types or {}).get(to_t))
+    def _phys_key(t):
+        e = assignment.get(t)
+        if e and e.get("kind") == "ace":
+            return "%s:%s" % (e.get("ace"), e.get("slot"))
+        return None
+
+    def purge_mm_for(head, ace, slot, from_t, to_t, stamp_mm=None):
+        return model.resolve_swap_purge_mm(
+            "cross_ace_inline", from_key=_phys_key(from_t),
+            to_key="%s:%s" % (ace, slot), stamp_mm=stamp_mm,
+            from_color=(slicer_colors or {}).get(from_t),
+            to_color=(slicer_colors or {}).get(to_t),
+            material=(slicer_types or {}).get(to_t))
     return purge_mm_for
 
 
@@ -1113,7 +1120,8 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
             except Exception:
                 _purge_dest = None
         _purge_for = make_purge_callback(
-            cost_params, slicer_colors, slicer_types, _purge_dest)
+            cost_params, slicer_colors, slicer_types, _purge_dest,
+            assignment=assignment)
         try:
             pp.rewrite_head_mode_to_file(
                 str(src_path), str(tmp_a), assignment, None,
