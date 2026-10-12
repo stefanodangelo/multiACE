@@ -379,11 +379,11 @@ class MultiAce:
         self.purge_scale_pct = config.getfloat(
             'purge_scale_pct', 100, minval=10, maxval=200)
         self._purge_scale_cfg = self.purge_scale_pct
-        # Per-PHYSICAL-pair overrides ("ace:slot>ace:slot=mm", comma-
-        # separated) - set before a user knows which colour lands where,
-        # so keyed on the slot rather than the slicer's tool index. Wins
-        # over swap_purge_length and the stock default, but still scaled
-        # by purge_scale_pct above (see effective_purge_mm).
+        # Colour-pair overrides ("from>to=mm", comma-separated, colours as
+        # rrggbb) - resolved by the preflight into explicit PURGE= stamps
+        # (the engine cannot see colours mid-print); kept here so the Config
+        # tab can show and persist them. An override is an exact mm value,
+        # not scaled by purge_scale_pct.
         self.purge_pair_mm = self._parse_purge_pair_mm(
             config.get('purge_pair_mm', ''))
         self._purge_pair_mm_cfg = str(config.get('purge_pair_mm', '') or '')
@@ -2435,7 +2435,7 @@ class MultiAce:
 
     @staticmethod
     def _parse_purge_pair_mm(text):
-        """'0:0>0:1=60, 0:1>0:0=120' -> {'0:0>0:1': 60.0, '0:1>0:0': 120.0}.
+        """'0047ab>d94040=60, d94040>0047ab=110' -> {'0047ab>d94040': 60.0, ...}.
 
         Tolerant by design, same as the rest of ace.cfg's free-text
         fields: one malformed entry must not lose every other pair.
@@ -2455,20 +2455,16 @@ class MultiAce:
                 continue
         return out
 
-    def effective_purge_mm(self, requested_mm, from_key=None, to_key=None):
-        """`requested_mm`, after the §1.6 Config-tab purge controls: a
-        physical-pair override wins outright, then whatever is left is
-        scaled by purge_scale_pct. Does NOT clamp - callers already run
-        the result through clamp_purge_mm, which is the one place every
-        purge path has to cross regardless of source.
+    def effective_purge_mm(self, requested_mm):
+        """`requested_mm`, scaled by the §1.6 purge volume (purge_scale_pct).
+        Does NOT clamp - callers already run the result through
+        clamp_purge_mm, which every purge path crosses regardless of
+        source. Colour-pair overrides are resolved at preflight time (they
+        are keyed by colour, which the engine cannot see mid-print) and
+        arrive as an explicit PURGE= stamp, so they are not looked up here.
         """
-        mm = requested_mm
-        if from_key is not None and to_key is not None and self.purge_pair_mm:
-            override = self.purge_pair_mm.get('%s>%s' % (from_key, to_key))
-            if override is not None:
-                mm = override
         try:
-            mm = float(mm or 0.0)
+            mm = float(requested_mm or 0.0)
         except (TypeError, ValueError):
             mm = 0.0
         scale = max(0.0, float(self.purge_scale_pct or 0.0)) / 100.0
@@ -11373,8 +11369,8 @@ class MultiAce:
         'preflight writes from the slicer flush matrix - MATRIX=0 = '
         'fixed swap_purge_length for every flush. SCALE=<10-200> scales '
         'every resolved purge length by that percentage (Config tab). '
-        'PAIRS=<"ace:slot>ace:slot=mm,..."> sets per-physical-pair purge '
-        'overrides, comma-separated; PAIRS= (empty) clears them all. '
+        'PAIRS=<"rrggbb>rrggbb=mm,..."> sets per-colour-pair purge '
+        'overrides, comma-separated; PAIRS=none clears them all. '
         'Writes the purge_matrix/purge_scale_pct/purge_pair_mm config '
         'lines (write-through); PERSIST=0 = RAM only, the config value '
         'returns at restart. '
@@ -11402,6 +11398,10 @@ class MultiAce:
                             % (scale, _sc_suffix))
 
         pairs = gcmd.get('PAIRS', None)
+        if pairs is not None and pairs.strip().lower() in ('none', '-', 'clear'):
+            # Klipper's parser may drop an empty PAIRS=, so the web sends a
+            # word to mean "no overrides".
+            pairs = ''
         if pairs is not None:
             persist = gcmd.get_int('PERSIST', 1, minval=0, maxval=1)
             self.purge_pair_mm = self._parse_purge_pair_mm(pairs)
@@ -13639,6 +13639,11 @@ class MultiAce:
         # has a dozen early returns, and a restore that one of them skips
         # would leak one swap's purge length into the next.
         purge_req = gcmd.get_int('PURGE', None, minval=0, maxval=2000)
+        if purge_req is not None and not getattr(self, 'purge_matrix', True):
+            # Per-pair purge is switched off: fixed purge again, also on
+            # files that already carry stamps (same promise as the LENGTH=
+            # stamps ACE_SET_PURGE ignores in that state).
+            purge_req = None
         self._swap_purge_mm = None
         if purge_req is not None:
             applied, why = self.clamp_purge_mm(purge_req)

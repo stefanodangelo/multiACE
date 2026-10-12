@@ -532,6 +532,35 @@ class TestMockPreflight:
         # this small even though the underlying grams did drop.
         assert scaled["totals"]["g"] < full["totals"]["g"]
 
+    def test_every_plan_carries_the_purge_pair_table(self, client):
+        c, main, cfg, calls = client
+        j = self._upload(c).json()
+        for plan in j["plans"].values():
+            if plan.get("feasible"):
+                assert plan["purge_pairs"]["matrix"] is True
+                assert "groups" in plan["purge_pairs"]
+
+    def test_reestimate_applies_new_purge_settings_to_every_plan(self, client):
+        """The server-side twin of the browser worker's estimate-all: the
+        preflight's volume slider must move the numbers of every plan."""
+        c, main, cfg, calls = client
+        j = self._upload(c).json()
+        base = {n: p["estimate"]["purge"]["g"]
+                for n, p in j["plans"].items() if p.get("estimate")}
+        r = c.post("/api/preflight/reestimate?mock=1", json={
+            "token": j["token"], "cost_overrides": {"purge_scale_pct": 50}})
+        assert r.status_code == 200, r.text
+        got = r.json()["plans"]
+        assert set(got) == set(base)
+        for name, res in got.items():
+            assert res["estimate"]["purge"]["g"] < base[name]
+
+    def test_reestimate_rejects_an_unknown_token(self, client):
+        c, main, cfg, calls = client
+        r = c.post("/api/preflight/reestimate",
+                   json={"token": "0" * 32, "cost_overrides": {}})
+        assert r.status_code == 404
+
     def test_each_plan_carries_a_timeline(self, client):
         c, main, cfg, calls = client
         j = self._upload(c).json()
@@ -576,11 +605,11 @@ class TestMockPreflight:
     def test_purge_pair_mm_is_parsed_into_a_dict(self, client):
         c, main, cfg, calls = client
         cfg.write_text(
-            BASE_CFG + "purge_pair_mm: 0:0>0:1=60, 0:1>0:0=120\n",
+            BASE_CFG + "purge_pair_mm: 0047ab>d94040=60, d94040>0047ab=110\n",
             encoding="utf-8")
         j = c.get("/api/preflight/pysrc").json()
         assert j["cost_params"]["main"]["purge_pair_mm"] == {
-            "0:0>0:1": 60.0, "0:1>0:0": 120.0}
+            "0047ab>d94040": 60.0, "d94040>0047ab": 110.0}
 
     def test_an_absent_purge_pair_mm_is_not_a_key(self, client):
         """No `purge_pair_mm` line at all must not become an empty-dict

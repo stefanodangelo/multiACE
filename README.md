@@ -23,15 +23,25 @@
   configured reports that 80 mm default instead of a false zero. A
   plan with fewer swaps now visibly costs less time and money, not an
   identical total with the purge quietly dropped.
-- **Purge volume control (Config tab)** — a "Purge volume %" slider
-  scales every resolved purge length (10–200%, 100% = unchanged) live,
-  no restart, in both the preflight estimate and the real print; a
-  "Purge per slot pair" table overrides specific FROM‑slot→TO‑slot
-  transitions on top of that. An inline (foreground) ACE swap is now
-  also stamped from the slicer's own flush matrix the way a background
-  swap already was, instead of always purging the flat default.
-- Fixed the "Per-pair purge" (purge_matrix) Config-tab checkbox always
-  showing unchecked regardless of the live value (previous known issue).
+- **Purge volume + per-colour-pair purge** — a "Purge volume %" slider
+  (10–200%, 100% = unchanged) scales every default purge length live, no
+  restart, in the real print and in the preflight estimate. With
+  **Per-pair purge** on, a grid appears under it for the colour changes
+  that actually happen *inside* the ACE (a colour on a stock feeder never
+  swaps, so it has no row), built from the current loadout and labelled by
+  colour; empty cells show the slicer's own number for that pair, a typed
+  value pins the purge to exactly that many mm (the slider doesn't scale
+  it). Overrides are keyed by colour, so they follow the filament rather
+  than the slot, and live in `ace.cfg` (`purge_pair_mm`). The same slider
+  and grid sit in the preflight's estimate card: every change is saved and
+  re-runs all plans on the spot, so the effect on time and price is right
+  there. An inline (foreground) ACE swap is now also stamped from the
+  slicer's flush matrix, the way a background swap already was.
+- Fixed the "Per-pair purge" (purge_matrix) Config-tab switch always
+  showing unchecked regardless of the live value (previous known issue),
+  and rendering as a wide rectangle instead of a pill. Switching it off now
+  also makes the engine ignore `PURGE=` stamps on head-mode swaps, as the
+  hint always promised.
 
 Print-analysis plan, in full: three features sharing one data layer, shipped
 as three PRs but documented together here since none of them had a

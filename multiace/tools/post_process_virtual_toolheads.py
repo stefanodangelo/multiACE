@@ -1073,15 +1073,14 @@ def _model_cost(cost_model, kind, ace=None, slot=None,
 
 
 def _model_purge_mm(cost_model, kind, from_color, to_color, material,
-                    from_t=None, to_t=None, flush_matrix=None,
-                    from_key=None, to_key=None):
+                    from_t=None, to_t=None, flush_matrix=None):
     """Millimetres to purge for one swap - the SAME number
     rewrite_head_mode_to_file/rewrite_to_file are about to stamp (see
     _matrix_purge_mm), so the estimate never shows a different purge than
     the one the engine will actually extrude.
 
-    Prefers `resolve_swap_purge_mm` (pair overrides + purge_scale_pct,
-    §1.6/Config-tab) when the installed swap_cost.py has it; an older
+    Prefers `resolve_swap_purge_mm` (colour-pair overrides + purge_scale_pct
+    + the purge_matrix switch, §1.6/Config-tab) when the installed swap_cost.py has it; an older
     installed copy without that method still gets its own `purge_mm`
     guess rather than silently losing purge - matches this module's usual
     version-skew tolerance.
@@ -1092,8 +1091,7 @@ def _model_purge_mm(cost_model, kind, from_color, to_color, material,
     fn = getattr(cost_model, "resolve_swap_purge_mm", None)
     if fn is not None:
         try:
-            return float(fn(kind, from_key=from_key, to_key=to_key,
-                            stamp_mm=stamp_mm, from_color=from_color,
+            return float(fn(kind, stamp_mm=stamp_mm, from_color=from_color,
                             to_color=to_color, material=material))
         except Exception:
             pass
@@ -1233,13 +1231,6 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 note = ('no window before use - degrades to inline'
                         if head in bg_set else 'inline swap')
 
-        # The PHYSICAL pair ("ace:slot" on each side) a Config-tab purge
-        # override is keyed on - the slot a colour sits in, not its
-        # slicer T-index (from_t/t), since an override is set before
-        # knowing which colour will land where.
-        from_key = ("%s:%s" % prev_key) if prev_key else None
-        to_key = "%s:%s" % key
-
         out.append({
             'i': i, 't': t, 'from_t': from_t, 'head': head,
             'ace': e.get('ace'), 'slot': e.get('slot'), 'kind': kind,
@@ -1249,8 +1240,7 @@ def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
                 from_color, to_color, material), 1),
             'purge_mm': round(_model_purge_mm(
                 cost_model, kind, from_color, to_color, material,
-                from_t=from_t, to_t=t, flush_matrix=flush_matrix,
-                from_key=from_key, to_key=to_key), 1),
+                from_t=from_t, to_t=t, flush_matrix=flush_matrix), 1),
             'note': note})
 
         head_key[head] = key
@@ -1405,6 +1395,29 @@ def parse_flush_matrix_from_file(in_path):
     except OSError:
         return None
     return _flush_matrix_build(raw, mult)
+
+def parse_flush_matrix_raw(gcode):
+    """Text variant of parse_flush_matrix_raw_from_file: the STAMP basis
+    (flush_multiplier applied upward only) read from a string, e.g. the
+    preflight's filtered plan proxy. The estimate has to size a swap's
+    purge from the same matrix the rewrite will stamp from - the public
+    parse_flush_matrix applies a multiplier below 1 as written, so a print
+    sliced with flush_multiplier 0.5 would otherwise show half the purge
+    the engine actually extrudes."""
+    raw = None
+    mult = 1.0
+    for line in gcode.splitlines():
+        m = _FLUSH_MATRIX_RE.match(line.strip())
+        if m:
+            raw = m.group(1)
+            continue
+        m = _FLUSH_MULT_RE.match(line.strip())
+        if m:
+            try:
+                mult = float(m.group(1))
+            except ValueError:
+                mult = 1.0
+    return _flush_matrix_build(raw, max(1.0, mult))
 
 def parse_flush_matrix_raw_from_file(in_path):
     """The stamp basis: pair values as authored, with the file's

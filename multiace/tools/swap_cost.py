@@ -127,6 +127,23 @@ def hex_to_rgb(value):
         return None
 
 
+def norm_color(value):
+    """'#FF8800' / 'ff8800' -> 'ff8800' (the form purge_pair_mm keys use:
+    no '#', because Klipper reads '#' as an inline comment and the
+    web backend's gcode-argument sanitiser strips it); None when
+    unparseable."""
+    rgb = hex_to_rgb(value)
+    return None if rgb is None else "%02x%02x%02x" % rgb
+
+
+#: How far apart (color_distance, 0..1) a pair override's colour and the
+#: swap's own colour may be and still count as the same colour. An override
+#: is set against the colour of a spool in the loadout while the slicer
+#: names its own shade for the same filament, so an exact match alone would
+#: silently drop most overrides.
+PAIR_COLOR_TOLERANCE = 0.10
+
+
 def _luma(rgb):
     r, g, b = rgb
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
@@ -548,17 +565,29 @@ class SwapCostModel(object):
         #: resolved purge length is scaled by (100 = unchanged, 70 = 30 %
         #: less purge everywhere) - the one knob that makes "fewer swaps"
         #: and "less purge per swap" both independently visible in the
-        #: estimate and in the real print. `purge_pair_mm` overrides
-        #: specific PHYSICAL transitions - keys are "ace:slot>ace:slot"
-        #: (the slot a colour sits in, not its slicer T-index, since a
-        #: user sets this before knowing which colour lands where) and
-        #: win over every other mm source in resolve_swap_purge_mm, but
-        #: the scale still applies on top: the slider is "purge, overall",
-        #: a pair override is "this transition, specifically" - stacking
-        #: them means turning the slider down always helps, even on a
-        #: swap that also has a pair override set.
+        #: estimate and in the real print. `purge_pair_mm` pins the purge
+        #: of specific colour transitions - keys are "from>to" colours
+        #: ("0047ab>d94040", no '#'), matched by colour so an override
+        #: follows the filament, not the slot it happens to sit in. An
+        #: override is an EXACT mm value: the scale does not touch it
+        #: (what you type is what purges), only the swap_purge_max /
+        #: bin-capacity clamp does.
         self.purge_scale_pct = float(p.get("purge_scale_pct", 100) or 100)
+        #: The Config tab's "Per-pair purge" switch. Off = fixed purge
+        #: again: neither the slicer's flush-matrix stamp nor a pair
+        #: override applies (the engine ignores stamps in that state too).
+        self.purge_matrix = bool(p.get("purge_matrix", True))
         self.purge_pair_mm = dict(p.get("purge_pair_mm") or {})
+        self._pair_entries = []
+        for key, mm in self.purge_pair_mm.items():
+            a, _, b = str(key).partition(">")
+            na, nb = norm_color(a), norm_color(b)
+            try:
+                mm = float(mm)
+            except (TypeError, ValueError):
+                continue
+            if na and nb and na != nb:
+                self._pair_entries.append((na, nb, mm))
 
     # -- construction ---------------------------------------------------
 
@@ -758,18 +787,43 @@ class SwapCostModel(object):
                 return max(applied, self._material_floor(material))
         return self.purge_mm(from_color, to_color, material)
 
-    def resolve_swap_purge_mm(self, kind, from_key=None, to_key=None,
-                              stamp_mm=None, from_color=None, to_color=None,
-                              material=None):
+    def pair_override_mm(self, from_color, to_color):
+        """The Config-tab override for this colour transition, or None.
+
+        Exact colour match first; otherwise the closest override whose BOTH
+        colours are within PAIR_COLOR_TOLERANCE (see there) - the nearest
+        wins, so two similar blues in one loadout still resolve to their
+        own entry rather than whichever came first.
+        """
+        if not self._pair_entries or not self.purge_matrix:
+            return None
+        fa, fb = norm_color(from_color), norm_color(to_color)
+        if fa is None or fb is None or fa == fb:
+            return None
+        best, best_d = None, None
+        for ea, eb, mm in self._pair_entries:
+            if ea == fa and eb == fb:
+                return mm
+            da = color_distance(fa, ea)
+            db = color_distance(fb, eb)
+            if da is None or db is None:
+                continue
+            d = max(da, db)
+            if d <= PAIR_COLOR_TOLERANCE and (best_d is None or d < best_d):
+                best, best_d = mm, d
+        return best
+
+    def resolve_swap_purge_mm(self, kind, stamp_mm=None, from_color=None,
+                              to_color=None, material=None,
+                              use_override=True):
         """mm to purge for ONE swap - the single source of truth shared by
         the rewrite (what the engine will actually extrude through the
         chute) and the estimate (what the preflight predicts), so the two
         never disagree. Resolution order, first match wins:
 
           1. `feeder_pin` -> 0 (no ACE work at all, nothing to flush)
-          2. a Config-tab pair override for the PHYSICAL transition
-             `from_key` -> `to_key` (each "ace:slot", e.g. "0:1") -
-             `self.purge_pair_mm`
+          2. a Config-tab override for this colour transition
+             (`pair_override_mm`) - exact mm, NOT scaled
           3. `purge_color_aware`, when explicitly enabled (§3.4) - the
              colour-distance guess, kept exactly as before and orthogonal
              to everything below it
@@ -786,24 +840,32 @@ class SwapCostModel(object):
              purge_color_aware=off is the shipped default) actually never
              reach the nozzle - the macro falls back to 80 mm regardless.
 
-        Whatever wins is then scaled by `purge_scale_pct` (100 = no
-        change) and run through `clamp_purge_mm` - a pair override is a
-        request like any other, not an escape from the purge-bin ceiling.
+        With `purge_matrix` off, steps 2 and 4 are skipped: fixed purge
+        again, which is also what the engine does with stamps in that state.
+        `use_override=False` resolves what the swap would purge WITHOUT its
+        override (the preflight's "default" column). Anything but an
+        override is then scaled by `purge_scale_pct`
+        (100 = no change), and everything - an override included - goes
+        through `clamp_purge_mm`, a request like any other and no escape
+        from the purge-bin ceiling.
         """
         if kind == "feeder_pin":
             return 0.0
         floor = self._material_floor(material)
+        override = (self.pair_override_mm(from_color, to_color)
+                    if use_override else None)
+        if override is not None:
+            applied, _reason = self.clamp_purge_mm(max(float(override), floor))
+            return applied
         mm = None
-        if from_key is not None and to_key is not None and self.purge_pair_mm:
-            mm = self.purge_pair_mm.get("%s>%s" % (from_key, to_key))
-        if mm is None and self.purge_color_aware:
+        if self.purge_color_aware:
             severity = transition_severity(from_color, to_color)
             if severity is not None:
                 lo, hi = float(self.swap_purge_min), float(self.swap_purge_max)
                 if hi < lo:
                     lo, hi = hi, lo
                 mm = lo + (hi - lo) * severity
-        if mm is None and stamp_mm:
+        if mm is None and stamp_mm and self.purge_matrix:
             mm = float(stamp_mm)
         if mm is None and self.swap_purge_length > 0:
             mm = float(self.swap_purge_length)

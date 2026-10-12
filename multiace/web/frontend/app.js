@@ -233,6 +233,11 @@ createApp({
       // Send-to-multiACE inbox: a slicer-pushed gcode waiting for pickup.
       preflight_inbox: {pending: false, name: null, size: 0, ts: 0},
     });
+    // Purge settings bookkeeping (see applyPurgeSettings): `unsaved` = the
+    // last change could not be written to ace.cfg, so the live state must
+    // not overwrite what the user is looking at. Declared up here because
+    // applyState reads it.
+    const purgeCtl = reactive({busy: false, unsaved: false, error: ""});
     const loadError = ref("");
     // Auto-retry of a failed toolhead load: {head, ace, slot, attempt,
     // max_attempts, next_retry_ms, reason} while a retry is pending, null
@@ -327,11 +332,19 @@ createApp({
       // value because applyState never copied it - fixed here alongside
       // the two new purge fields below, which would otherwise have
       // shipped with the exact same bug.
-      state.purge_matrix = s.purge_matrix !== false;
-      state.purge_scale_pct = (typeof s.purge_scale_pct === "number")
-        ? s.purge_scale_pct : 100;
-      state.purge_pair_mm = (s.purge_pair_mm && typeof s.purge_pair_mm === "object")
-        ? s.purge_pair_mm : {};
+      // Only what the printer reports - without a printer (dev UI) the local
+      // toggle must not snap back to the default on every poll.
+      if (typeof s.purge_matrix === "boolean") state.purge_matrix = s.purge_matrix;
+      // Only what the printer actually reports, and never over a change
+      // that could not be saved yet (it would snap the slider back).
+      if (!purgeCtl.unsaved) {
+        if (typeof s.purge_scale_pct === "number") {
+          state.purge_scale_pct = s.purge_scale_pct;
+        }
+        if (s.purge_pair_mm && typeof s.purge_pair_mm === "object") {
+          state.purge_pair_mm = s.purge_pair_mm;
+        }
+      }
       state.spools = s.spools || {};
       state.spool_binding = s.spool_binding || {};
       state.auto_dry_masters = Array.isArray(s.auto_dry_masters)
@@ -2410,6 +2423,7 @@ createApp({
     // LENGTH stamps and purges the fixed length again, also on files that
     // already carry them. Write-through setter - live, no Save/restart.
     async function setPurgeMatrix(enable) {
+      state.purge_matrix = !!enable;     // optimistic: the printer round-trip can be slow
       try {
         await fetch(`${API}/macro`, {
           method: "POST",
@@ -2419,67 +2433,294 @@ createApp({
         });
       } catch (_) {}
       reloadState();
+      // The open preflight sizes purge with or without the slicer's
+      // per-pair numbers depending on this switch.
+      refreshPreflightEstimate().catch(() => {});
     }
-    // §1.6 purge control (Config tab): global % scale on every resolved
-    // purge length. Live, same write-through pattern as setPurgeMatrix -
-    // the preflight estimate reads the SAME ace.cfg value, so turning
-    // this down shows up there immediately too.
-    async function setPurgeScale(pct) {
+    // ---- §1.6 purge control: volume % + per-colour-pair overrides ---------
+    // One state, two places to edit it (Config tab and the preflight's
+    // estimate card). state.purge_scale_pct / state.purge_pair_mm are the
+    // single source; applyPurgeSettings() is the single writer: it updates
+    // them optimistically, saves to ace.cfg through ACE_SET_PURGE (live, no
+    // restart) and - when a preflight is open - re-runs EVERY plan's
+    // estimate against the new numbers, so the effect on time and price is
+    // visible without going back and forth.
+    //
+    // Override keys are "rrggbb>rrggbb" colour pairs (no '#': Klipper reads
+    // it as a comment), matched by colour with a tolerance - the loadout's
+    // blue is never exactly the slicer's blue. An override is an exact mm
+    // value; the volume % scales everything around it.
+    const PURGE_COLOR_TOL = 0.10;
+    function _pairHex(c) {
+      const m = /^#?([0-9a-f]{6})/i.exec(String(c || "").trim());
+      return m ? m[1].toLowerCase() : null;
+    }
+    // Same "redmean" distance as swap_cost.color_distance, normalised 0..1.
+    function _colorDist(a, b) {
+      const pa = _pairHex(a), pb = _pairHex(b);
+      if (!pa || !pb) return null;
+      const ca = [0, 2, 4].map(i => parseInt(pa.substr(i, 2), 16));
+      const cb = [0, 2, 4].map(i => parseInt(pb.substr(i, 2), 16));
+      const rm = (ca[0] + cb[0]) / 2;
+      const dr = ca[0] - cb[0], dg = ca[1] - cb[1], db = ca[2] - cb[2];
+      const d2 = (2 + rm / 256) * dr * dr + 4 * dg * dg
+               + (2 + (255 - rm) / 256) * db * db;
+      const max = (2 + 127.5 / 256) * 255 ** 2 + 4 * 255 ** 2
+                + (2 + 127.5 / 256) * 255 ** 2;
+      return Math.min(1, Math.sqrt(d2 / max));
+    }
+    // The entry of `map` ({"from>to": value}) for this colour transition:
+    // exact first, otherwise the nearest one with BOTH colours within
+    // tolerance. Returns [key, value] or null.
+    function _pairLookup(map, from, to) {
+      const f = _pairHex(from), t = _pairHex(to);
+      if (!f || !t || f === t) return null;
+      let best = null, bestD = null;
+      for (const [k, v] of Object.entries(map || {})) {
+        const [a, b] = k.split(">");
+        if (a === f && b === t) return [k, v];
+        const da = _colorDist(f, a), db = _colorDist(t, b);
+        if (da === null || db === null) continue;
+        const d = Math.max(da, db);
+        if (d <= PURGE_COLOR_TOL && (bestD === null || d < bestD)) {
+          best = [k, v]; bestD = d;
+        }
+      }
+      return best;
+    }
+    // A name for a colour, nearest of a small palette - the grids are read
+    // as "blue -> red", not as hex codes.
+    const _PURGE_NAMES = [
+      ["Black", "000000"], ["White", "ffffff"], ["Grey", "808080"],
+      ["Silver", "c8c8c8"], ["Red", "e02020"], ["Maroon", "800000"],
+      ["Orange", "ff7800"], ["Yellow", "f5d800"], ["Green", "22a03c"],
+      ["Dark green", "0f6b2e"], ["Teal", "00c1ae"], ["Light blue", "3aa0e0"],
+      ["Blue", "1436c8"], ["Navy", "101060"], ["Purple", "7b2fbe"],
+      ["Pink", "ff5aa8"], ["Brown", "7a4a1e"], ["Gold", "d4af37"],
+      ["Beige", "e8dcc0"], ["Cream", "f4e2c1"],
+    ];
+    function purgeColorName(hex) {
+      let best = null, bestD = null;
+      for (const [n, h] of _PURGE_NAMES) {
+        const d = _colorDist(hex, h);
+        if (d !== null && (bestD === null || d < bestD)) { best = n; bestD = d; }
+      }
+      return best || ("#" + hex);
+    }
+    function _pairSpec(map) {
+      const e = Object.entries(map || {});
+      return e.length ? e.map(([k, v]) => `${k}=${v}`).join(",") : "none";
+    }
+    // The cost params the preflight worker / rewrite should run with: the
+    // printer's own, with the purge settings as the user last left them
+    // (which differ from ace.cfg when a save failed).
+    const preflightCostParams = ref(null);
+    function mergedCostParams(base) {
+      const cp = JSON.parse(JSON.stringify(base || preflightCostParams.value
+                                           || {main: {}, per_ace: {}}));
+      if (!cp.main) cp.main = {};
+      cp.main.purge_scale_pct = Number(state.purge_scale_pct) || 100;
+      cp.main.purge_pair_mm = Object.assign({}, state.purge_pair_mm || {});
+      cp.main.purge_matrix = state.purge_matrix !== false;
+      return cp;
+    }
+    // What the last analysed print would purge per pair by default (the
+    // slicer's own flush-matrix numbers, scaled). The Config tab has no
+    // gcode of its own, so it shows these as the cells' placeholders;
+    // kept in this browser so they survive a reload.
+    const PURGE_DEFAULTS_KEY = "multiace.purgeDefaults";
+    const purgeDefaults = reactive({map: (() => {
+      try { return JSON.parse(localStorage.getItem(PURGE_DEFAULTS_KEY)) || {}; }
+      catch (_) { return {}; }
+    })()});
+    function _rememberPurgeDefaults(report) {
+      const plans = (report && report.plans) || {};
+      const plan = plans.loadout || plans.slicer
+                || Object.values(plans).find(p => p && p.purge_pairs);
+      const groups = plan && plan.purge_pairs && plan.purge_pairs.groups;
+      if (!groups || !groups.length) return;
+      const map = {};
+      for (const g of groups) {
+        for (const p of g.pairs) map[`${p.from}>${p.to}`] = p.default_mm;
+      }
+      purgeDefaults.map = map;
+      try { localStorage.setItem(PURGE_DEFAULTS_KEY, JSON.stringify(map)); }
+      catch (_) {}
+    }
+    async function _savePurgeSettings(patch) {
+      const args = {};
+      if (patch.scale !== undefined) args.SCALE = patch.scale;
+      if (patch.pairs !== undefined) args.PAIRS = _pairSpec(patch.pairs);
+      try {
+        const r = await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PURGE", args}),
+        });
+        return r.ok;
+      } catch (_) { return false; }
+    }
+    let _purgeApplySeq = 0;
+    async function applyPurgeSettings(patch) {
+      if (patch.scale !== undefined) {
+        patch.scale = Math.max(10, Math.min(200,
+          Math.round(Number(patch.scale) || 100)));
+        state.purge_scale_pct = patch.scale;
+      }
+      if (patch.pairs !== undefined) state.purge_pair_mm = patch.pairs;
+      const seq = ++_purgeApplySeq;
+      purgeCtl.busy = true;
+      // Save and re-estimate side by side: the numbers should not wait on
+      // the printer round-trip.
+      const [saved] = await Promise.all([
+        _savePurgeSettings(patch),
+        refreshPreflightEstimate().catch(() => {}),
+      ]);
+      if (seq !== _purgeApplySeq) return;   // a newer change owns the state
+      purgeCtl.busy = false;
+      purgeCtl.unsaved = !saved;
+      purgeCtl.error = saved ? "" : t("ui.config.purge_not_saved");
+      if (saved) reloadState();
+    }
+    let _purgeScaleTimer = null;
+    function setPurgeScale(pct) {
       const n = Math.max(10, Math.min(200, Math.round(Number(pct) || 100)));
-      try {
-        await fetch(`${API}/macro`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({name: "ACE_SET_PURGE", args: {SCALE: n}}),
-        });
-      } catch (_) {}
-      reloadState();
+      state.purge_scale_pct = n;                   // the slider follows at once
+      if (_purgeScaleTimer) clearTimeout(_purgeScaleTimer);
+      _purgeScaleTimer = setTimeout(() => {        // ...the work is debounced
+        _purgeScaleTimer = null;
+        applyPurgeSettings({scale: n});
+      }, 350);
     }
-    // Per-physical-slot-pair purge overrides, "ace:slot>ace:slot=mm"
-    // comma-separated - see purgePairRows()/purgePairSpec() for the
-    // editable-table <-> spec-string conversion.
-    async function setPurgePairs(spec) {
-      try {
-        await fetch(`${API}/macro`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({name: "ACE_SET_PURGE",
-                                args: {PAIRS: spec || ""}}),
-        });
-      } catch (_) {}
-      reloadState();
+    // One cell of either grid. An empty value removes the override.
+    function setPairOverride(from, to, raw) {
+      const next = Object.assign({}, state.purge_pair_mm || {});
+      const hit = _pairLookup(next, from, to);
+      if (hit) delete next[hit[0]];
+      const v = String(raw === undefined || raw === null ? "" : raw).trim();
+      if (v !== "" && Number.isFinite(Number(v)) && Number(v) >= 0) {
+        next[`${_pairHex(from)}>${_pairHex(to)}`] = Math.round(Number(v) * 10) / 10;
+      }
+      applyPurgeSettings({pairs: next});
     }
-    // The purge-pair table is edited as ROWS ({from, to, mm}) rather than
-    // the raw spec string, so the UI can offer dropdowns instead of a
-    // free-text field the user has to get the syntax of right.
-    const purgePairDraft = reactive({from: "", to: "", mm: 60});
-    function purgePairRows() {
-      return Object.entries(state.purge_pair_mm || {}).map(([k, v]) => {
-        const [from, to] = k.split(">");
-        return {key: k, from, to, mm: v};
+    function clearPairOverrides() {
+      applyPurgeSettings({pairs: {}});
+    }
+    function purgeOverrideCount() {
+      return Object.keys(state.purge_pair_mm || {}).length;
+    }
+    // Grid data, same shape for both places: [{key, label, colors:[{hex,
+    // name}], cells: {"from>to": {value, placeholder, override}}}].
+    function purgeGridFromPlan(plan) {
+      const pp = plan && plan.purge_pairs;
+      if (!pp) return [];
+      return pp.groups.map(g => {
+        const cells = {};
+        for (const p of g.pairs) {
+          cells[`${p.from}>${p.to}`] = {
+            value: p.override_mm === null || p.override_mm === undefined
+              ? "" : p.override_mm,
+            placeholder: p.default_mm,
+            override: p.override_mm !== null && p.override_mm !== undefined,
+          };
+        }
+        return {key: "h" + g.head, label: t("ui.config.purge_group_head",
+                  {n: dispIdx(g.head)}), colors: g.colors, cells};
       });
     }
-    function purgeSlotOptions() {
-      const out = [];
-      for (const a of state.aces || []) {
-        for (let s = 0; s < 4; s++) out.push(`${a.idx}:${s}`);
+    function purgeGridFromLoadout() {
+      const aces = state.aces || [];
+      const colored = (a, i) => {
+        const sl = (a.slots || []).find(x => x.idx === i);
+        return sl && sl.color && sl.material && sl.state !== "empty"
+          ? {hex: _pairHex(sl.color), name: purgeColorName(_pairHex(sl.color)), ace: a.idx} : null;
+      };
+      const sets = [];
+      if (state.mode === "head") {
+        const seen = new Set();
+        for (let h = 0; h < 4; h++) {
+          if (state.head_feeder && state.head_feeder[h]) continue;
+          const ai = (state.head_ace || {})[h];
+          if (ai === undefined || seen.has(ai)) continue;
+          seen.add(ai);
+          const a = aces.find(x => x.idx === Number(ai));
+          if (!a) continue;
+          sets.push({key: "ace" + ai,
+                     label: "ACE " + dispIdx(Number(ai)),
+                     members: [0, 1, 2, 3].map(i => colored(a, i))});
+        }
+      } else {
+        for (let h = 0; h < 4; h++) {
+          sets.push({key: "slot" + h,
+                     label: t("ui.config.purge_group_head", {n: dispIdx(h)}),
+                     members: aces.map(a => colored(a, h))});
+        }
       }
-      return out;
+      const groups = [];
+      for (const st of sets) {
+        const seenHex = new Set(), colors = [];
+        for (const m of st.members) {
+          if (!m || !m.hex || seenHex.has(m.hex)) continue;
+          seenHex.add(m.hex); colors.push(m);
+        }
+        if (colors.length < 2) continue;
+        const cells = {};
+        for (const f of colors) for (const to of colors) {
+          if (f.hex === to.hex) continue;
+          const ov = _pairLookup(state.purge_pair_mm, f.hex, to.hex);
+          const df = _pairLookup(purgeDefaults.map, f.hex, to.hex);
+          cells[`${f.hex}>${to.hex}`] = {
+            value: ov ? ov[1] : "", override: !!ov,
+            placeholder: df ? df[1] : t("ui.config.purge_auto"),
+          };
+        }
+        groups.push({key: st.key, label: st.label, colors, cells});
+      }
+      return groups;
     }
-    function addPurgePairRow() {
-      if (!purgePairDraft.from || !purgePairDraft.to
-          || purgePairDraft.from === purgePairDraft.to) return;
-      const next = {...(state.purge_pair_mm || {})};
-      next[`${purgePairDraft.from}>${purgePairDraft.to}`] =
-        Number(purgePairDraft.mm) || 0;
-      setPurgePairs(Object.entries(next)
-        .map(([k, v]) => `${k}=${v}`).join(","));
+    // Re-run every plan of the open preflight against the current purge
+    // settings. Local (Pyodide) preflights recompute in the worker from the
+    // captured ctx; a server-side one asks the backend to.
+    async function refreshPreflightEstimate() {
+      const rep = preflight.report;
+      if (!rep || !rep.plans) return;
+      const cp = mergedCostParams();
+      preflightCostParams.value = cp;
+      let plans = null;
+      if (preflight.local && preflightWorker && preflightJobId) {
+        const msg = await runPreflightWorker(
+          "estimate-all", {jobId: preflightJobId, costParams: cp});
+        plans = msg.plans;
+      } else if (rep.token) {
+        const r = await fetch(
+          `${API}/preflight/reestimate${rep.mock ? "?mock=1" : ""}`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({token: rep.token, cost_overrides: cp.main}),
+        });
+        if (r.ok) plans = (await r.json()).plans;
+      }
+      for (const [name, res] of Object.entries(plans || {})) {
+        const plan = rep.plans[name];
+        if (!plan || !res) continue;
+        if (res.estimate) plan.estimate = res.estimate;
+        if (res.timeline) plan.timeline = res.timeline;
+        if (res.purge_pairs) plan.purge_pairs = res.purge_pairs;
+      }
+      _rememberPurgeDefaults(rep);
     }
-    function removePurgePairRow(key) {
-      const next = {...(state.purge_pair_mm || {})};
-      delete next[key];
-      setPurgePairs(Object.entries(next)
-        .map(([k, v]) => `${k}=${v}`).join(","));
+    // Keep the Config tab's numbers in step with the print being analysed:
+    // the backend reads the same ace.cfg, but in a no-printer dev session
+    // the live state has nothing to say about them.
+    function syncPurgeFromCostParams(cp) {
+      const m = cp && cp.main;
+      if (!m || purgeCtl.unsaved) return;
+      if (typeof m.purge_scale_pct === "number") {
+        state.purge_scale_pct = m.purge_scale_pct;
+      }
+      if (m.purge_pair_mm && typeof m.purge_pair_mm === "object") {
+        state.purge_pair_mm = m.purge_pair_mm;
+      }
     }
     async function setHeadAce(idx, ace) {
       await headSet("head-ace", {head: idx, ace: Number(ace)},
@@ -4533,10 +4774,11 @@ createApp({
       const seq = ++_estimateReqSeq;
       try {
         const msg = await runPreflightWorker("estimate", Object.assign(
-          {jobId: preflightJobId}, payload));
+          {jobId: preflightJobId, plan: planKey}, payload));
         if (seq !== _estimateReqSeq) return;
         if (msg.estimate !== undefined) plan.estimate = msg.estimate;
         if (msg.timeline !== undefined) plan.timeline = msg.timeline;
+        if (msg.purgePairs) plan.purge_pairs = msg.purgePairs;
       } catch (_) {
         // Informational only - leave the previous numbers on a worker hiccup
         // rather than erroring the whole preflight over the estimate.
@@ -5213,7 +5455,8 @@ createApp({
           }
           if ((type === "analyze" && msg.type === "analyze-done")
               || (type === "rewrite" && msg.type === "rewrite-done")
-              || (type === "estimate" && msg.type === "estimate-done")) {
+              || (type === "estimate" && msg.type === "estimate-done")
+              || (type === "estimate-all" && msg.type === "estimate-all-done")) {
             worker.removeEventListener("message", onMsg);
             if (type === "rewrite") msg.chunks = chunks;
             resolve(msg);
@@ -5340,7 +5583,9 @@ createApp({
           // Fresh every run (not just at worker init) so a swap_retract_length
           // / swap_purge_length edit in Settings shows up without reloading
           // the page - the worker itself outlives many preflight runs.
-          costParams: live.cost_params, calibration: live.calibration,
+          costParams: (syncPurgeFromCostParams(live.cost_params),
+                       mergedCostParams(live.cost_params)),
+          calibration: live.calibration,
         }, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -6096,7 +6341,10 @@ createApp({
         payload.headCtx   = live.head_ctx;
         // Same reasoning as the analyze payload above: re-read ace.cfg now
         // rather than trust whatever the worker last cached.
-        payload.costParams = live.cost_params;
+        // ...with the purge settings as seen in the preflight (they differ
+        // from ace.cfg when a save failed), so the stamps match the numbers
+        // on screen.
+        payload.costParams = mergedCostParams(live.cost_params);
         const j = await runPreflightWorker("rewrite", payload, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -7596,7 +7844,7 @@ createApp({
       slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, loadComboFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadFeederCombo, headFeederComboOf, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setRememberFilament, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
-      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, setPurgeScale, setPurgePairs, purgePairDraft, purgePairRows, purgeSlotOptions, addPurgePairRow, removePurgePairRow, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
+      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, setPurgeScale, setPairOverride, clearPairOverrides, purgeOverrideCount, purgeCtl, purgeGridFromPlan, purgeGridFromLoadout, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerRfidSku, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,
       addFluiddCamera, fluiddCamBusy, fluiddCamMsg,
       spoolForm, spoolImportMode, spoolFileInput,
       spoolMaterials, spoolVendors, spoolSubtypes,

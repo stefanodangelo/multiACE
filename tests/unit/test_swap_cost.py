@@ -310,18 +310,77 @@ class TestResolveSwapPurgeMm:
         m = sc.SwapCostModel.from_params(dict(
             CFG, purge_color_aware=True, swap_purge_min=20,
             swap_purge_max=150,
-            purge_pair_mm={"0:0>0:1": 45}))
+            purge_pair_mm={"000000>ffffff": 45}))
         got = m.resolve_swap_purge_mm(
-            "cross_ace_inline", from_key="0:0", to_key="0:1", stamp_mm=60,
+            "cross_ace_inline", stamp_mm=60,
             from_color="#000000", to_color="#ffffff")
         assert got == 45
 
     def test_an_unmatched_pair_falls_through(self):
         m = sc.SwapCostModel.from_params(
-            dict(CFG, purge_pair_mm={"0:0>0:1": 45}))
+            dict(CFG, purge_pair_mm={"000000>ffffff": 45}))
         got = m.resolve_swap_purge_mm(
-            "cross_ace_inline", from_key="1:0", to_key="1:1")
+            "cross_ace_inline", from_color="#ff0000", to_color="#00ff00")
         assert got == sc.STOCK_FLUSH_DEFAULT_MM
+
+    def test_an_override_is_exact_and_not_scaled(self):
+        """What you type in the table is what purges - the volume slider
+        scales the defaults around it, never the override itself."""
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_scale_pct=50, purge_pair_mm={"000000>ffffff": 60}))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", from_color="#000000",
+            to_color="#ffffff") == 60
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", from_color="#ff0000",
+            to_color="#00ff00") == pytest.approx(40)
+
+    def test_an_override_is_still_clamped(self):
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, swap_purge_max=100, purge_pair_mm={"000000>ffffff": 900}))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", from_color="#000000",
+            to_color="#ffffff") == 100
+
+    def test_a_nearby_shade_still_matches_the_override(self):
+        """The loadout's blue is never exactly the slicer's blue."""
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_pair_mm={"0047ab>d94040": 33}))
+        assert m.pair_override_mm("#0050b0", "#dc4444") == 33
+
+    def test_a_distant_colour_does_not_match(self):
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_pair_mm={"0047ab>d94040": 33}))
+        assert m.pair_override_mm("#ffff00", "#d94040") is None
+
+    def test_the_nearest_override_wins(self):
+        m = sc.SwapCostModel.from_params(dict(CFG, purge_pair_mm={
+            "0047ab>d94040": 33, "0070e0>d94040": 77}))
+        assert m.pair_override_mm("#0072e2", "#d94040") == 77
+
+    def test_override_is_directional(self):
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_pair_mm={"000000>ffffff": 45}))
+        assert m.pair_override_mm("#ffffff", "#000000") is None
+
+    def test_matrix_off_ignores_overrides_and_stamps(self):
+        """Per-pair purge off = fixed purge again."""
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_matrix=False, purge_pair_mm={"000000>ffffff": 45}))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", stamp_mm=60, from_color="#000000",
+            to_color="#ffffff") == sc.STOCK_FLUSH_DEFAULT_MM
+
+    def test_use_override_false_gives_the_default(self):
+        m = sc.SwapCostModel.from_params(dict(
+            CFG, purge_pair_mm={"000000>ffffff": 45}))
+        assert m.resolve_swap_purge_mm(
+            "cross_ace_inline", use_override=False, from_color="#000000",
+            to_color="#ffffff") == sc.STOCK_FLUSH_DEFAULT_MM
+
+    def test_norm_color(self):
+        assert sc.norm_color("#FF8800") == "ff8800"
+        assert sc.norm_color("nope") is None
 
     def test_purge_scale_pct_scales_whatever_wins(self):
         m = sc.SwapCostModel.from_params(

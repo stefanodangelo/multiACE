@@ -162,13 +162,13 @@ class TestGetPurgeLength:
         assert ace.get_purge_length() == pytest.approx(
             ace_module.STOCK_FLUSH_DEFAULT_MM * 0.7, abs=1)
 
-    def test_a_pair_override_wins_over_swap_purge_length(self, ace):
+    def test_pair_overrides_are_the_preflights_job_not_the_engines(self, ace):
+        """Overrides are keyed by colour, which the engine cannot see
+        mid-print: the preflight resolves them into explicit PURGE= stamps,
+        and get_purge_length's own fallback ignores them."""
         ace.swap_purge_length = 35
-        ace.purge_pair_mm = {"0:0>0:1": 60}
-        got = ace.get_purge_length()
-        assert got == 35  # no from/to given here - get_purge_length's own
-                          # fallback path carries no pair context (see
-                          # the module docstring on effective_purge_mm)
+        ace.purge_pair_mm = {"0047ab>d94040": 60}
+        assert ace.get_purge_length() == 35
 
 
 class TestSetPurgeCommand:
@@ -183,12 +183,19 @@ class TestSetPurgeCommand:
 
     def test_pairs_applies_immediately(self, ace):
         ace.cmd_ACE_SET_PURGE(
-            FakeGcmd(PAIRS="0:0>0:1=60,0:1>0:0=120", PERSIST=0))
-        assert ace.purge_pair_mm == {"0:0>0:1": 60.0, "0:1>0:0": 120.0}
+            FakeGcmd(PAIRS="0047ab>d94040=60,d94040>0047ab=110", PERSIST=0))
+        assert ace.purge_pair_mm == {"0047ab>d94040": 60.0,
+                                     "d94040>0047ab": 110.0}
 
     def test_an_empty_pairs_clears_overrides(self, ace):
-        ace.purge_pair_mm = {"0:0>0:1": 60.0}
+        ace.purge_pair_mm = {"0047ab>d94040": 60.0}
         ace.cmd_ACE_SET_PURGE(FakeGcmd(PAIRS="", PERSIST=0))
+        assert ace.purge_pair_mm == {}
+
+    def test_the_word_none_clears_overrides_too(self, ace):
+        """Klipper may drop an empty PAIRS=, so the web sends a word."""
+        ace.purge_pair_mm = {"0047ab>d94040": 60.0}
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(PAIRS="none", PERSIST=0))
         assert ace.purge_pair_mm == {}
 
     def test_neither_option_raises(self, ace):
@@ -212,3 +219,41 @@ class TestCanExtrudeGate:
         ace.toolhead = types.SimpleNamespace(
             get_extruder=lambda: (_ for _ in ()).throw(RuntimeError("no")))
         assert ace.purge_can_extrude() is False
+
+
+class _SwapGcmd:
+    """Just enough of a GCodeCommand for cmd_ACE_SWAP_HEAD's argument
+    parsing; HEAD=9 makes it stop right after the purge handling."""
+
+    def __init__(self, **params):
+        self.params = params
+
+    def get(self, name, default=None):
+        return self.params.get(name, default)
+
+    get_int = get_float = lambda self, name, default=None, **kw:         self.params.get(name, default)
+
+    def error(self, message="", **kw):
+        return RuntimeError(message)
+
+
+class TestPurgeStampsFollowThePerPairSwitch:
+    """Per-pair purge off = fixed purge again, also on files that already
+    carry PURGE= stamps (the Config-tab hint promises exactly that)."""
+
+    def _swap(self, ace):
+        ace.swap_anti_ooze_retract = 10
+        ace.purge_can_extrude = lambda head=None: True
+        ace.purge_bin_account = lambda mm: None
+        with pytest.raises(RuntimeError):
+            ace.cmd_ACE_SWAP_HEAD(_SwapGcmd(HEAD=9, PURGE=50))
+
+    def test_a_stamp_is_honoured_while_the_switch_is_on(self, ace):
+        ace.purge_matrix = True
+        self._swap(ace)
+        assert ace._swap_purge_mm == 50
+
+    def test_a_stamp_is_ignored_while_the_switch_is_off(self, ace):
+        ace.purge_matrix = False
+        self._swap(ace)
+        assert ace._swap_purge_mm is None

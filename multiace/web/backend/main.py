@@ -1536,6 +1536,69 @@ async def preflight(request: Request, file: UploadFile = File(...),
         report["virtual_slots"] = virtual
     return report
 
+class ReestimateRequest(BaseModel):
+    token: str
+    #: The purge settings as the preflight shows them (volume %, pair
+    #: overrides, per-pair switch) - they win over ace.cfg, because a save
+    #: that could not reach the printer must not be silently dropped from
+    #: the numbers on screen.
+    cost_overrides: dict = {}
+
+
+@app.post("/api/preflight/reestimate")
+async def preflight_reestimate(request: Request,
+                               req: ReestimateRequest) -> dict:
+    """Re-run every plan's estimate for an already-uploaded preflight with
+    new purge settings. The server-side counterpart of the in-browser
+    worker's estimate-all: it re-analyses the stored upload against the
+    current loadout, so it shows each plan as first proposed (a mapping
+    edited since is not carried over - only the local preflight keeps
+    that)."""
+    if not re.fullmatch(r"[0-9a-f]{32}", req.token or ""):
+        raise HTTPException(status_code=400, detail="invalid token")
+    src_path = _PREFLIGHT_DIR / (req.token + ".gcode")
+    if not src_path.is_file():
+        raise HTTPException(status_code=404,
+                            detail="preflight token expired or unknown")
+    pp = _load_post_processor()
+    with open(src_path, "r", encoding="utf-8", errors="replace") as f:
+        (slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta,
+         header_text) = await asyncio.to_thread(
+            preflight_core.parse_meta, pp, f, with_header=True)
+    live_slots, head_ctx, mocked = await _preflight_loadout(request)
+    if mocked:
+        spool_prices = _spool_prices_from_state(_mock_load(MOCK_STATE_FILE) or {})
+    else:
+        spool_prices = _spool_prices_from_state(
+            _parse_state(await _query_state_gated()))
+    cost_params = _swap_cost_params()
+    main_params = dict(cost_params.get("main") or {})
+    for key in ("purge_scale_pct", "purge_pair_mm", "purge_matrix"):
+        if key in (req.cost_overrides or {}):
+            main_params[key] = req.cost_overrides[key]
+    cost_params = {"main": main_params, "per_ace": cost_params.get("per_ace") or {}}
+    try:
+        report = await asyncio.to_thread(
+            preflight_core.build_report,
+            pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
+            num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
+            head_ctx=head_ctx, token=req.token, filename=src_path.name,
+            size=src_path.stat().st_size, fuzzy=_PREFLIGHT_FUZZY,
+            header_text=header_text, cost_params=cost_params,
+            calibration=_swap_calibration(), meta=meta,
+            spool_prices=spool_prices)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"plans": {
+        name: {"estimate": plan.get("estimate"),
+               "timeline": plan.get("timeline"),
+               "purge_pairs": plan.get("purge_pairs")}
+        for name, plan in (report.get("plans") or {}).items()
+        if plan.get("estimate") is not None}}
+
+
 _PREFLIGHT_JOBS: dict[str, dict] = {}
 _PREFLIGHT_JOBS_LOCK = asyncio.Lock()
 _PREFLIGHT_JOB_TTL = 600.0
@@ -2044,7 +2107,7 @@ _SWAP_COST_KEYS = (
     "purge_bin_capacity_mm", "filament_diameter", "max_flow_mm3_s",
     "purge_scale_pct",
 )
-_SWAP_COST_BOOL_KEYS = ("purge_color_aware",)
+_SWAP_COST_BOOL_KEYS = ("purge_color_aware", "purge_matrix")
 
 def _as_float(value):
     try:
@@ -2053,7 +2116,8 @@ def _as_float(value):
         return None
 
 def _parse_purge_pair_mm(text) -> dict:
-    """'0:0>0:1=60, 0:1>0:0=120' -> {'0:0>0:1': 60.0, '0:1>0:0': 120.0}.
+    """'0047ab>d94040=60, d94040>0047ab=110' -> {'0047ab>d94040': 60.0, ...}.
+    Keys are colour pairs (no '#', which Klipper reads as a comment).
 
     Mirrors ace.py's MultiAce._parse_purge_pair_mm - the backend and the
     printer parse the SAME ace.cfg field independently (no shared import

@@ -169,10 +169,23 @@ def used_tool_indices(pp, gcode: str) -> set:
             used = set()
     return used
 
+def _stamp_matrix(pp, plan_proxy):
+    """The flush matrix on the rewrite's basis (see make_estimate_ctx);
+    None on an older post-processor that has no such parser, in which case
+    the estimate falls back to the optimizer's matrix as before."""
+    fn = getattr(pp, "parse_flush_matrix_raw", None)
+    if fn is None:
+        return None
+    try:
+        return fn(plan_proxy)
+    except Exception:
+        return None
+
+
 def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
                       slicer_colors=None, slicer_types=None,
                       event_times=None, bg_heads=None, spool_prices=None,
-                      flush_matrix=None):
+                      flush_matrix=None, stamp_matrix=None):
     """Everything the per-plan estimate needs, built once per preflight.
 
     Returns None when the estimate cannot be produced (no swap_cost module,
@@ -184,6 +197,12 @@ def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
     caller already parsed one (e.g. for the head-mode colour-objective
     optimizer) - passing it through here makes the timeline's purge_mm use
     the slicer's real number instead of guessing one from colour distance.
+
+    `stamp_matrix` is the same matrix on the REWRITE's basis
+    (parse_flush_matrix_raw: flush_multiplier applied upward only) - what
+    the engine will actually be told to purge. The timeline sizes purge
+    from this one when given, so the estimate cannot disagree with the
+    stamps; `flush_matrix` stays the optimizer's (tower-model) matrix.
     """
     if _swap_cost is None or not hasattr(pp, "build_swap_timeline"):
         return None
@@ -212,6 +231,13 @@ def make_estimate_ctx(pp, header_text, *, cost_params=None, calibration=None,
         "bg_heads":    list(bg_heads or []),
         "prices":      dict(spool_prices or {}),
         "flush_matrix": flush_matrix,
+        "stamp_matrix": stamp_matrix,
+        "calibration": calibration,
+        #: id(plan dict) -> {events, assignment, price_mapping}: what each
+        #: plan was estimated from, so a purge setting change can re-run
+        #: every plan without re-parsing the gcode. Shared (by reference)
+        #: with every ctx derived through ctx_with_params.
+        "plan_inputs": {},
     }
 
 
@@ -247,6 +273,11 @@ def attach_estimate(ctx, plan, events, assignment):
     """
     if not ctx or assignment is None or not plan.get("feasible", True):
         return plan
+    # Remember what this plan was estimated from (see make_estimate_ctx's
+    # plan_inputs) so a purge setting change can re-run it in place.
+    ctx["plan_inputs"][id(plan)] = {
+        "events": events, "assignment": assignment,
+        "price_mapping": plan.get("mapping") or []}
     try:
         timeline = ctx_timeline(ctx, events, assignment)
         plan["timeline"] = timeline
@@ -262,11 +293,81 @@ def attach_estimate(ctx, plan, events, assignment):
             materials=ctx["materials"], colors=ctx["colors"],
             used_tools=sorted(ctx["colors"].keys()) or None,
             prices=prices)
+        plan["purge_pairs"] = purge_pair_table(ctx, events, assignment)
     except Exception:
         # An estimate is informational; a plan without one is still a plan.
         plan.pop("timeline", None)
         plan.pop("estimate", None)
+        plan.pop("purge_pairs", None)
     return plan
+
+
+def purge_pair_table(ctx, events, assignment):
+    """The editable purge-pair table for one plan: for every set of colours
+    that swap in and out of the SAME head (so only changes within the ACE -
+    a stock-feeder colour never swaps and never appears), the purge each
+    FROM->TO transition gets and what it would get without an override.
+
+    Colour-keyed, never slot-keyed: the table is read against the colours
+    the slicer asked for, and an override follows the filament rather than
+    the slot it is loaded in. `mm` is what this plan will purge (override
+    taken as-is, anything else scaled); `default_mm` the same without an
+    override, i.e. what clearing the cell would give back.
+    """
+    pp = ctx["_pp"]
+    model = ctx["model"]
+    colors = ctx["colors"]
+    materials = ctx["materials"]
+    matrix = ctx.get("stamp_matrix")
+    if matrix is None:
+        matrix = ctx.get("flush_matrix")
+    stamp_fn = getattr(pp, "_matrix_purge_mm", None)
+    used = set(events or [])
+    by_head = {}
+    for t in sorted(used):
+        e = (assignment or {}).get(t)
+        if not e or e.get("kind") != "ace" or e.get("slot") == "feeder":
+            continue
+        by_head.setdefault(e.get("head"), []).append(t)
+    groups = []
+    for head in sorted(h for h in by_head if h is not None):
+        members, seen = [], set()
+        for t in by_head[head]:
+            hx = _swap_cost.norm_color(colors.get(t))
+            if hx is None or hx in seen:
+                continue
+            seen.add(hx)
+            members.append((t, hx))
+        if len(members) < 2:
+            continue
+        pairs = []
+        for ft, fh in members:
+            for tt, th in members:
+                if ft == tt:
+                    continue
+                stamp = None
+                if stamp_fn is not None and matrix is not None:
+                    stamp = stamp_fn(matrix, ft, tt)
+                kw = dict(stamp_mm=stamp, from_color=colors.get(ft),
+                          to_color=colors.get(tt), material=materials.get(tt))
+                pairs.append({
+                    "from": fh, "to": th, "from_t": ft, "to_t": tt,
+                    "mm": round(model.resolve_swap_purge_mm(
+                        "cross_ace_inline", **kw), 1),
+                    "default_mm": round(model.resolve_swap_purge_mm(
+                        "cross_ace_inline", use_override=False, **kw), 1),
+                    "override_mm": model.pair_override_mm(
+                        colors.get(ft), colors.get(tt)),
+                })
+        groups.append({
+            "head": head,
+            "colors": [{"t": t, "hex": hx,
+                        "name": pp.approx_color_name("#" + hx) or ""}
+                       for t, hx in members],
+            "pairs": pairs,
+        })
+    return {"groups": groups, "scale_pct": model.purge_scale_pct,
+            "matrix": model.purge_matrix}
 
 
 def ctx_timeline(ctx, events, assignment):
@@ -275,9 +376,11 @@ def ctx_timeline(ctx, events, assignment):
                   cost_model=ctx["model"], colors=ctx["colors"],
                   materials=ctx["materials"])
     try:
+        matrix = ctx.get("stamp_matrix")
+        if matrix is None:
+            matrix = ctx.get("flush_matrix")
         return pp.build_swap_timeline(
-            events, assignment, flush_matrix=ctx.get("flush_matrix"),
-            **kwargs)
+            events, assignment, flush_matrix=matrix, **kwargs)
     except TypeError:
         # An older installed post-processor has no flush_matrix kwarg yet -
         # soft-degrade to its colour-distance guess rather than lose the
@@ -285,10 +388,10 @@ def ctx_timeline(ctx, events, assignment):
         return pp.build_swap_timeline(events, assignment, **kwargs)
 
 
-def recompute_estimate(capture, *, mapping=None, target_ids=None):
-    """Recompute {estimate, timeline} for a user-edited mapping/assignment,
-    reusing the estimate ctx captured at analyze time (see `estimate_capture`
-    on `build_report`/`head_mode_preview`).
+def recompute_estimate(capture, *, mapping=None, target_ids=None, plan=None):
+    """Recompute {estimate, timeline, purge_pairs} for a user-edited
+    mapping/assignment, reusing the estimate ctx captured at analyze time
+    (see `estimate_capture` on `build_report`/`head_mode_preview`).
 
     This is the money/time counterpart of the live swap-count recalc the
     frontend already runs on every mapping-dropdown change - without it,
@@ -296,6 +399,10 @@ def recompute_estimate(capture, *, mapping=None, target_ids=None):
     numbers for the ORIGINAL mapping. Returns None when no ctx was captured
     (no estimate to begin with - an older post-processor, or the file's
     header didn't parse), matching attach_estimate's soft-degrade.
+
+    `plan` names the plan being edited ("slicer"/"loadout"): its stored
+    inputs are replaced by the edited ones, so a later purge-setting change
+    (recompute_all_estimates) re-runs the user's mapping, not the original.
     """
     ctx = (capture or {}).get("ctx")
     if not ctx:
@@ -310,13 +417,67 @@ def recompute_estimate(capture, *, mapping=None, target_ids=None):
     else:
         assignment = assignment_from_mapping(mapping or [])
         price_mapping = mapping or []
-    plan = {"feasible": True, "mapping": price_mapping}
-    attach_estimate(ctx, plan, capture.get("events") or [], assignment)
-    return {"estimate": plan.get("estimate"), "timeline": plan.get("timeline")}
+    scratch = {"feasible": True, "mapping": price_mapping}
+    events = capture.get("events") or []
+    attach_estimate(ctx, scratch, events, assignment)
+    ctx["plan_inputs"].pop(id(scratch), None)
+    live = (capture.get("plans") or {}).get(plan) if plan else None
+    if live is not None:
+        ctx["plan_inputs"][id(live)] = {
+            "events": events, "assignment": assignment,
+            "price_mapping": price_mapping}
+    return {"estimate": scratch.get("estimate"),
+            "timeline": scratch.get("timeline"),
+            "purge_pairs": scratch.get("purge_pairs")}
+
+
+def ctx_with_params(ctx, cost_params):
+    """A copy of `ctx` whose cost model is rebuilt from new cost params
+    (the purge settings, in practice) - everything parsed from the gcode is
+    reused, and `plan_inputs` stays shared so edits keep landing."""
+    params = cost_params or {}
+    if "main" in params or "per_ace" in params:
+        main, per_ace = params.get("main") or {}, params.get("per_ace") or {}
+    else:
+        main, per_ace = params, {}
+    model = _swap_cost.SwapCostModel.from_params(main, per_ace)
+    if ctx.get("calibration"):
+        model = model.with_calibration(ctx["calibration"])
+    out = dict(ctx)
+    out["model"] = model
+    return out
+
+
+def recompute_all_estimates(capture, cost_params):
+    """Re-run EVERY plan's estimate/timeline/purge_pairs against new cost
+    params - the preflight's purge volume slider and pair table call this,
+    so the plans stay comparable with each other while the numbers move.
+    Returns {plan_name: {estimate, timeline, purge_pairs}}; None when no
+    ctx was captured."""
+    ctx = (capture or {}).get("ctx")
+    if not ctx or _swap_cost is None:
+        return None
+    new_ctx = ctx_with_params(ctx, cost_params)
+    capture["ctx"] = new_ctx
+    out = {}
+    for name, plan in (capture.get("plans") or {}).items():
+        inputs = ctx["plan_inputs"].get(id(plan))
+        if not inputs:
+            continue
+        scratch = {"feasible": True, "mapping": inputs["price_mapping"]}
+        attach_estimate(new_ctx, scratch, inputs["events"],
+                        inputs["assignment"])
+        new_ctx["plan_inputs"].pop(id(scratch), None)
+        res = {"estimate": scratch.get("estimate"),
+               "timeline": scratch.get("timeline"),
+               "purge_pairs": scratch.get("purge_pairs")}
+        plan.update({k: v for k, v in res.items() if v is not None})
+        out[name] = res
+    return out
 
 
 def make_purge_callback(cost_params, slicer_colors, slicer_types,
-                        purge_dest=None, assignment=None):
+                        purge_dest=None):
     """A (head, ace, slot, from_t, to_t, stamp_mm=None) -> mm callback for
     the rewrite, resolving through swap_cost.resolve_swap_purge_mm (§1.6) -
     the same function the estimate uses, so an inline swap purges exactly
@@ -325,11 +486,8 @@ def make_purge_callback(cost_params, slicer_colors, slicer_types,
     `purge_dest` is accepted but no longer gates this: a prime tower or a
     flush target is the SLICER's own purge, a separate physical event from
     the ACE swap's own chute purge (see swap_cost.purge_destination), so
-    it never should have suppressed this. `assignment` (head-mode's
-    {t: entry}) resolves `from_t`'s own current PHYSICAL slot, for pair
-    overrides keyed by "ace:slot" - the Config-tab purge table is set
-    before a user knows which colour lands where, so it has to be keyed on
-    the slot, not the slicer's tool index.
+    it never should have suppressed this. Colour-pair overrides are matched
+    on the slicer colours of `from_t`/`to_t`.
     """
     if _swap_cost is None:
         return None
@@ -340,18 +498,10 @@ def make_purge_callback(cost_params, slicer_colors, slicer_types,
             main, params.get("per_ace") or {})
     except Exception:
         return None
-    assignment = assignment or {}
-
-    def _phys_key(t):
-        e = assignment.get(t)
-        if e and e.get("kind") == "ace":
-            return "%s:%s" % (e.get("ace"), e.get("slot"))
-        return None
 
     def purge_mm_for(head, ace, slot, from_t, to_t, stamp_mm=None):
         return model.resolve_swap_purge_mm(
-            "cross_ace_inline", from_key=_phys_key(from_t),
-            to_key="%s:%s" % (ace, slot), stamp_mm=stamp_mm,
+            "cross_ace_inline", stamp_mm=stamp_mm,
             from_color=(slicer_colors or {}).get(from_t),
             to_color=(slicer_colors or {}).get(to_t),
             material=(slicer_types or {}).get(to_t))
@@ -771,7 +921,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         pp, header_text, cost_params=cost_params, calibration=calibration,
         slicer_colors=slicer_colors, slicer_types=slicer_types,
         event_times=event_times, bg_heads=bg_heads, spool_prices=spool_prices,
-        flush_matrix=flush_matrix)
+        flush_matrix=flush_matrix, stamp_matrix=_stamp_matrix(pp, plan_proxy))
     if estimate_capture is not None:
         estimate_capture["ctx"] = estimate_ctx
         estimate_capture["events"] = events
@@ -802,6 +952,8 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
             "swaps": pp.head_mode_swap_count(events, assignment),
             "mapping": loadout_mapping},
     }
+    if estimate_capture is not None:
+        estimate_capture["plans"] = plans
     bg_loadout = _bg_stats_for(pp, events, assignment, event_times, bg_heads,
                                cost_model=(estimate_ctx or {}).get("model"))
     if bg_loadout is not None:
@@ -959,14 +1111,16 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
                 flush_matrix = _pfm(plan_proxy)
             except Exception:
                 flush_matrix = None
+        stamp_matrix = _stamp_matrix(pp, plan_proxy)
         estimate_ctx = make_estimate_ctx(
             pp, header_text, cost_params=cost_params, calibration=calibration,
             slicer_colors=slicer_colors, slicer_types=slicer_types,
             event_times=ev_times, bg_heads=bg_heads, spool_prices=spool_prices,
-            flush_matrix=flush_matrix)
+            flush_matrix=flush_matrix, stamp_matrix=stamp_matrix)
         if estimate_capture is not None:
             estimate_capture["ctx"] = estimate_ctx
             estimate_capture["events"] = out["events"]
+            estimate_capture["plans"] = out["plans"]
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
                 pp, mode, result, mapping,
@@ -1120,8 +1274,7 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
             except Exception:
                 _purge_dest = None
         _purge_for = make_purge_callback(
-            cost_params, slicer_colors, slicer_types, _purge_dest,
-            assignment=assignment)
+            cost_params, slicer_colors, slicer_types, _purge_dest)
         try:
             pp.rewrite_head_mode_to_file(
                 str(src_path), str(tmp_a), assignment, None,

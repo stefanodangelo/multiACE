@@ -863,6 +863,11 @@ class AceBgSwap:
         anti_ooze = gcmd.get_float('ANTI_OOZE', -1.)
 
         purge = gcmd.get_float('PURGE', None, minval=0., maxval=200.)
+        if purge is not None and not getattr(
+                self.printer.lookup_object('ace', None), 'purge_matrix', True):
+            # Per-pair purge switched off: fixed purge again, also on files
+            # that already carry stamps (same as ACE_SWAP_HEAD's PURGE=).
+            purge = None
 
         def _refuse(msg):
 

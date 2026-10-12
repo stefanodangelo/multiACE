@@ -773,7 +773,9 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 /* Checkbox + caption as the row's CONTROL (second grid cell), so it lines up
    with the inputs above instead of reading as a second row label. */
 .config-inline-check { display: inline-flex; align-items: center; gap: .4rem; }
-.config-inline-check input { width: auto; }
+/* Not the checkbox: its pill width is set globally, and `width:auto` here
+   (same specificity, later) collapsed it to a 2px sliver. */
+.config-inline-check input:not([type="checkbox"]) { width: auto; }
 .config-row-hint { margin: -.2rem 0 .6rem 0; }
 /* Group separator inside the parameter form (transport | dryer | spoolman). */
 .config-sep { border-top: 1px solid var(--border); margin: 1rem 0 .9rem 0; }
@@ -791,7 +793,11 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
               margin-right: .4rem; max-width: 14ch; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap;
               display: inline-block; vertical-align: middle; }
-.config-row input, .config-row select {
+/* NOT checkboxes: this rule has the same specificity as the global
+   pill-switch rule near the top of the file and comes later, so it used to
+   win and stretch every toggle that sits in a .config-row (per-pair purge,
+   Spoolman auto-sync) into a 200px-wide box with the thumb adrift. */
+.config-row input:not([type="checkbox"]), .config-row select {
   padding: .4rem .6rem; background: #111; color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px; font-size: .9rem;
   width: 100%; max-width: 200px;
@@ -2474,3 +2480,40 @@ html.rail-tight .rail-conn { justify-content: center; padding: .2rem 0; }
 .config-log-inline { margin: .4rem 0 .8rem; padding: .5rem .6rem;
   background: var(--card); border: 1px solid var(--border);
   border-radius: 4px; white-space: pre-wrap; font-size: .8rem; }
+
+/* --- Purge control (Config tab + preflight): volume % and the per-colour-
+   pair override grid. ------------------------------------------------------ */
+.purge-sub { margin: .2rem 0 .4rem 1.1rem; padding-left: .8rem;
+             border-left: 2px solid var(--border); }
+.purge-group { margin: .3rem 0 .7rem 0; overflow-x: auto; }
+.purge-grid { border-collapse: collapse; font-size: .8rem; }
+.purge-grid th { font-weight: 500; color: var(--muted); text-align: left;
+                 padding: .15rem .45rem; white-space: nowrap; }
+.purge-grid thead th, .purge-grid tr:first-child th { text-align: center; }
+.purge-grid th.purge-corner { font-size: .7rem; opacity: .7; text-align: left; }
+.purge-grid td { padding: .15rem .25rem; text-align: center; }
+.purge-dot { display: inline-block; width: .75em; height: .75em;
+             border-radius: 50%; margin-right: .35em; vertical-align: -.05em;
+             border: 1px solid var(--border); }
+.purge-diag { opacity: .35; }
+input.purge-cell { width: 4.2rem; padding: .25rem .35rem; text-align: right;
+                   background: #111; color: var(--fg); font-size: .85rem;
+                   border: 1px solid var(--border); border-radius: 4px; }
+input.purge-cell::placeholder { color: var(--muted); opacity: .75; }
+input.purge-cell.override { border-color: var(--accent); }
+.purge-clear { padding: .1rem .5rem; font-size: .75rem; margin-left: .5rem;
+               background: transparent; color: var(--muted);
+               border: 1px solid var(--border); border-radius: 3px;
+               cursor: pointer; }
+.purge-clear:hover { color: var(--fg); border-color: var(--accent); }
+.purge-scale-ctl { display: inline-flex; align-items: center; gap: .4rem; }
+.purge-scale-ctl input[type="number"], .purge-ctl input[type="number"] {
+  width: 4.2rem; padding: .25rem .4rem; background: #111; color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; font-size: .85rem; }
+.purge-ctl { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+             margin: .4rem 0; }
+.purge-ctl-label { font-size: .8rem; color: var(--muted); }
+.purge-ctl input[type="range"], .purge-scale-ctl input[type="range"] {
+  width: 9rem; vertical-align: middle; }
+.purge-pairs-det { margin: .3rem 0; }
+.purge-warn { color: var(--warn, #e68232); margin: .2rem 0; }
