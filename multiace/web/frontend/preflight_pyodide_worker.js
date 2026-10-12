@@ -24,8 +24,12 @@
  *                        or more, streamed as the output file is read back
  *                        out of MEMFS - never one whole-file JS string)
  *   -> {type:"rewrite-done", jobId, resolvedSlots}      (+ {type:"progress"})
- *   <- {type:"estimate", jobId, mapping, targetIds}
- *   -> {type:"estimate-done", jobId, estimate, timeline}
+ *   <- {type:"estimate", jobId, plan, mapping, targetIds}
+ *   -> {type:"estimate-done", jobId, estimate, timeline, purgePairs}
+ *   <- {type:"estimate-all", jobId, costParams}   (purge settings changed)
+ *   -> {type:"estimate-all-done", jobId, plans}   ({plan: {estimate, timeline,
+ *                        purge_pairs}} for EVERY plan, each against the
+ *                        mapping the user last left it on)
  *   <- {type:"clear", jobId}        ->  {type:"cleared", jobId}
  *
  * liveSlots / headCtx are produced by the main thread from /multiace/api/state
@@ -234,15 +238,36 @@ json.dumps(_report)
 
 // Estimate: recompute {estimate, timeline} for an edited mapping/target
 // assignment, reusing the ctx captured by doAnalyze - no gcode re-parse.
-async function doEstimate(jobId, mapping, targetIds) {
+async function doEstimate(jobId, plan, mapping, targetIds) {
   const py = pyodide;
   py.globals.set("_job_id", jobId);
+  py.globals.set("_plan", plan || "");
   py.globals.set("_mapping", JSON.stringify(mapping || null));
   py.globals.set("_target_ids", JSON.stringify(targetIds || null));
   const resultJson = py.runPython(`
 _result = _core.recompute_estimate(
     _captures.get(_job_id),
-    mapping=json.loads(_mapping), target_ids=json.loads(_target_ids))
+    mapping=json.loads(_mapping), target_ids=json.loads(_target_ids),
+    plan=(_plan or None))
+json.dumps(_result)
+`);
+  return JSON.parse(resultJson);
+}
+
+// Estimate-all: the purge settings moved (volume %, a pair override) - re-run
+// EVERY plan against the new cost params, reusing the captured ctx. The new
+// params also become this worker's costParams, so a rewrite that follows
+// stamps what the user just saw.
+async function doEstimateAll(jobId, newCostParams) {
+  const py = pyodide;
+  if (newCostParams !== undefined && newCostParams !== null) {
+    costParams = newCostParams;
+  }
+  py.globals.set("_job_id", jobId);
+  py.globals.set("_cost", JSON.stringify(costParams || {}));
+  const resultJson = py.runPython(`
+_result = _core.recompute_all_estimates(
+    _captures.get(_job_id), json.loads(_cost))
 json.dumps(_result)
 `);
   return JSON.parse(resultJson);
@@ -368,11 +393,18 @@ self.onmessage = async (ev) => {
     }
     if (msg.type === "estimate") {
       await ensureInit(msg);
-      const r = await doEstimate(jobId, msg.mapping, msg.targetIds);
+      const r = await doEstimate(jobId, msg.plan, msg.mapping, msg.targetIds);
       self.postMessage({
         type: "estimate-done", jobId,
         estimate: r && r.estimate, timeline: r && r.timeline,
+        purgePairs: r && r.purge_pairs,
       });
+      return;
+    }
+    if (msg.type === "estimate-all") {
+      await ensureInit(msg);
+      const plans = await doEstimateAll(jobId, msg.costParams);
+      self.postMessage({type: "estimate-all-done", jobId, plans});
       return;
     }
     if (msg.type === "clear") {

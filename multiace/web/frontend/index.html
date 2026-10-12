@@ -1654,7 +1654,7 @@
                  min="0" max="2000" step="1" placeholder="900">
         </div>
         <div class="config-row">
-          <label>Swap purge length</label>
+          <label>{{ t('ui.config.swap_purge_length') }}</label>
           <input type="number" v-model.number="configForm.swap_purge_length"
                  min="0" max="200" step="1" placeholder="0">
         </div>
@@ -1693,6 +1693,67 @@
                   :title="infoShown('purge_matrix') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
         </div>
         <p class="muted small config-row-hint" v-if="infoShown('purge_matrix')">{{ t('ui.config.purge_matrix_hint') }}</p>
+        <!-- §1.6 purge control. The pair grid belongs to the per-pair purge
+             switch above and only exists while it is on: it overrides the
+             slicer's per-pair numbers for colour changes WITHIN the ACE
+             (a stock-feeder colour never swaps, so it has no row). Every
+             edit is live and persisted (ACE_SET_PURGE PAIRS=), and the
+             same grid sits in the preflight, so its effect on time and
+             price is visible where it matters. -->
+        <div class="purge-sub" v-if="state.purge_matrix">
+          <div class="config-row">
+            <label>{{ t('ui.config.purge_pairs') }}</label>
+            <button type="button" class="info-btn"
+                    @click="toggleInfo('purge_pairs')" :aria-expanded="infoShown('purge_pairs')"
+                    :title="infoShown('purge_pairs') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
+            <button type="button" class="purge-clear" v-if="purgeOverrideCount()"
+                    @click="clearPairOverrides()">{{ t('ui.config.purge_pairs_clear') }}</button>
+          </div>
+          <p class="muted small config-row-hint" v-if="infoShown('purge_pairs')">{{ t('ui.config.purge_pairs_hint') }}</p>
+          <p class="muted small" v-if="!purgeGridFromLoadout().length">{{ t('ui.config.purge_pairs_none') }}</p>
+          <div class="purge-group" v-for="g in purgeGridFromLoadout()" :key="g.key">
+            <div class="muted small">{{ g.label }}</div>
+            <table class="purge-grid">
+              <tr>
+                <th class="purge-corner">{{ t('ui.config.purge_from_to') }}</th>
+                <th v-for="c in g.colors" :key="'ph-' + c.hex" :title="'#' + c.hex">
+                  <span class="purge-dot" :style="{background: '#' + c.hex}"></span>{{ c.name }}
+                </th>
+              </tr>
+              <tr v-for="f in g.colors" :key="'pr-' + f.hex">
+                <th :title="'#' + f.hex">
+                  <span class="purge-dot" :style="{background: '#' + f.hex}"></span>{{ f.name }}
+                </th>
+                <td v-for="c in g.colors" :key="'pc-' + c.hex">
+                  <span v-if="c.hex === f.hex" class="purge-diag">–</span>
+                  <input v-else type="number" min="0" max="2000" step="1"
+                         class="purge-cell"
+                         :class="{override: g.cells[f.hex + '>' + c.hex].override}"
+                         :value="g.cells[f.hex + '>' + c.hex].value"
+                         :placeholder="g.cells[f.hex + '>' + c.hex].placeholder"
+                         @change="setPairOverride(f.hex, c.hex, $event.target.value)">
+                </td>
+              </tr>
+            </table>
+          </div>
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_scale') }}</label>
+          <span class="purge-scale-ctl">
+            <input type="range" min="10" max="200" step="5"
+                   :value="state.purge_scale_pct"
+                   @input="setPurgeScale($event.target.value)">
+            <input type="number" min="10" max="200" step="5"
+                   :value="state.purge_scale_pct"
+                   @change="setPurgeScale($event.target.value)">
+            <span class="muted small">%</span>
+          </span>
+          <button type="button" class="info-btn"
+                  @click="toggleInfo('purge_scale')" :aria-expanded="infoShown('purge_scale')"
+                  :title="infoShown('purge_scale') ? t('ui.common.info_hide') : t('ui.common.info_show')">i</button>
+        </div>
+        <p class="muted small config-row-hint" v-if="infoShown('purge_scale')">{{ t('ui.config.purge_scale_hint') }}</p>
+        <p class="small purge-warn" v-if="purgeCtl.error">{{ purgeCtl.error }}</p>
         <div class="config-sep"></div>
         <div class="config-row">
           <label>{{ t('ui.config.dryer_temp') }}</label>
@@ -2760,8 +2821,6 @@ reboot</pre>
                     · {{ t('ui.preflight.est_waste', {
                            g: selectedPlan().estimate.purge.g,
                            pct: wastePercent(selectedPlan().estimate) }) }}
-                    <span v-if="!selectedPlan().estimate.purge.counted_in_total">
-                      ({{ t('ui.preflight.est_purge_in_slicer') }})</span>
                   </span>
                   · {{ t('ui.preflight.est_swaps', {
                          inline: selectedPlan().estimate.inline_swaps,
@@ -2771,6 +2830,57 @@ reboot</pre>
                            price: selectedPlan().estimate.totals.price_eur.toFixed(2) }) }}
                   </span>
                 </div>
+                <!-- Purge: the same volume slider and pair grid as the Config
+                     tab, here so the effect on time and price is right in
+                     front of you. A change is saved to ace.cfg AND re-runs
+                     every plan, so the plans stay comparable. -->
+                <div class="purge-ctl">
+                  <span class="purge-ctl-label">{{ t('ui.config.purge_scale') }}</span>
+                  <input type="range" min="10" max="200" step="5"
+                         :value="state.purge_scale_pct"
+                         @input="setPurgeScale($event.target.value)">
+                  <input type="number" min="10" max="200" step="5"
+                         :value="state.purge_scale_pct"
+                         @change="setPurgeScale($event.target.value)">
+                  <span class="muted small">%</span>
+                  <span class="muted small" v-if="purgeCtl.busy">…</span>
+                </div>
+                <p class="small purge-warn" v-if="purgeCtl.error">{{ purgeCtl.error }}</p>
+                <details v-if="selectedPlan().purge_pairs" class="purge-pairs-det">
+                  <summary class="muted small">{{ t('ui.preflight.purge_pairs') }}<template
+                    v-if="purgeOverrideCount()"> · {{ t('ui.preflight.purge_overrides', {n: purgeOverrideCount()}) }}</template></summary>
+                  <p class="muted small" v-if="!selectedPlan().purge_pairs.matrix">{{ t('ui.preflight.purge_pairs_off') }}</p>
+                  <p class="muted small" v-else-if="!purgeGridFromPlan(selectedPlan()).length">{{ t('ui.preflight.purge_pairs_none') }}</p>
+                  <template v-else>
+                    <div class="purge-group" v-for="g in purgeGridFromPlan(selectedPlan())" :key="'pg-' + g.key">
+                      <div class="muted small">{{ g.label }}</div>
+                      <table class="purge-grid">
+                              <tr>
+                                <th class="purge-corner">{{ t('ui.config.purge_from_to') }}</th>
+                                <th v-for="c in g.colors" :key="'ph-' + c.hex" :title="'#' + c.hex">
+                                  <span class="purge-dot" :style="{background: '#' + c.hex}"></span>{{ c.name }}
+                                </th>
+                              </tr>
+                              <tr v-for="f in g.colors" :key="'pr-' + f.hex">
+                                <th :title="'#' + f.hex">
+                                  <span class="purge-dot" :style="{background: '#' + f.hex}"></span>{{ f.name }}
+                                </th>
+                                <td v-for="c in g.colors" :key="'pc-' + c.hex">
+                                  <span v-if="c.hex === f.hex" class="purge-diag">–</span>
+                                  <input v-else type="number" min="0" max="2000" step="1"
+                                         class="purge-cell"
+                                         :class="{override: g.cells[f.hex + '>' + c.hex].override}"
+                                         :value="g.cells[f.hex + '>' + c.hex].value"
+                                         :placeholder="g.cells[f.hex + '>' + c.hex].placeholder"
+                                         @change="setPairOverride(f.hex, c.hex, $event.target.value)">
+                                </td>
+                              </tr>
+                    </table>
+                    </div>
+                    <button type="button" class="purge-clear" v-if="purgeOverrideCount()"
+                            @click="clearPairOverrides()">{{ t('ui.config.purge_pairs_clear') }}</button>
+                  </template>
+                </details>
                 <details v-if="selectedPlan().estimate.per_color.length">
                   <summary class="muted small">{{ t('ui.preflight.est_per_color') }}</summary>
                   <table class="estimate-per-color">

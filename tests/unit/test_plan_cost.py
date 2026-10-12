@@ -46,7 +46,8 @@ class TestBackwardsCompatibility:
         assert pp._model_bg_window(None) == pp.BG_UNLOAD_MIN_WINDOW_MIN
 
     def test_no_model_means_no_purge(self):
-        assert pp._model_purge_mm(None, "#000000", "#ffffff", "PLA") == 0.0
+        assert pp._model_purge_mm(
+            None, "cross_ace_inline", "#000000", "#ffffff", "PLA") == 0.0
 
     def test_a_model_that_raises_falls_back_to_the_constants(self):
         class Broken:
@@ -69,12 +70,14 @@ class TestBackwardsCompatibility:
 
     def test_an_older_model_without_purge_mm_for_still_purges(self):
         """A post-processor newer than the installed swap_cost.py (no
-        purge_mm_for yet) must fall back to purge_mm, not lose purge."""
+        resolve_swap_purge_mm/purge_mm_for yet) must fall back to
+        purge_mm, not lose purge."""
         class OldModel:
             def purge_mm(self, *a, **kw):
                 return 42.0
-        got = pp._model_purge_mm(OldModel(), "#000000", "#ffffff", None,
-                                 from_t=0, to_t=1, flush_matrix=[[0, 1]])
+        got = pp._model_purge_mm(
+            OldModel(), "cross_ace_inline", "#000000", "#ffffff", None,
+            from_t=0, to_t=1, flush_matrix=[[0, 1]])
         assert got == 42.0
 
 
@@ -173,22 +176,28 @@ class TestTimeline:
         assert swap["purge_mm"] > 20
 
     def test_a_flush_matrix_supplies_the_real_purge_number(self, model):
-        """The slicer already computed exactly how much T0->T1 needs -
-        that has to win over the colour-distance guess (which is 0 mm here,
-        purge_color_aware being off in CFG)."""
+        """The timeline's purge_mm has to be exactly the stamp the rewrite
+        will write for this pair (_matrix_purge_mm: 0.45x top-up, clamped
+        40-150 mm) - not the slicer's raw, un-topped-up matrix cell, which
+        is more than the engine actually purges for this transition."""
         matrix = [[0, 150], [90, 0]]
         tl = pp.build_swap_timeline(
             [0, 1], {0: ace(0, 0, 0), 1: ace(0, 0, 1)},
             cost_model=model, flush_matrix=matrix)
         swap = [e for e in tl if e["kind"] == "same_ace"][-1]
         assert swap["purge_mm"] == pytest.approx(
-            sc.mm3_to_mm(150, sc.DEFAULT_DIAMETER_MM), abs=0.1)
+            pp._matrix_purge_mm(matrix, 0, 1), abs=0.1)
 
-    def test_no_flush_matrix_keeps_the_old_behaviour(self, model):
+    def test_no_flush_matrix_falls_back_to_the_stock_default(self, model):
+        """swap_purge_length=0 and purge_color_aware off (CFG's defaults)
+        used to resolve to a reported 0 mm, but the engine's own
+        INNER_FLUSH_FILAMENT macro purges STOCK_FLUSH_DEFAULT_MM (80 mm)
+        whenever no LENGTH= stamp is written - the timeline has to match
+        what actually comes out of the nozzle, not a config guess."""
         tl = pp.build_swap_timeline(
             [0, 1], {0: ace(0, 0, 0), 1: ace(0, 0, 1)}, cost_model=model)
         swap = [e for e in tl if e["kind"] == "same_ace"][-1]
-        assert swap["purge_mm"] == 0.0
+        assert swap["purge_mm"] == sc.STOCK_FLUSH_DEFAULT_MM
 
 
 class TestPlacementBeatsSwapCount:
@@ -263,13 +272,55 @@ class TestPurgeEmission:
         assert seen[0][0] is None
         assert any(f is not None for f, _t in seen)
 
+    def test_the_callback_receives_the_matrix_stamp(self, tmp_path):
+        """An inline swap used to get no per-pair stamp at all - the
+        rewrite now computes the same _matrix_purge_mm top-up a
+        background swap already gets and hands it to the callback, which
+        can prefer it over its own guess (see swap_cost.
+        resolve_swap_purge_mm's precedence)."""
+        seen = []
 
-def _rewrite(tmp_path, purge_mm_for):
-    """Run the head-mode rewrite over a tiny two-colour file."""
+        def spy(head, a, slot, from_t, to_t, stamp_mm=None):
+            seen.append(stamp_mm)
+            return stamp_mm
+
+        _rewrite(tmp_path, purge_mm_for=spy,
+                flush_matrix=[[0, 150], [150, 0]])
+        # The first swap on a head has no outgoing colour, so no stamp;
+        # the later one is T1->T0, inside the matrix, so it gets one.
+        assert any(s is not None for s in seen)
+
+    def test_an_older_callback_without_stamp_mm_still_works(self, tmp_path):
+        """A purge_mm_for from an older preflight_core (no stamp_mm kwarg
+        yet) must not lose its purge to a TypeError - version-skew
+        tolerance, same contract as every other *_to_file kwarg here."""
+        out = _rewrite(tmp_path, purge_mm_for=lambda *a: 77,
+                       flush_matrix=[[0, 150], [150, 0]])
+        assert "PURGE=77" in out
+
+    def test_no_callback_still_stamps_from_the_matrix(self, tmp_path):
+        """With purge_color_aware off (purge_mm_for is None in that case),
+        an inline swap still gets the slicer's own per-pair number
+        instead of silently falling through to the flat engine default."""
+        out = _rewrite(tmp_path, purge_mm_for=None,
+                       flush_matrix=[[0, 150], [150, 0]])
+        assert "PURGE=" in out
+
+
+def _rewrite(tmp_path, purge_mm_for, flush_matrix=None):
+    """Run the head-mode rewrite over a tiny two-colour file.
+
+    `flush_matrix`, when given, is written into the header as the
+    slicer's own `flush_volumes_matrix` line - rewrite_head_mode_to_file
+    parses that straight out of the file, same as the real pipeline."""
+    header = ("; filament_colour = #000000;#ffffff\n"
+             "; filament_type = PLA;PLA\n")
+    if flush_matrix is not None:
+        flat = ",".join(str(v) for row in flush_matrix for v in row)
+        header += "; flush_volumes_matrix = %s\n" % flat
     src = tmp_path / "in.gcode"
     src.write_text(
-        "; filament_colour = #000000;#ffffff\n"
-        "; filament_type = PLA;PLA\n"
+        header +
         "; EXECUTABLE_BLOCK_START\n"
         "T0\n"
         "G1 X1 Y1 E1\n"

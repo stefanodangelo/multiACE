@@ -6,9 +6,42 @@
 
 - The camera feed in the Dashboard tab isn't working.
 - Starting the ACE 2 Pro dryer directly above 50 °C can trigger a `ptc_error` in the ACE firmware, requiring a power cycle. Firmware limitation, hit by automatic humidity control whenever it restarts the heater at a stored higher target. Next release works around it with a soft ramp (50 °C, then raise to target after a few minutes).
-- Per-pair purge in the Web UI shows as unchecked even when active. Enable via `ACE_SET_PURGE MATRIX=1` in the Fluidd console; WebUI fix planned.
 
 ## What's new in 0.99.17b "Star Turn" (since 0.99.16b)
+
+- **The preflight estimate now bills the ACE's own purge** — every ACE
+  swap retracts, changes spool and purges through the hotend's chute
+  (`INNER_FLUSH_FILAMENT`), which is real filament and real time the
+  estimate used to miss: a prime-tower/flush header falsely read as
+  "the slicer already paid for this" (a disabled Snapmaker Orca tower
+  still writes non-zero width lines, so a real print showed purge
+  grams bigger than its own total filament), and a swap with no purge
+  length configured silently modelled zero even though the engine's
+  own macro purges 80 mm by default. Both are fixed: the ACE's chute
+  purge is now always added on top of whatever the slicer's own
+  tower/flush did with its own filament, and a swap with nothing
+  configured reports that 80 mm default instead of a false zero. A
+  plan with fewer swaps now visibly costs less time and money, not an
+  identical total with the purge quietly dropped.
+- **Purge volume + per-colour-pair purge** — a "Purge volume %" slider
+  (10–200%, 100% = unchanged) scales every default purge length live, no
+  restart, in the real print and in the preflight estimate. With
+  **Per-pair purge** on, a grid appears under it for the colour changes
+  that actually happen *inside* the ACE (a colour on a stock feeder never
+  swaps, so it has no row), built from the current loadout and labelled by
+  colour; empty cells show the slicer's own number for that pair, a typed
+  value pins the purge to exactly that many mm (the slider doesn't scale
+  it). Overrides are keyed by colour, so they follow the filament rather
+  than the slot, and live in `ace.cfg` (`purge_pair_mm`). The same slider
+  and grid sit in the preflight's estimate card: every change is saved and
+  re-runs all plans on the spot, so the effect on time and price is right
+  there. An inline (foreground) ACE swap is now also stamped from the
+  slicer's flush matrix, the way a background swap already was.
+- Fixed the "Per-pair purge" (purge_matrix) Config-tab switch always
+  showing unchecked regardless of the live value (previous known issue),
+  and rendering as a wide rectangle instead of a pill. Switching it off now
+  also makes the engine ignore `PURGE=` stamps on head-mode swaps, as the
+  hint always promised.
 
 Print-analysis plan, in full: three features sharing one data layer, shipped
 as three PRs but documented together here since none of them had a

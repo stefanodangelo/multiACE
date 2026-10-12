@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from .test_load_retry import ace_module  # noqa: F401  (module fixture)
+from .test_load_retry import ace_module, FakeGcmd  # noqa: F401
 
 
 @pytest.fixture
@@ -24,6 +24,10 @@ def ace(ace_module):
     a.swap_purge_min = 0
     a.purge_bin_capacity_mm = 0
     a.purge_color_aware = False
+    a.purge_scale_pct = 100
+    a.purge_pair_mm = {}
+    a._purge_scale_cfg = 100
+    a._purge_pair_mm_cfg = ''
     a._purge_length_override = None
     a._swap_purge_mm = None
     a.messages = []
@@ -134,8 +138,69 @@ class TestGetPurgeLength:
         ace._purge_length_override = 900
         assert ace.get_purge_length() == 40
 
-    def test_zero_means_use_the_stock_default(self, ace):
-        assert ace.get_purge_length() == 0
+    def test_zero_means_use_the_stock_default(self, ace, ace_module):
+        """swap_purge_length=0 (the shipped default) used to mean "say
+        nothing and let the macro's own 80 mm default apply" - that
+        default is now made explicit so purge_scale_pct can still act on
+        it (see effective_purge_mm)."""
+        assert ace.get_purge_length() == ace_module.STOCK_FLUSH_DEFAULT_MM
+
+    def test_the_stock_default_is_scaled_too(self, ace, ace_module):
+        ace.purge_scale_pct = 70
+        assert ace.get_purge_length() == pytest.approx(
+            ace_module.STOCK_FLUSH_DEFAULT_MM * 0.7, abs=1)
+
+    def test_an_explicit_zero_override_is_also_the_scaled_stock_default(
+            self, ace, ace_module):
+        """LENGTH=0 is documented as "use the stock default" - it has to
+        resolve the SAME way swap_purge_length's own 0 does, or it would
+        silently escape purge_scale_pct (a literal 0 here reads as "omit
+        LENGTH=" to the caller, which then falls through to the macro's
+        own UNSCALED 80 mm)."""
+        ace._purge_length_override = 0
+        ace.purge_scale_pct = 70
+        assert ace.get_purge_length() == pytest.approx(
+            ace_module.STOCK_FLUSH_DEFAULT_MM * 0.7, abs=1)
+
+    def test_pair_overrides_are_the_preflights_job_not_the_engines(self, ace):
+        """Overrides are keyed by colour, which the engine cannot see
+        mid-print: the preflight resolves them into explicit PURGE= stamps,
+        and get_purge_length's own fallback ignores them."""
+        ace.swap_purge_length = 35
+        ace.purge_pair_mm = {"0047ab>d94040": 60}
+        assert ace.get_purge_length() == 35
+
+
+class TestSetPurgeCommand:
+    """ACE_SET_PURGE SCALE=/PAIRS= (§1.6/Config-tab) - the live,
+    write-through setters the Config tab calls, same pattern as
+    MATRIX=/PERSIST= already use."""
+
+    def test_scale_applies_immediately(self, ace):
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(SCALE=70, PERSIST=0))
+        assert ace.purge_scale_pct == 70
+        assert ace.get_purge_length() == pytest.approx(56, abs=1)
+
+    def test_pairs_applies_immediately(self, ace):
+        ace.cmd_ACE_SET_PURGE(
+            FakeGcmd(PAIRS="0047ab>d94040=60,d94040>0047ab=110", PERSIST=0))
+        assert ace.purge_pair_mm == {"0047ab>d94040": 60.0,
+                                     "d94040>0047ab": 110.0}
+
+    def test_an_empty_pairs_clears_overrides(self, ace):
+        ace.purge_pair_mm = {"0047ab>d94040": 60.0}
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(PAIRS="", PERSIST=0))
+        assert ace.purge_pair_mm == {}
+
+    def test_the_word_none_clears_overrides_too(self, ace):
+        """Klipper may drop an empty PAIRS=, so the web sends a word."""
+        ace.purge_pair_mm = {"0047ab>d94040": 60.0}
+        ace.cmd_ACE_SET_PURGE(FakeGcmd(PAIRS="none", PERSIST=0))
+        assert ace.purge_pair_mm == {}
+
+    def test_neither_option_raises(self, ace):
+        with pytest.raises(Exception):
+            ace.cmd_ACE_SET_PURGE(FakeGcmd())
 
 
 class TestCanExtrudeGate:
@@ -154,3 +219,41 @@ class TestCanExtrudeGate:
         ace.toolhead = types.SimpleNamespace(
             get_extruder=lambda: (_ for _ in ()).throw(RuntimeError("no")))
         assert ace.purge_can_extrude() is False
+
+
+class _SwapGcmd:
+    """Just enough of a GCodeCommand for cmd_ACE_SWAP_HEAD's argument
+    parsing; HEAD=9 makes it stop right after the purge handling."""
+
+    def __init__(self, **params):
+        self.params = params
+
+    def get(self, name, default=None):
+        return self.params.get(name, default)
+
+    get_int = get_float = lambda self, name, default=None, **kw:         self.params.get(name, default)
+
+    def error(self, message="", **kw):
+        return RuntimeError(message)
+
+
+class TestPurgeStampsFollowThePerPairSwitch:
+    """Per-pair purge off = fixed purge again, also on files that already
+    carry PURGE= stamps (the Config-tab hint promises exactly that)."""
+
+    def _swap(self, ace):
+        ace.swap_anti_ooze_retract = 10
+        ace.purge_can_extrude = lambda head=None: True
+        ace.purge_bin_account = lambda mm: None
+        with pytest.raises(RuntimeError):
+            ace.cmd_ACE_SWAP_HEAD(_SwapGcmd(HEAD=9, PURGE=50))
+
+    def test_a_stamp_is_honoured_while_the_switch_is_on(self, ace):
+        ace.purge_matrix = True
+        self._swap(ace)
+        assert ace._swap_purge_mm == 50
+
+    def test_a_stamp_is_ignored_while_the_switch_is_off(self, ace):
+        ace.purge_matrix = False
+        self._swap(ace)
+        assert ace._swap_purge_mm is None
