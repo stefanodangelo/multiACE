@@ -598,7 +598,8 @@
         "warmup": "Aufheizen / Homing",
         "paused_error": "Pause — Fehler",
         "paused_user": "Pause — durch dich",
-        "crash_gap": "Wiederherstellung"
+        "crash_gap": "Wiederherstellung",
+        "stalled": "Festgehangen (Druck eingefroren)"
       },
       "source": {
         "measured": "gemessen",
@@ -644,6 +645,10 @@
         "pickup_conflict": {
           "title": "Werkzeugaufnahme fehlgeschlagen: widersprüchlicher Park-/Aufnahmestatus",
           "action": "Greifsensor-Verkabelung des Kopfes prüfen — meldet gleichzeitig geparkt und aufgenommen."
+        },
+        "print_hang": {
+          "title": "Der Druck ist eingefroren: kein Fortschritt bei weiter eingeschalteten Heizungen",
+          "action": "Die Beweiszeile zeigt, was die Engine beim Stillstand tat. Ein blockierter Befehl (z. B. ein M109, der auf eine Temperatur wartet) lässt sich nicht pausieren - Klipper neu starten und multiACE aktualisieren."
         },
         "host_stall_fatal": {
           "title": "Ein Host-Stall hat ein MCU-Shutdown ausgelöst",

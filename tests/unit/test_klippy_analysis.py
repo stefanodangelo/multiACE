@@ -145,3 +145,70 @@ class TestYearlessTimestamps:
         assert len(result["host_stalls"]) == 2
         a, b = result["host_stalls"]
         assert b["t"] - a["t"] == pytest.approx(15.0, abs=0.01)
+
+
+def _stats(t_str, pos, bed=65, e0=0, e1=50):
+    return ("%s:Stats 1000.0: gcodein=0  mcu: mcu_awake=0.010 sd_pos=%d "
+            "heater_bed: target=%d temp=65.0 pwm=0.0 extruder: target=%d "
+            "temp=29.0 pwm=0.0 extruder1: target=%d temp=60.0 pwm=0.0\n"
+            % (t_str, pos, bed, e0, e1))
+
+
+class TestPrintHangs:
+    """A file position that stops moving while heaters stay on is a hung
+    print (overnight 2026-10-12: an M109 whose target had been zeroed)."""
+
+    def _log(self, tmp_path, lines):
+        path = tmp_path / "klippy.log"
+        path.write_text("".join(lines), encoding="utf-8")
+        mtime = _ts(2026, 10, 13, 12, 0, 0)
+        os.utime(path, (mtime, mtime))
+        return str(tmp_path)
+
+    def _scan(self, d, hour0=21, hour1=23):
+        return ka.analyse_logs(d, _ts(2026, 10, 12, hour0, 0),
+                               _ts(2026, 10, 13, hour1, 0))
+
+    def test_a_frozen_position_with_heaters_on_is_a_hang(self, tmp_path):
+        lines = [_stats("10-12 21:59:57.000", 100),
+                 _stats("10-12 22:03:31.000", 500),
+                 "10-12 22:03:36.726:[multiACE] [bg-unload] head 1: LOAD "
+                 "FAILED (feed not confirmed by the device) - the arrival "
+                 "swap loads inline\n"]
+        for m in range(33, 60, 2):
+            lines.append(_stats("10-12 22:%02d:00.000" % m, 500))
+        for h in range(23, 24):
+            lines.append(_stats("10-12 %02d:30:00.000" % h, 500))
+        lines.append(_stats("10-13 06:30:00.000", 500))
+        lines.append(_stats("10-13 06:53:11.000", 0, bed=0, e1=0))
+        res = self._scan(self._log(tmp_path, lines))
+        assert len(res["print_hangs"]) == 1
+        h = res["print_hangs"][0]
+        assert h["position"] == 500
+        assert h["minutes"] > 400
+        assert "LOAD FAILED" in h["last_op"]
+
+    def test_an_idle_printer_is_not_a_hang(self, tmp_path):
+        """Position constant but every heater off: the printer is idle."""
+        lines = [_stats("10-12 22:%02d:00.000" % m, 500, bed=0, e1=0)
+                 for m in range(0, 60, 2)]
+        res = self._scan(self._log(tmp_path, lines))
+        assert res["print_hangs"] == []
+
+    def test_a_short_pause_in_progress_is_not_a_hang(self, tmp_path):
+        lines = [_stats("10-12 22:00:00.000", 500),
+                 _stats("10-12 22:05:00.000", 500),
+                 _stats("10-12 22:05:02.000", 900)]
+        assert self._scan(self._log(tmp_path, lines))["print_hangs"] == []
+
+    def test_heartbeat_lines_are_not_a_log_flood(self, tmp_path):
+        lines = [_stats("10-12 22:%02d:%02d.000" % (m, s), 500 + m)
+                 for m in range(0, 30) for s in (0, 20, 40)]
+        assert self._scan(self._log(tmp_path, lines))["log_flood"] is None
+
+    def test_progress_and_the_last_progress_time_are_reported(self, tmp_path):
+        lines = [_stats("10-12 22:00:00.000", 100),
+                 _stats("10-12 22:01:00.000", 200)]
+        res = self._scan(self._log(tmp_path, lines))
+        assert res["last_progress_t"] == pytest.approx(
+            _ts(2026, 10, 12, 22, 1, 0))

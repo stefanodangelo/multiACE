@@ -42,6 +42,16 @@ COLD_PULL_SOFT = [
 CHOREO_ACCEL = 300.
 HEAT_TIMEOUT = 240.
 HEAT_HYST = 4.0
+
+# A heater target at or above this is a PRINTING temperature, set by the
+# print itself (the arrival M104/M109 of the toolchange this swap is
+# preparing). Below it, a target is a slicer standby/cooldown that the
+# background swap may legitimately override. Overnight 2026-10-12 the swap's
+# failure cleanup zeroed a heater the print had just set to 200 and was
+# waiting on in M109 - which never returns with the target at 0, so the
+# print hung for 9 h.
+ACTIVE_TEMP_MIN_C = 170.
+HEAT_OWN_TOL_C = 1.0
 ACE_UNWIND_SPEED_FALLBACK = 80
 MOVE_SETTLE = 0.30
 
@@ -57,6 +67,13 @@ SCHEDULE_EPS = 0.050
 MAX_DISTANCE = 200.
 MAX_VELOCITY = 60.
 MAX_ACCEL = 2000.
+
+class ArrivalImminent(RuntimeError):
+    """The print took over this head's heater (an arrival M104/M109 set a
+    printing temperature that is not ours): the background swap steps aside
+    and the inline arrival swap takes over - same hand-over as the
+    'PICKED mid-sequence' abort."""
+
 
 class ToolheadNotClear(RuntimeError):
     """bg unload: the ACE-side retract verified clean (decoder) but the
@@ -106,6 +123,13 @@ class AceBgSwap:
 
         self.state = {}
         self._busy = set()
+        # head -> the target THIS module last set on the head's heater (None
+        # = we hold none). Anything else on the heater is the print's.
+        self._bg_heat = {}
+        # head -> the heater target found when the swap began (a parked head
+        # can keep a printing temperature of its own; that is not the print
+        # taking the head over).
+        self._bg_baseline = {}
 
         self._dwell_fan_prev = {}
 
@@ -302,6 +326,63 @@ class AceBgSwap:
             if attempt < retries - 1:
                 self._pause(backoff)
         return False
+
+    def _heater_target(self, heater):
+        try:
+            return float(heater.get_temp(self.reactor.monotonic())[1])
+        except Exception:
+            try:
+                return float(getattr(heater, 'target_temp', 0.))
+            except Exception:
+                return 0.
+
+    def _print_owns_heater(self, head, heater):
+        """True when the heater holds a printing temperature that this
+        module did not set - i.e. the print has taken the head over."""
+        tgt = self._heater_target(heater)
+        if tgt < ACTIVE_TEMP_MIN_C:
+            return False
+        for known in (self._bg_heat.get(head), self._bg_baseline.get(head)):
+            if known is not None and abs(tgt - known) <= HEAT_OWN_TOL_C:
+                return False
+        return True
+
+    def _check_heater_yield(self, head, heater):
+        if self._print_owns_heater(head, heater):
+            raise ArrivalImminent(
+                'head %d: the print took over the heater (target %.0f) - '
+                'aborted, the arrival swap takes over'
+                % (self._dh(head), self._heater_target(heater)))
+
+    def _bg_set_heat(self, head, heater, pheaters, temp):
+        self._check_heater_yield(head, heater)
+        pheaters.set_temperature(heater, temp)
+        self._bg_heat[head] = float(temp)
+
+    def _bg_release_heat(self, head, heater, pheaters):
+        """Switch OUR heating off - but never a target the print set."""
+        try:
+            if self._print_owns_heater(head, heater):
+                tgt = self._heater_target(heater)
+                self._bg_heat.pop(head, None)
+                self._say('head %d: leaving the heater at %.0f (the print '
+                          'owns it)' % (self._dh(head), tgt))
+                return
+        except Exception:
+            pass
+        self._bg_heat.pop(head, None)
+        try:
+            pheaters.set_temperature(heater, 0.)
+        except Exception:
+            pass
+
+    def _bg_swap_begin(self, head, heater):
+        self._bg_heat.pop(head, None)
+        self._bg_baseline[head] = self._heater_target(heater)
+
+    def _bg_swap_end(self, head):
+        self._bg_heat.pop(head, None)
+        self._bg_baseline.pop(head, None)
 
     def _check_docked(self, toolhead, ext, head):
 
@@ -1018,6 +1099,7 @@ class AceBgSwap:
         heater = ext.get_heater()
         pheaters = self.printer.lookup_object('heaters')
         retract_done = {'v': False}
+        self._bg_swap_begin(head, heater)
         try:
             self._unload_core(head, ace, toolhead, ext, heater, pheaters,
                               ace_idx, slot, temp, soft, retract_done)
@@ -1031,14 +1113,12 @@ class AceBgSwap:
         finally:
             self._dwell_fan(ace, head, False)
             self._busy.discard(head)
+            self._bg_swap_end(head)
 
     def _fail_unload(self, head, heater, pheaters, e, retract_done):
         reason = str(e) or e.__class__.__name__
         self.state[head] = 'FAILED:%s' % reason
-        try:
-            pheaters.set_temperature(heater, 0.)
-        except Exception:
-            pass
+        self._bg_release_heat(head, heater, pheaters)
         if isinstance(e, ToolheadNotClear):
 
             msg = ('head %d: unload NOT verified - toolhead still holds '
@@ -1083,12 +1163,13 @@ class AceBgSwap:
                              self._dh(armed)))
 
             self.state[head] = 'HEAT'
-            pheaters.set_temperature(heater, temp)
+            self._bg_set_heat(head, heater, pheaters, temp)
             self._say('head %d: heating to %.0f' % (self._dh(head), temp))
             deadline = self.reactor.monotonic() + HEAT_TIMEOUT
             _retgt_said = False
             while True:
                 self._check_docked(toolhead, ext, head)
+                self._check_heater_yield(head, heater)
                 cur, _tgt = heater.get_temp(self.reactor.monotonic())
                 if cur >= temp - HEAT_HYST:
                     break
@@ -1099,7 +1180,7 @@ class AceBgSwap:
                                   'externally (%.0f) - re-asserting %.0f'
                                   % (self._dh(head), _tgt, temp))
                         _retgt_said = True
-                    pheaters.set_temperature(heater, temp)
+                    self._bg_set_heat(head, heater, pheaters, temp)
                 if self.reactor.monotonic() > deadline:
                     raise RuntimeError('heat timeout (%.0f/%.0f)'
                                        % (cur, temp))
@@ -1137,12 +1218,12 @@ class AceBgSwap:
                     continue
                 if kind == 'temp':
 
-                    pheaters.set_temperature(heater, float(tok[1]))
+                    self._bg_set_heat(head, heater, pheaters, float(tok[1]))
                     continue
                 if kind == 'waittemp':
 
                     c = float(tok[1])
-                    pheaters.set_temperature(heater, c)
+                    self._bg_set_heat(head, heater, pheaters, c)
                     _wt_deadline = self.reactor.monotonic() + 180.
                     while True:
                         self._check_docked(toolhead, ext, head)
@@ -1210,7 +1291,7 @@ class AceBgSwap:
             self._say('head %d: cold-pull done (%d mm confirmed reclaimed '
                       'at ACE)' % (self._dh(head), int(reclaimed)))
 
-            pheaters.set_temperature(heater, 0.)
+            self._bg_release_heat(head, heater, pheaters)
 
             self.state[head] = 'RETRACT'
             try:
@@ -1326,6 +1407,7 @@ class AceBgSwap:
         heater = ext.get_heater()
         pheaters = self.printer.lookup_object('heaters')
         retract_done = {'v': False}
+        self._bg_swap_begin(head, heater)
         try:
             if un is not None:
                 self._unload_core(head, ace, toolhead, ext, heater,
@@ -1341,6 +1423,7 @@ class AceBgSwap:
             self._ace_quiesce(ace, un[0], un[1], 'bg swap unload abort')
             self._fail_unload(head, heater, pheaters, e, retract_done['v'])
             self._busy.discard(head)
+            self._bg_swap_end(head)
             return
         if not self.load_enabled:
 
@@ -1351,6 +1434,7 @@ class AceBgSwap:
                          'BACKGROUND UNLOAD COMPLETE' if un is not None
                          else 'already empty, nothing to do'))
             self._busy.discard(head)
+            self._bg_swap_end(head)
             return
         try:
             self._load_core(head, ace, toolhead, ext, heater, pheaters,
@@ -1377,16 +1461,14 @@ class AceBgSwap:
             reason = str(e) or e.__class__.__name__
             self.state[head] = 'FAILED:%s' % reason
             self._ace_quiesce(ace, ld[0], ld[1], 'bg load abort')
-            try:
-                pheaters.set_temperature(heater, 0.)
-            except Exception:
-                pass
+            self._bg_release_heat(head, heater, pheaters)
             self._say('head %d: LOAD FAILED (%s) - the arrival swap loads '
                       'inline' % (self._dh(head), reason))
             logging.exception('[multiACE] [bg-load] head %d failed' % head)
         finally:
             self._dwell_fan(ace, head, False)
             self._busy.discard(head)
+            self._bg_swap_end(head)
 
     def _load_bookkeeping(self, head, ace, ace_idx, slot):
         """Mark the head loaded through the same fields the inline load
@@ -1461,7 +1543,7 @@ class AceBgSwap:
             pass
 
         self.state[head] = 'LD_FEED'
-        pheaters.set_temperature(heater, temp)
+        self._bg_set_heat(head, heater, pheaters, temp)
         feed_speed = ACE_UNWIND_SPEED_FALLBACK
         try:
             feed_speed = int(ace.get_feed_speed(ace_idx))
@@ -1491,6 +1573,7 @@ class AceBgSwap:
         for _attempt in range(_retries + 1):
             if _attempt > 0:
                 self._check_docked(toolhead, ext, head)
+                self._check_heater_yield(head, heater)
                 self._say('head %d: feed retry %d/%d - %dmm back, re-push '
                           'to the sensor'
                           % (self._dh(head), _attempt, _retries, _retry_back))
@@ -1507,13 +1590,13 @@ class AceBgSwap:
                 _ever_moved = True
         self._dwell_fan(ace, head, False)
         if feed_res == 'stale':
-            pheaters.set_temperature(heater, 0.)
+            self._bg_release_heat(head, heater, pheaters)
             raise RuntimeError(
                 'toolhead sensor of head %d reads PRESENT although the head '
                 'is empty (stale latch) - display/web unload it once, then '
                 'retry' % self._dh(head))
         if feed_res != 'ok':
-            pheaters.set_temperature(heater, 0.)
+            self._bg_release_heat(head, heater, pheaters)
             if feed_res == 'partial' or _ever_moved:
 
                 try:
@@ -1542,6 +1625,7 @@ class AceBgSwap:
                 cur, _tgt = heater.get_temp(self.reactor.monotonic())
                 if cur >= temp - HEAT_HYST:
                     break
+                self._check_heater_yield(head, heater)
                 if _tgt < temp - HEAT_HYST:
 
                     if not _retgt_said:
@@ -1549,7 +1633,7 @@ class AceBgSwap:
                                   'externally (%.0f) - re-asserting %.0f'
                                   % (self._dh(head), _tgt, temp))
                         _retgt_said = True
-                    pheaters.set_temperature(heater, temp)
+                    self._bg_set_heat(head, heater, pheaters, temp)
                 if self.reactor.monotonic() > deadline:
                     raise RuntimeError('heat timeout (%.0f/%.0f)'
                                        % (cur, temp))
@@ -1699,7 +1783,7 @@ class AceBgSwap:
                       'STAGED at the toolhead sensor; the arrival/inline '
                       'load continues from there'
                       % (self._dh(head), str(e) or e.__class__.__name__))
-            pheaters.set_temperature(heater, 0.)
+            self._bg_release_heat(head, heater, pheaters)
             self._gpio_diag(head, 'staged after abort (expected present)')
 
             try:
@@ -1712,11 +1796,7 @@ class AceBgSwap:
         self._ace_send(ace, ace_idx, {
             'method': 'stop_feed_assist', 'params': {'index': slot}})
         ace._feed_assist_per_ace[ace_idx] = -1
-        try:
-            if abs(float(getattr(heater, 'target_temp', 0.)) - temp) < 1.:
-                pheaters.set_temperature(heater, 0.)
-        except Exception:
-            pheaters.set_temperature(heater, 0.)
+        self._bg_release_heat(head, heater, pheaters)
         self._load_bookkeeping(head, ace, ace_idx, slot)
 
 def load_config(config):

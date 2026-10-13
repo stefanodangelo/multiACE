@@ -9,6 +9,27 @@
 
 ## What's new in 0.99.17b "Star Turn" (since 0.99.16b)
 
+- **Fixed a print hanging for hours on a failed background swap.** A
+  background swap that failed (or was overtaken by the print) switched
+  its head's heater off - including when the print had just set that
+  heater for the arrival `M109` and was waiting on it. `M109` only
+  returns once the temperature is within 1 °C of the target, so with the
+  target at 0 it waited for ever: the print froze mid-layer, the bed and
+  other heads stayed hot, a fan ran at 100 % and even a pause request
+  queued behind the blocked command. The background swap now only
+  releases a heater target it set itself and steps aside the moment the
+  print sets a printing temperature. Background swaps are also planned
+  against the cost model's real unload+load time (~3.5 min) instead of a
+  flat minute, so a window too short to hold one is no longer scheduled.
+- **Print-hang watchdog.** A print whose file position stops moving while
+  "printing" gets a web notification after 15 min, heaters and fans
+  switched off after 30 min and an emergency stop after 60 min
+  (`print_stall_alert_min` / `print_stall_cool_min` / `print_stall_stop_min`
+  in `ace.cfg`; the stop needs a FIRMWARE_RESTART). The print analysis now
+  reports such a hang (duration, file position and the engine failure that
+  preceded it), counts it in a "Stalled" bucket, and gives a print that
+  Moonraker never saw finish an end time from the log instead of 0 h.
+
 - **The preflight estimate now bills the ACE's own purge** — every ACE
   swap retracts, changes spool and purges through the hotend's chute
   (`INNER_FLUSH_FILAMENT`), which is real filament and real time the

@@ -416,7 +416,8 @@
         "warmup": "加热 / 回零",
         "paused_error": "暂停 — 故障",
         "paused_user": "暂停 — 手动",
-        "crash_gap": "断电恢复"
+        "crash_gap": "断电恢复",
+        "stalled": "卡死(打印挂起)"
       },
       "source": {
         "measured": "实测",
@@ -462,6 +463,10 @@
         "pickup_conflict": {
           "title": "取料失败：停靠/取出状态冲突",
           "action": "检查该工具头的夹持传感器接线 — 同时报告已停靠与已取出。"
+        },
+        "print_hang": {
+          "title": "打印已冻结:加热器保持开启但没有任何进展",
+          "action": "请查看证据行,了解引擎停止时正在做什么。被阻塞的命令(例如等待温度的 M109)无法暂停——请重启 Klipper,并更新 multiACE。"
         },
         "host_stall_fatal": {
           "title": "主机延迟导致 MCU 关机",

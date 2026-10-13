@@ -508,6 +508,25 @@ def make_purge_callback(cost_params, slicer_colors, slicer_types,
     return purge_mm_for
 
 
+def make_bg_window_callback(cost_params):
+    """(ace, slot) -> minutes a background swap needs, from the same cost
+    model the estimate's timeline plans with. None when there is no model
+    (the rewrite then keeps its historical 1-minute constant)."""
+    if _swap_cost is None:
+        return None
+    params = cost_params or {}
+    main = params.get("main", params) or {}
+    try:
+        model = _swap_cost.SwapCostModel.from_params(
+            main, params.get("per_ace") or {})
+    except Exception:
+        return None
+
+    def bg_window_for(ace, slot):
+        return model.bg_window_minutes(ace, slot)
+    return bg_window_for
+
+
 def assignment_from_mapping(mapping):
     """Multi-mode `mapping` rows → the {t: entry} shape the timeline wants.
 
@@ -1275,22 +1294,27 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                 _purge_dest = None
         _purge_for = make_purge_callback(
             cost_params, slicer_colors, slicer_types, _purge_dest)
-        try:
-            pp.rewrite_head_mode_to_file(
-                str(src_path), str(tmp_a), assignment, None,
-                stage_cb(10.0, 60.0), pickup_cleaning=_pc,
-                purge_mm_for=_purge_for)
-        except TypeError:
-            # An older installed post-processor takes neither kwarg. Losing
-            # the per-swap purge is a degraded plan, not a broken one.
+        _bg_window = make_bg_window_callback(cost_params)
+        # An older installed post-processor lacks some of these kwargs. Each
+        # step down loses one refinement (the real background window, then
+        # the per-swap purge, then pickup cleaning) - a degraded plan, not a
+        # broken one.
+        _attempts = (
+            dict(pickup_cleaning=_pc, purge_mm_for=_purge_for,
+                 bg_window_for=_bg_window),
+            dict(pickup_cleaning=_pc, purge_mm_for=_purge_for),
+            dict(pickup_cleaning=_pc),
+            {},
+        )
+        for _i, _kw in enumerate(_attempts):
             try:
                 pp.rewrite_head_mode_to_file(
                     str(src_path), str(tmp_a), assignment, None,
-                    stage_cb(10.0, 60.0), pickup_cleaning=_pc)
+                    stage_cb(10.0, 60.0), **_kw)
+                break
             except TypeError:
-                pp.rewrite_head_mode_to_file(
-                    str(src_path), str(tmp_a), assignment, None,
-                    stage_cb(10.0, 60.0))
+                if _i == len(_attempts) - 1:
+                    raise
         cur, nxt = tmp_a, tmp_b
 
         set_stage("inject_auto_load", 70.0)

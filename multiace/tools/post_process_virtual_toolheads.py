@@ -1562,7 +1562,7 @@ def _scan_body_tools(in_path):
 
 def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                               progress=None, pickup_cleaning=False,
-                              purge_mm_for=None):
+                              purge_mm_for=None, bg_window_for=None):
     """Streaming head-mode rewrite of the ORIGINAL slicer gcode. Each slicer
     T<n> is rewritten per `assignment` (compute_head_mode_layout):
       - 'pin' -> T<pin_head>                       (feeder head, no swap)
@@ -1721,14 +1721,29 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                 window = None
                                 if r_now is not None and r_nxt is not None:
                                     window = r_now - r_nxt
+                                # What the swap really needs: the cost model's unload+load time
+                                # when the caller has one (the preflight's timeline already plans
+                                # with it), the historical 1-minute constant otherwise. M73 R is
+                                # whole minutes, so a window of N may really be up to a minute
+                                # shorter - judge it conservatively. Overnight 2026-10-12 all seven
+                                # background loads on one head lost the race against the print (a
+                                # 1.3 min window against a ~3.5 min swap), the last one fatally.
+                                need_min = BG_UNLOAD_MIN_WINDOW_MIN
+                                margin = 0.0
+                                if bg_window_for is not None:
+                                    margin = 1.0
+                                    try:
+                                        need_min = max(float(bg_window_for(nxt[0], nxt[1])),
+                                                       BG_UNLOAD_MIN_WINDOW_MIN)
+                                    except Exception:
+                                        need_min = BG_UNLOAD_MIN_WINDOW_MIN
                                 if (window is not None
-                                        and window < BG_UNLOAD_MIN_WINDOW_MIN):
+                                        and window - margin < need_min):
                                     fout.write(
                                         '; multiACE bg-swap HEAD=%d '
                                         'skipped: parked window ~%dmin < '
-                                        '%dmin\n'
-                                        % (ae_rel[0], int(window),
-                                           BG_UNLOAD_MIN_WINDOW_MIN))
+                                        '%.1fmin\n'
+                                        % (ae_rel[0], int(window), need_min))
                                 else:
 
                                     ao = post_t_unret.get(
