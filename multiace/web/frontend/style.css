@@ -1971,6 +1971,11 @@ body:has(.panel) .overlay .dialog {
 .comp-seg-warmup        { background: var(--ink-800); }
 .comp-seg-paused_error  { background: var(--error); }
 .comp-seg-paused_user   { background: var(--warn); }
+.comp-seg-stalled       {
+  background: var(--error);
+  background-image: repeating-linear-gradient(
+      45deg, rgba(255,255,255,.35) 0 2px, transparent 2px 4px);
+}
 .comp-seg-crash_gap      {
   background: var(--ink-900);
   background-image: repeating-linear-gradient(

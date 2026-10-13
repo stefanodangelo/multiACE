@@ -6871,7 +6871,8 @@ createApp({
     //: The seven buckets row.actual.buckets always carries, in the order
     //: the popover and composition bar render them (plan §3.2's table).
     const ACTUAL_BUCKET_ORDER = ["depositing", "filament_swap",
-      "toolhead_swap", "warmup", "paused_error", "paused_user", "crash_gap"];
+      "toolhead_swap", "warmup", "paused_error", "paused_user", "crash_gap",
+      "stalled"];
 
     async function loadHistory(opts) {
       const limit = (opts && opts.limit) || 50;

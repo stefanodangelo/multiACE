@@ -1,0 +1,141 @@
+10-12 15:53:20.189:Stats 22808.4: gcodein=0 sd_pos=1400200 heater_bed: target=65 temp=65.3 extruder: target=200 temp=199.9 extruder1: target=0 temp=27.3
+10-12 16:06:41.060:Stats 23609.3: gcodein=0 sd_pos=3256109 heater_bed: target=65 temp=64.9 extruder: target=200 temp=199.2 extruder1: target=0 temp=28.8
+10-12 17:34:02.229:Stats 28850.4: gcodein=0 sd_pos=4383503 heater_bed: target=65 temp=64.8 extruder: target=200 temp=200.2 extruder1: target=200 temp=199.1
+10-12 17:47:23.440:Stats 29651.7: gcodein=0 sd_pos=5266738 heater_bed: target=65 temp=64.9 extruder: target=200 temp=199.8 extruder1: target=200 temp=198.9
+10-12 18:00:44.645:Stats 30452.9: gcodein=0 sd_pos=5964619 heater_bed: target=65 temp=65.0 extruder: target=200 temp=200.1 extruder1: target=200 temp=202.6
+10-12 18:14:05.729:Stats 31253.9: gcodein=0 sd_pos=6669065 heater_bed: target=65 temp=64.7 extruder: target=200 temp=201.4 extruder1: target=200 temp=200.1
+10-12 18:27:26.447:Stats 32054.7: gcodein=0 sd_pos=6970999 heater_bed: target=65 temp=65.1 extruder: target=215 temp=217.4 extruder1: target=50 temp=50.1
+10-12 18:40:47.221:Stats 32855.4: gcodein=0 sd_pos=7184581 heater_bed: target=65 temp=64.7 extruder: target=0 temp=210.5 extruder1: target=50 temp=49.8
+10-12 18:54:07.923:Stats 33656.1: gcodein=0 sd_pos=7627102 heater_bed: target=65 temp=65.2 extruder: target=200 temp=186.8 extruder1: target=50 temp=49.8
+10-12 19:07:29.048:Stats 34457.3: gcodein=0 sd_pos=8688676 heater_bed: target=65 temp=65.4 extruder: target=200 temp=200.3 extruder1: target=50 temp=50.5
+10-12 19:20:50.262:Stats 35258.5: gcodein=0 sd_pos=9840726 heater_bed: target=65 temp=65.1 extruder: target=50 temp=163.4 extruder1: target=200 temp=172.9
+10-12 19:34:11.586:Stats 36059.8: gcodein=0 sd_pos=10496119 heater_bed: target=65 temp=64.8 extruder: target=50 temp=146.0 extruder1: target=200 temp=200.4
+10-12 19:47:32.485:Stats 36860.7: gcodein=0 sd_pos=11145900 heater_bed: target=65 temp=65.1 extruder: target=200 temp=161.8 extruder1: target=50 temp=161.0
+10-12 20:00:53.415:Stats 37661.6: gcodein=0 sd_pos=11867551 heater_bed: target=65 temp=64.8 extruder: target=200 temp=200.0 extruder1: target=50 temp=154.8
+10-12 20:14:14.322:Stats 38462.5: gcodein=0 sd_pos=12861143 heater_bed: target=65 temp=64.4 extruder: target=50 temp=136.5 extruder1: target=200 temp=200.6
+10-12 20:27:35.587:Stats 39263.8: gcodein=0 sd_pos=13644934 heater_bed: target=65 temp=64.9 extruder: target=50 temp=108.8 extruder1: target=50 temp=179.5
+10-12 20:40:56.379:Stats 40064.6: gcodein=0 sd_pos=14204969 heater_bed: target=65 temp=64.5 extruder: target=165 temp=173.5 extruder1: target=50 temp=88.4
+10-12 20:44:04.007:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 20:44:04.110:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 20:44:04.111:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 20:44:04.111:[multiACE] [bg-load] head 0 failed
+10-12 20:51:27.311:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 20:51:27.414:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 20:51:27.415:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 20:51:27.415:[multiACE] [bg-load] head 0 failed
+10-12 20:54:17.077:Stats 40865.3: gcodein=0 sd_pos=14573717 heater_bed: target=65 temp=64.8 extruder: target=200 temp=201.1 extruder1: target=50 temp=145.1
+10-12 20:58:52.589:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 20:58:52.691:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 20:58:52.692:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 20:58:52.693:[multiACE] [bg-load] head 0 failed
+10-12 21:07:37.938:Stats 41666.1: gcodein=0 sd_pos=14868336 heater_bed: target=65 temp=64.9 extruder: target=0 temp=210.3 extruder1: target=50 temp=49.9
+10-12 21:20:58.647:Stats 42466.8: gcodein=0 sd_pos=15226485 heater_bed: target=65 temp=65.2 extruder: target=50 temp=162.7 extruder1: target=50 temp=50.7
+10-12 21:34:19.430:Stats 43267.6: gcodein=0 sd_pos=15487812 heater_bed: target=65 temp=65.3 extruder: target=215 temp=196.0 extruder1: target=50 temp=50.6
+10-12 21:37:13.121:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 21:37:13.172:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 21:37:13.173:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 21:37:13.173:[multiACE] [bg-load] head 0 failed
+10-12 21:47:40.256:Stats 44068.4: gcodein=0 sd_pos=15829052 heater_bed: target=65 temp=65.0 extruder: target=50 temp=150.4 extruder1: target=50 temp=187.7
+10-12 21:52:52.883:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 21:52:52.985:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 21:52:52.986:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 21:52:52.986:[multiACE] [bg-load] head 0 failed
+10-12 22:00:28.487:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 3 ok
+10-12 22:00:28.589:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 3 ok
+10-12 22:00:28.590:[multiACE] [bg-unload] head 1: LOAD FAILED (head 1 was PICKED mid-sequence - aborted, inline paths take over) - the arrival swap loads inline
+10-12 22:00:28.590:[multiACE] [bg-load] head 0 failed
+10-12 22:01:01.116:Stats 44869.3: gcodein=0 sd_pos=16155868 heater_bed: target=65 temp=64.8 extruder: target=215 temp=215.4 extruder1: target=200 temp=201.2
+10-12 22:03:09.255:Stats 44997.4: gcodein=0 sd_pos=16219658 heater_bed: target=65 temp=65.2 extruder: target=200 temp=201.2 extruder1: target=50 temp=161.2
+10-12 22:03:21.262:Stats 45009.5: gcodein=0 sd_pos=16220764 heater_bed: target=65 temp=64.8 extruder: target=215 temp=216.3 extruder1: target=50 temp=147.9
+10-12 22:03:23.263:Stats 45011.5: gcodein=0 sd_pos=16220862 heater_bed: target=65 temp=65.0 extruder: target=215 temp=215.1 extruder1: target=50 temp=145.9
+10-12 22:03:25.265:Stats 45013.5: gcodein=0 sd_pos=16221009 heater_bed: target=65 temp=65.0 extruder: target=215 temp=215.1 extruder1: target=50 temp=143.9
+10-12 22:03:27.267:Stats 45015.5: gcodein=0 sd_pos=16221254 heater_bed: target=65 temp=65.0 extruder: target=215 temp=215.9 extruder1: target=50 temp=142.3
+10-12 22:03:29.268:Stats 45017.5: gcodein=0 sd_pos=16222694 heater_bed: target=65 temp=65.2 extruder: target=215 temp=214.4 extruder1: target=50 temp=140.4
+10-12 22:03:31.270:Stats 45019.5: gcodein=0 sd_pos=16226463 heater_bed: target=65 temp=65.1 extruder: target=215 temp=216.1 extruder1: target=50 temp=138.6
+10-12 22:03:33.272:Stats 45021.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=200 temp=214.1 extruder1: target=50 temp=137.1
+10-12 22:03:35.275:Stats 45023.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=200 temp=213.1 extruder1: target=50 temp=135.3
+10-12 22:03:36.623:[multiACE] [bg] quiesce (bg load abort): stop_feed_assist ACE 0 slot 2 ok
+10-12 22:03:36.725:[multiACE] [bg] quiesce (bg load abort): stop_feed_filament ACE 0 slot 2 ok
+10-12 22:03:36.726:[multiACE] [bg-unload] head 1: LOAD FAILED (feed not confirmed by the device) - the arrival swap loads inline
+10-12 22:03:36.727:[multiACE] [bg-load] head 0 failed
+10-12 22:03:37.275:Stats 45025.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.5 extruder: target=0 temp=209.5 extruder1: target=50 temp=133.6
+10-12 22:03:39.277:Stats 45027.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=206.0 extruder1: target=50 temp=132.1
+10-12 22:03:41.279:Stats 45029.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=203.0 extruder1: target=50 temp=130.5
+10-12 22:03:43.280:Stats 45031.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=199.4 extruder1: target=50 temp=128.8
+10-12 22:03:45.281:Stats 45033.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=196.3 extruder1: target=50 temp=127.5
+10-12 22:03:47.282:Stats 45035.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.5 extruder: target=0 temp=193.5 extruder1: target=50 temp=125.8
+10-12 22:03:49.284:Stats 45037.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.5 extruder: target=0 temp=191.1 extruder1: target=50 temp=124.3
+10-12 22:03:51.285:Stats 45039.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.6 extruder: target=0 temp=188.3 extruder1: target=50 temp=123.1
+10-12 22:04:03.294:Stats 45051.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=173.7 extruder1: target=50 temp=115.2
+10-12 22:04:15.302:Stats 45063.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=160.8 extruder1: target=50 temp=108.0
+10-12 22:04:27.309:Stats 45075.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=148.6 extruder1: target=50 temp=101.2
+10-12 22:04:39.317:Stats 45087.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=138.4 extruder1: target=50 temp=95.2
+10-12 22:04:51.323:Stats 45099.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=129.3 extruder1: target=50 temp=90.0
+10-12 22:05:03.330:Stats 45111.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=121.1 extruder1: target=50 temp=85.3
+10-12 22:05:15.339:Stats 45123.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=113.8 extruder1: target=50 temp=81.1
+10-12 22:05:27.346:Stats 45135.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=107.0 extruder1: target=50 temp=77.0
+10-12 22:05:39.355:Stats 45147.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=100.6 extruder1: target=50 temp=73.5
+10-12 22:05:51.363:Stats 45159.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.3 extruder: target=0 temp=94.9 extruder1: target=50 temp=70.2
+10-12 22:06:03.372:Stats 45171.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=89.9 extruder1: target=50 temp=67.1
+10-12 22:06:15.381:Stats 45183.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=85.4 extruder1: target=50 temp=64.4
+10-12 22:06:27.393:Stats 45195.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=81.2 extruder1: target=50 temp=61.9
+10-12 22:06:39.399:Stats 45207.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=77.3 extruder1: target=50 temp=59.6
+10-12 22:06:51.406:Stats 45219.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.6 extruder: target=0 temp=73.8 extruder1: target=50 temp=57.5
+10-12 22:14:51.731:Stats 45699.9: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=35.1 extruder1: target=50 temp=50.7
+10-12 22:28:12.262:Stats 46500.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=30.8 extruder1: target=50 temp=50.4
+10-12 22:41:32.791:Stats 47301.0: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=30.3 extruder1: target=50 temp=50.3
+10-12 22:54:53.314:Stats 48101.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.3 extruder: target=0 temp=30.1 extruder1: target=50 temp=50.2
+10-12 23:08:13.866:Stats 48902.1: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.3 extruder: target=0 temp=29.9 extruder1: target=50 temp=50.1
+10-12 23:21:34.406:Stats 49702.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=29.8 extruder1: target=50 temp=50.3
+10-12 23:34:54.952:Stats 50503.1: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.7 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.2
+10-12 23:48:15.486:Stats 51303.7: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=49.9
+10-13 00:01:36.034:Stats 52104.2: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=49.9
+10-13 00:14:56.554:Stats 52904.7: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.7 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.7
+10-13 00:28:17.101:Stats 53705.3: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.8 extruder1: target=50 temp=50.0
+10-13 00:41:37.641:Stats 54505.8: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.6
+10-13 00:54:58.190:Stats 55306.4: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.0
+10-13 01:08:18.721:Stats 56106.9: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.4
+10-13 01:21:39.293:Stats 56907.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.3
+10-13 01:34:59.844:Stats 57708.0: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.6 extruder: target=0 temp=29.7 extruder1: target=50 temp=49.8
+10-13 01:48:20.372:Stats 58508.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.6 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.2
+10-13 02:01:40.893:Stats 59309.1: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.3
+10-13 02:15:01.421:Stats 60109.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.4 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 02:28:21.935:Stats 60910.1: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 02:41:42.467:Stats 61710.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.6 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 02:55:03.007:Stats 62511.2: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.3
+10-13 03:08:23.557:Stats 63311.7: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.7 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.2
+10-13 03:21:44.111:Stats 64112.3: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.3
+10-13 03:35:04.636:Stats 64912.8: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 03:48:25.157:Stats 65713.3: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.4
+10-13 04:01:45.679:Stats 66513.9: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.8
+10-13 04:15:06.195:Stats 67314.4: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.6
+10-13 04:28:26.719:Stats 68114.9: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.6 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.5
+10-13 04:41:47.252:Stats 68915.4: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.8
+10-13 04:55:07.800:Stats 69716.0: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.4
+10-13 05:08:28.343:Stats 70516.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.3 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.2
+10-13 05:21:48.853:Stats 71317.0: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.5
+10-13 05:35:09.374:Stats 72117.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.7 extruder: target=0 temp=29.5 extruder1: target=50 temp=50.1
+10-13 05:48:29.926:Stats 72918.1: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.2
+10-13 06:01:50.456:Stats 73718.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.3
+10-13 06:15:10.990:Stats 74519.2: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 06:28:31.513:Stats 75319.7: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.6
+10-13 06:41:52.027:Stats 76120.2: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.4
+10-13 06:50:00.357:Stats 76608.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.3
+10-13 06:50:12.362:Stats 76620.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.6
+10-13 06:50:24.369:Stats 76632.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.3
+10-13 06:50:36.376:Stats 76644.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=49.9
+10-13 06:50:48.384:Stats 76656.5: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.5
+10-13 06:51:00.398:Stats 76668.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.7
+10-13 06:51:12.404:Stats 76680.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.0 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.4
+10-13 06:51:24.412:Stats 76692.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.1 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 06:51:36.421:Stats 76704.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.5 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 06:51:48.427:Stats 76716.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.9
+10-13 06:52:00.436:Stats 76728.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.6 extruder1: target=50 temp=51.0
+10-13 06:52:12.441:Stats 76740.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.4 extruder: target=0 temp=29.6 extruder1: target=50 temp=49.8
+10-13 06:52:24.448:Stats 76752.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.5 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 06:52:36.455:Stats 76764.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.2 extruder: target=0 temp=29.7 extruder1: target=50 temp=50.2
+10-13 06:52:42.421:[pause_resume] request pause
+10-13 06:52:48.463:Stats 76776.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=65.3 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 06:53:00.470:Stats 76788.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.8 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 06:53:12.479:Stats 76800.6: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.9 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.1
+10-13 06:53:24.485:Stats 76812.7: gcodein=0 sd_pos=16229201 heater_bed: target=65 temp=64.5 extruder: target=0 temp=29.6 extruder1: target=50 temp=50.0

@@ -337,3 +337,64 @@ def _rewrite(tmp_path, purge_mm_for, flush_matrix=None):
         {0: ace(0, 0, 0), 1: ace(0, 0, 1)},
         None, None, purge_mm_for=purge_mm_for)
     return out.read_text(encoding="utf-8")
+
+
+class TestBackgroundWindowPlanning:
+    """A background swap is only emitted when the parked window can really
+    hold it. The rewrite used to compare against a hard-coded 1 minute while
+    the cost model (and so the estimate) wanted ~3.5, which sent swaps into
+    the print's own toolchange - overnight 2026-10-12 that race ended in a
+    hung print."""
+
+    def _run(self, tmp_path, window_min, bg_window_for):
+        # T1 prints on head 1, T2 on head 0 for `window_min` minutes (M73 R
+        # counts down), then T3 needs head 1 again with a different slot -
+        # head 1 is parked for exactly that window.
+        src = tmp_path / "in.gcode"
+        src.write_text(
+            "; filament_colour = #000000;#ffffff;#ff0000;#00ff00\n"
+            "; filament_type = PLA;PLA;PLA;PLA\n"
+            "; EXECUTABLE_BLOCK_START\n"
+            "M73 P1 R100\n"
+            "T0\n"
+            "G1 X1 Y1 E1\n"
+            "; Change Tool 0 -> Tool 1\n"
+            "M73 P2 R100\n"
+            "T1\n"
+            "G1 X2 Y2 E1\n"
+            "; Change Tool 1 -> Tool 2\n"
+            "M73 P3 R100\n"
+            "T2\n"
+            "G1 X3 Y3 E1\n"
+            "; Change Tool 2 -> Tool 3\n"
+            "M73 P4 R%d\n"
+            "T3\n"
+            "G1 X4 Y4 E1\n" % (100 - window_min),
+            encoding="utf-8")
+        out = tmp_path / "out.gcode"
+        pp.rewrite_head_mode_to_file(
+            str(src), str(out),
+            {0: ace(0, 0, 0), 1: ace(1, 0, 1), 2: ace(0, 0, 2),
+             3: ace(1, 0, 3)},
+            None, None, bg_window_for=bg_window_for)
+        return out.read_text(encoding="utf-8")
+
+    def test_a_window_the_model_says_is_too_short_is_skipped(self, tmp_path):
+        text = self._run(tmp_path, 2, lambda a, s: 3.5)
+        assert "ACE_BG_SWAP" not in text
+        assert "bg-swap HEAD=1 skipped" in text
+
+    def test_the_whole_minute_rounding_is_judged_conservatively(
+            self, tmp_path):
+        """M73 R is whole minutes: a 4 min window may really be 3.01."""
+        text = self._run(tmp_path, 4, lambda a, s: 3.5)
+        assert "ACE_BG_SWAP" not in text
+
+    def test_a_window_that_fits_is_still_backgrounded(self, tmp_path):
+        text = self._run(tmp_path, 6, lambda a, s: 3.5)
+        assert "ACE_BG_SWAP HEAD=1 ACE=0 SLOT=3" in text
+
+    def test_without_a_model_the_historic_one_minute_rule_holds(
+            self, tmp_path):
+        assert "ACE_BG_SWAP" in self._run(tmp_path, 2, None)
+        assert "ACE_BG_SWAP" not in self._run(tmp_path, 0, None)

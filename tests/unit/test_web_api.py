@@ -1036,7 +1036,7 @@ class TestHistoryEndpoints:
         assert job0["actual"]["wall_total"] > 0
         assert set(job0["actual"]["buckets"]) == {
             "depositing", "filament_swap", "toolhead_swap", "warmup",
-            "paused_error", "paused_user", "crash_gap"}
+            "paused_error", "paused_user", "crash_gap", "stalled"}
 
     def test_a_power_loss_resume_merges_into_one_history_row(
             self, client, tmp_path, monkeypatch):

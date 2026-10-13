@@ -605,7 +605,8 @@
         "warmup": "Heating / homing",
         "paused_error": "Paused — errors",
         "paused_user": "Paused — by you",
-        "crash_gap": "Crash recovery"
+        "crash_gap": "Crash recovery",
+        "stalled": "Stalled (print hung)"
       },
       "source": {
         "measured": "measured",
@@ -651,6 +652,10 @@
         "pickup_conflict": {
           "title": "Extruder pickup failed: conflicting park/pick status",
           "action": "Inspect the head's grip sensor wiring — it is reporting both parked and picked at once."
+        },
+        "print_hang": {
+          "title": "The print froze: no progress while heaters stayed on",
+          "action": "Check the evidence line for what the engine was doing when it stopped. A blocked command (e.g. an M109 waiting for a temperature) cannot be paused - restart Klipper, then update multiACE."
         },
         "host_stall_fatal": {
           "title": "A host stall caused an MCU shutdown",

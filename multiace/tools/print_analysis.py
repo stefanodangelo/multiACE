@@ -35,10 +35,16 @@ _RESUMABLE_STATUSES = ("klippy_shutdown", "error", "cancelled")
 #: absent one, to the user (plan §2.1).
 PAUSE_CAUSE_WINDOW_S = 10.0
 
-#: The seven buckets a Breakdown always carries, whether or not Layer 1
-#: had anything to say about them.
+#: The buckets a Breakdown always carries, whether or not Layer 1 had
+#: anything to say about them. `stalled` is the time a hung print sat
+#: blocked (file position frozen, heaters on) - measured from klippy.log, so
+#: it is zero for a print analysed without logs.
 BUCKET_KEYS = ("depositing", "filament_swap", "toolhead_swap", "warmup",
-               "paused_error", "paused_user", "crash_gap")
+               "paused_error", "paused_user", "crash_gap", "stalled")
+
+#: A hang shorter than this is not worth a finding (kept in step with
+#: klippy_analysis._HANG_MIN_S, which already enforces it per run).
+HANG_MIN_S = 600.0
 
 
 def _basename(name):
@@ -62,10 +68,16 @@ class Print:
     segment - every row carries this wrapper so breakdown() has a single
     input shape."""
 
-    __slots__ = ("segments",)
+    __slots__ = ("segments", "derived_end", "hangs")
 
     def __init__(self, segments):
         self.segments = list(segments)
+        #: Set by analyse() from klippy.log when Moonraker never recorded
+        #: an end (an interrupted job: the host was restarted mid-print).
+        self.derived_end = None
+        #: [{t_start, t_end, minutes, position, last_op}] - frozen-print
+        #: runs from klippy.log, minus any that sit inside a pause.
+        self.hangs = []
 
     @property
     def filename(self):
@@ -90,6 +102,8 @@ class Print:
         """last_end - first_start, spanning every segment AND the gaps
         between them. None while the print is still running."""
         end = self.last_end
+        if end is None:
+            end = self.derived_end
         return None if end is None else end - self.first_start
 
     @property
@@ -341,6 +355,8 @@ def breakdown(p):
         "paused_user":    Bucket("paused_user", round(paused_user_s, 1),
                                   "measured" if had_layer1 else "derived"),
         "crash_gap":      Bucket("crash_gap", round(crash_gap, 1), "measured"),
+        "stalled":        Bucket("stalled", round(sum(
+            h["t_end"] - h["t_start"] for h in p.hangs), 1), "measured"),
     }
     return Breakdown(round(wall_total, 1), buckets, warnings)
 
@@ -441,6 +457,52 @@ def _host_stall_findings(log, p):
     return out
 
 
+def _hangs_outside_pauses(p, log):
+    """Frozen-print runs from klippy.log that are not simply a pause: a
+    paused print holds its file position and (often) its heaters too."""
+    pauses = _pause_windows(p.events)
+    out = []
+    for h in (log or {}).get("print_hangs") or []:
+        t0 = _f(h.get("t_start"))
+        if any(s - 60 <= t0 <= e + 60 for s, e in pauses):
+            continue
+        if _f(h.get("t_end")) - t0 < HANG_MIN_S:
+            continue
+        out.append(h)
+    return out
+
+
+def _apply_log_to_print(p, log):
+    """Feed what klippy.log knows back into the Print: its hangs, and - for
+    a job Moonraker never saw end - when it effectively ended."""
+    if not log:
+        return
+    p.hangs = _hangs_outside_pauses(p, log)
+    if p.last_end is None:
+        end = None
+        if p.hangs:
+            end = max(_f(h.get("t_end")) for h in p.hangs)
+        elif log.get("last_progress_t"):
+            end = _f(log.get("last_progress_t"))
+        if end and end > p.first_start:
+            p.derived_end = end
+
+
+def _hang_findings(p):
+    if not p.hangs:
+        return []
+    total = sum(_f(h.get("t_end")) - _f(h.get("t_start")) for h in p.hangs)
+    ev = []
+    for h in p.hangs[:3]:
+        ev.append("no progress for %s (%s), stuck at file position %s"
+                  % (_fmt_hm(_f(h.get("t_end")) - _f(h.get("t_start"))),
+                     _fmt_local(h.get("t_start")), h.get("position")))
+        if h.get("last_op"):
+            ev.append(h.get("last_op"))
+    return [_finding("print_hang", "high", "measured", cost_s=total,
+                     count=len(p.hangs), evidence=ev)]
+
+
 def _log_flood_findings(log):
     if not log or not log.get("log_flood"):
         return []
@@ -506,6 +568,7 @@ def findings(p, log=None):
         f = _pickup_finding(p.events, log, id_, code, phrase)
         if f:
             out.append(f)
+    out.extend(_hang_findings(p))
     out.extend(_host_stall_findings(log, p))
     out.extend(_log_flood_findings(log))
     out.extend(_ace_comms_finding(log))
@@ -530,6 +593,7 @@ def analyse(rows, log=None):
     """
     prints = stitch_segments(rows)
     p = prints[0] if prints else Print(list(rows or []))
+    _apply_log_to_print(p, log)
     bd = breakdown(p)
     return {
         "print": {
@@ -538,6 +602,7 @@ def analyse(rows, log=None):
             "segments": len(p.segments),
             "first_start": p.first_start,
             "last_end": p.last_end,
+            "derived_end": p.derived_end,
         },
         "meta": p.meta,
         "breakdown": bd.as_dict(),
@@ -555,7 +620,7 @@ _BUCKET_LABELS = {
     "depositing": "Depositing", "filament_swap": "Filament changes",
     "toolhead_swap": "Toolhead changes", "warmup": "Heating / homing",
     "paused_error": "Paused — errors", "paused_user": "Paused — by you",
-    "crash_gap": "Crash recovery",
+    "crash_gap": "Crash recovery", "stalled": "Stalled (print hung)",
 }
 #: Matches style.css's --accent/--ink-700/--ink-800/--error/--warn/--ink-900
 #: (plan §4.3's palette constraint) so the standalone document doesn't
@@ -564,10 +629,11 @@ _BUCKET_COLORS = {
     "depositing": "#15bdc6", "filament_swap": "#272c30",
     "toolhead_swap": "#272c30", "warmup": "#1e2225",
     "paused_error": "#ff7070", "paused_user": "#fb6", "crash_gap": "#121416",
+    "stalled": "#ff7070",
 }
 #: Hue is never the only cue (plan §4.3) - these two get the hatch
 #: pattern .comp-seg-toolhead_swap / .comp-seg-crash_gap already use.
-_HATCHED = {"toolhead_swap", "crash_gap"}
+_HATCHED = {"toolhead_swap", "crash_gap", "stalled"}
 
 
 def _fmt_hm(seconds):
@@ -655,7 +721,11 @@ def render_html(analysis):
         ("Status", pr.get("status")),
         ("Segments", pr.get("segments", 1)),
         ("First start", _fmt_local(pr.get("first_start"))),
-        ("Finish", _fmt_local(pr.get("last_end"))),
+        ("Finish", _fmt_local(pr.get("last_end"))
+         if pr.get("last_end") else
+         ("%s (from the log - never recorded as finished)"
+          % _fmt_local(pr.get("derived_end"))
+          if pr.get("derived_end") else "–")),
         ("Wall total", _fmt_hm(bd.get("wall_total"))),
         ("Depositing", _fmt_hm((buckets.get("depositing") or {}).get("seconds"))),
         ("Estimated", _fmt_hm(meta.get("estimated_time"))),

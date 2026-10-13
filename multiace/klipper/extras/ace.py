@@ -22,7 +22,7 @@ MULTIACE_CODENAME = "Star Turn"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "945ced2"
+MULTIACE_BUILD_TAG = "4e53bd8"
 MULTIACE_BUNDLE_SHA1 = "2ba938d"
 
 def _load_i18n_catalog(i18n_dir, lang):
@@ -98,6 +98,7 @@ STOCK_FLUSH_DEFAULT_MM = 80
 V2_FEED_LOG = False
 V2_FEED_LOG_INTERVAL = 2.0
 
+PRINT_HANG_TICK_S = 30.0
 REACTOR_WATCHDOG_INTERVAL = 0.1
 REACTOR_STALL_THRESHOLD = 0.030
 
@@ -926,6 +927,23 @@ class MultiAce:
 
         self.airlog_enable = config.getboolean('airlog', False)
         self.stall_watchdog = config.getboolean('stall_watchdog', False)
+
+        # Print-hang watchdog: a print whose file position stops moving while
+        # print_stats says "printing" is alerted (alert_min), cooled down
+        # (cool_min) and finally shut down (stop_min). 0 on alert_min turns
+        # the whole thing off. Overnight 2026-10-12 a print sat 9 hours in an
+        # M109 whose heater target had been zeroed behind its back: heaters
+        # and fans stayed on, no alert, and the pause request queued behind
+        # the blocked command - only a firmware-level stop frees that.
+        self.print_stall_alert_min = config.getfloat(
+            'print_stall_alert_min', 15., minval=0.)
+        self.print_stall_cool_min = config.getfloat(
+            'print_stall_cool_min', 30., minval=0.)
+        self.print_stall_stop_min = config.getfloat(
+            'print_stall_stop_min', 60., minval=0.)
+        self._phw_pos = None
+        self._phw_since = None
+        self._phw_stage = 0
 
         self.resistance_pause = config.getboolean('resistance_pause', False)
         self._airprint_cfg = self.resistance_pause
@@ -1945,10 +1963,130 @@ class MultiAce:
         self._watchdog_next = eventtime + REACTOR_WATCHDOG_INTERVAL
         return self._watchdog_next
 
+    # ------------------------------------------------------------------
+    # Print-hang watchdog
+    # ------------------------------------------------------------------
+
+    def _print_file_position(self):
+        vsd = self.printer.lookup_object('virtual_sdcard', None)
+        if vsd is None:
+            return None
+        try:
+            st = vsd.get_status(self.reactor.monotonic())
+            pos = st.get('file_position')
+            if pos is not None:
+                return int(pos)
+        except Exception:
+            pass
+        pos = getattr(vsd, 'file_position', None)
+        return int(pos) if pos is not None else None
+
+    def _print_hang_last_op(self):
+        """What the engine was doing when the print stopped, for the alert."""
+        parts = []
+        try:
+            bg = self.printer.lookup_object('ace_bg_swap', None)
+            for head, st in sorted((getattr(bg, 'state', None) or {}).items()):
+                if st and st != 'DONE':
+                    parts.append('bg head %s: %s' % (self._disp(head), st))
+        except Exception:
+            pass
+        if getattr(self, '_swap_in_progress', False):
+            parts.append('a swap is in progress')
+        return '; '.join(parts) or 'no multiACE operation recorded'
+
+    def _print_hang_cooldown(self):
+        """Heaters and fans off, straight on the objects: G-code cannot run
+        while the blocked command holds the mutex."""
+        pheaters = self.printer.lookup_object('heaters', None)
+        names = ['extruder', 'extruder1', 'extruder2', 'extruder3',
+                 'heater_bed']
+        registry = getattr(pheaters, 'heaters', None) or {}
+        for name in names:
+            try:
+                heater = registry.get(name)
+                if heater is not None:
+                    pheaters.set_temperature(heater, 0.)
+            except Exception as e:
+                logging.info('[multiACE] print-hang cooldown: %s: %s'
+                             % (name, e))
+        fans = ['fan'] + ['fan_generic e%d_fan' % i for i in range(4)]
+        for name in fans:
+            try:
+                obj = self.printer.lookup_object(name, None)
+                f = getattr(obj, 'fan', None)
+                if f is not None:
+                    f.set_speed_from_command(0.)
+            except Exception as e:
+                logging.info('[multiACE] print-hang cooldown: %s: %s'
+                             % (name, e))
+
+    def _print_hang_check(self, now):
+        """One watchdog evaluation. Returns the stage reached this call
+        (0 = nothing, 1 alert, 2 cooled, 3 shut down) - each fires once per
+        stall; any progress, or leaving 'printing', re-arms it."""
+        if not self._is_actively_printing():
+            self._phw_pos = None
+            self._phw_since = None
+            self._phw_stage = 0
+            return 0
+        pos = self._print_file_position()
+        if pos is None:
+            return 0
+        if pos != self._phw_pos or self._phw_since is None:
+            self._phw_pos = pos
+            self._phw_since = now
+            self._phw_stage = 0
+            return 0
+        minutes = (now - self._phw_since) / 60.0
+        if (self.print_stall_stop_min > 0 and self._phw_stage < 3
+                and minutes >= self.print_stall_stop_min):
+            self._phw_stage = 3
+            msg = ('[multiACE] print stalled %.0f min at file position %d '
+                   '(%s) - emergency stop' % (minutes, pos,
+                                              self._print_hang_last_op()))
+            logging.error(msg)
+            self._print_hang_cooldown()
+            self.printer.invoke_shutdown(msg)
+            return 3
+        if (self.print_stall_cool_min > 0 and self._phw_stage < 2
+                and minutes >= self.print_stall_cool_min):
+            self._phw_stage = 2
+            self.log_error('[multiACE] print stalled %.0f min at file '
+                           'position %d (%s) - heaters and fans switched '
+                           'off' % (minutes, pos, self._print_hang_last_op()))
+            self._print_hang_cooldown()
+            return 2
+        if self._phw_stage < 1 and minutes >= self.print_stall_alert_min:
+            self._phw_stage = 1
+            self.log_error('[multiACE] print stalled %.0f min at file '
+                           'position %d (%s)'
+                           % (minutes, pos, self._print_hang_last_op()))
+            try:
+                self._ace_event('print_stall', minutes=int(minutes),
+                                pos=pos)
+            except Exception:
+                pass
+            return 1
+        return 0
+
+    def _print_hang_tick(self, eventtime):
+        try:
+            self._print_hang_check(eventtime)
+        except Exception as e:
+            logging.exception('[multiACE] print-hang watchdog: %s' % e)
+        return eventtime + PRINT_HANG_TICK_S
+
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
 
         self.reactor.register_callback(self._migrate_settings_savevars)
+
+        if (self.print_stall_alert_min > 0
+                and getattr(self, '_print_hang_timer', None) is None):
+            self._print_hang_timer = self.reactor.register_timer(
+                self._print_hang_tick,
+                self.reactor.monotonic() + PRINT_HANG_TICK_S)
 
         if self.stall_watchdog and getattr(self, '_watchdog_timer', None) is None:
             self._watchdog_next = None

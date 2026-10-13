@@ -312,3 +312,74 @@ class TestAnalyseAndRender:
     def test_render_html_never_raises_on_an_empty_analysis(self):
         doc = pa.render_html(pa.analyse([row(multiace=None)]))
         assert "<html>" in doc
+
+
+class TestHungPrint:
+    """The overnight 2026-10-12 hang, replayed from a trimmed copy of its
+    real klippy.log: the print froze at 22:03:33 (an M109 on a heater whose
+    target had been zeroed) and Klipper was restarted at 06:52 - Moonraker
+    never saw the job end, so the report showed 0h and nothing else."""
+
+    @pytest.fixture
+    def analysis(self, tmp_path):
+        import os
+        import shutil
+        import time
+
+        from multiace.tools import klippy_analysis as ka
+
+        shutil.copy(Path(__file__).resolve().parents[1] / "fixtures"
+                    / "klippy_hang_excerpt.log", tmp_path / "klippy.log")
+        mtime = time.mktime((2026, 10, 13, 10, 14, 0, 0, 0, -1))
+        os.utime(tmp_path / "klippy.log", (mtime, mtime))
+        start = time.mktime((2026, 10, 12, 15, 33, 0, 0, 0, -1))
+        log = ka.analyse_logs(str(tmp_path), start, mtime)
+        rows = [row(filename="Object_1_PLA_21h37m.gcode", start_time=start,
+                    end_time=None, duration=0.0, print_duration=0.0,
+                    status="interrupted")]
+        return pa.analyse(rows, log)
+
+    def test_the_hang_is_found_with_its_duration(self, analysis):
+        hang = next(f for f in analysis["findings"]
+                    if f["id"] == "print_hang")
+        assert hang["severity"] == "high"
+        assert hang["cost_s"] > 8 * 3600          # 22:03 -> ~06:52
+
+    def test_the_engine_failure_that_stopped_it_is_the_evidence(
+            self, analysis):
+        hang = next(f for f in analysis["findings"]
+                    if f["id"] == "print_hang")
+        assert any("LOAD FAILED" in e for e in hang["evidence"])
+        assert any("16229201" in e for e in hang["evidence"])
+
+    def test_an_interrupted_print_no_longer_shows_zero_wall_time(
+            self, analysis):
+        bd = analysis["breakdown"]
+        assert bd["wall_total"] > 15 * 3600       # 15:33 -> ~06:52
+        assert analysis["print"]["derived_end"] is not None
+        assert analysis["print"]["last_end"] is None
+
+    def test_the_stalled_time_has_its_own_bucket(self, analysis):
+        stalled = analysis["breakdown"]["buckets"]["stalled"]
+        assert stalled["seconds"] > 8 * 3600
+        assert stalled["source"] == "measured"
+
+    def test_heartbeats_are_not_reported_as_a_log_flood(self, analysis):
+        assert not any(f["id"] == "log_flood" for f in analysis["findings"])
+
+    def test_the_standalone_html_names_the_hang(self, analysis):
+        doc = pa.render_html(analysis)
+        assert "print_hang" in doc
+        assert "Stalled (print hung)" in doc
+
+    def test_a_hang_inside_a_pause_is_not_reported(self):
+        log = {"print_hangs": [{"t_start": 1000.0, "t_end": 5000.0,
+                                "minutes": 66.7, "position": 5,
+                                "last_op": None}]}
+        rows = [row(start_time=0.0, end_time=9000.0, duration=9000.0,
+                    print_duration=4000.0, status="completed",
+                    multiace=mrec(events=[
+                        {"kind": "pause", "t": 990.0},
+                        {"kind": "resume", "t": 5100.0}]))]
+        res = pa.analyse(rows, log)
+        assert not any(f["id"] == "print_hang" for f in res["findings"])

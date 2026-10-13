@@ -45,6 +45,7 @@ EMPTY = {
     "print_stalls": [], "health_samples": [],
     "pickup_failures": [], "sd_positions": [], "ace_comms": [],
     "spool_ledger": [], "log_flood": None,
+    "print_hangs": [], "last_progress_t": None, "last_stats_t": None,
 }
 
 #: Budgets, declared in the payload (plan §2.3.4) rather than silently
@@ -60,6 +61,7 @@ _INTERESTING = (
     "pogopin not connected", "is detached", "conflicting status",
     "comms lost", "Try connecting ACE", "reconnect[", "SD card print",
     "[spool] print",
+    "LOAD FAILED", "PICKED mid-sequence", "print stalled",
 )
 
 _RE_TIMER_CLOSE = re.compile(
@@ -67,6 +69,8 @@ _RE_TIMER_CLOSE = re.compile(
 _RE_MCU_SHUTDOWN = re.compile(r"MCU '([^']+)' shutdown:\s*(.+)")
 _RE_PRINT_STALL = re.compile(r"print_stall=(\d+)")
 _RE_BUFFER_TIME = re.compile(r"buffer_time=([\d.]+)")
+_RE_SD_POS = re.compile(r"\bsd_pos=(\d+)")
+_RE_TARGET = re.compile(r"\btarget=(\d+)")
 _RE_SYSLOAD = re.compile(r"sysload=([\d.]+)")
 _RE_MEMAVAIL = re.compile(r"memavail=(\d+)")
 _RE_STATS_PREFIX = re.compile(r"\bStats\s+([\d.]+):")
@@ -82,6 +86,16 @@ _FLOOD_HZ = 0.5
 #: Expected gap between Klipper's own `Stats` heartbeat lines; anything
 #: noticeably longer is the host reactor itself stalling, not the MCU.
 _STATS_PERIOD_S = 1.0
+
+#: A file position that stays put this long while heaters are on is a hung
+#: print, not a slow one (the slowest legitimate single command - a bed
+#: soak or a swap's long wait - is far shorter).
+_HANG_MIN_S = 600.0
+#: How far either side of a hang's first stuck sample an engine failure line
+#: still counts as what stopped it (the failure usually lands a few seconds
+#: AFTER the print started waiting - overnight 2026-10-12 it was three).
+_HANG_OP_WINDOW_S = 120.0
+_HANG_OP_FRAGMENTS = ("LOAD FAILED", "PICKED mid-sequence", "print stalled")
 _REACTOR_STALL_THRESHOLD_S = 5.0
 
 
@@ -213,6 +227,21 @@ def analyse_logs(log_dir, window_start, window_end,
     flood_first_t = {}
     last_stats_t = None
 
+    hang = {"pos": None, "t0": None, "t_last": None, "hot": True}
+    recent_ops = []
+
+    def _close_hang():
+        if (hang["pos"] is not None and hang["hot"]
+                and hang["t_last"] - hang["t0"] >= _HANG_MIN_S):
+            near = [o for o in recent_ops
+                    if o[0] <= hang["t0"] + _HANG_OP_WINDOW_S
+                    and o[0] >= hang["t0"] - _HANG_OP_WINDOW_S]
+            result["print_hangs"].append({
+                "t_start": hang["t0"], "t_end": hang["t_last"],
+                "minutes": round((hang["t_last"] - hang["t0"]) / 60.0, 1),
+                "position": hang["pos"],
+                "last_op": near[-1][1] if near else None})
+
     for first_ts, path in selected:
         # first_ts was already resolved against the file's own mtime
         # (_file_first_ts), so its YEAR is correct for this file's first
@@ -236,11 +265,17 @@ def analyse_logs(log_dir, window_start, window_end,
                     truncated = True
                     break
 
-                sig = _flood_signature(line)
-                cnt = flood_counts.get(sig, 0) + 1
-                flood_counts[sig] = cnt
-                if cnt == 1:
-                    flood_first_t[sig] = lines_seen
+                # Stats heartbeats differ only in digits, so they would
+                # always "flood" - they are not the signal this looks for.
+                if "Stats " in line[:30]:
+                    sig = None
+                else:
+                    sig = _flood_signature(line)
+                if sig is not None:
+                    cnt = flood_counts.get(sig, 0) + 1
+                    flood_counts[sig] = cnt
+                    if cnt == 1:
+                        flood_first_t[sig] = lines_seen
 
                 mo = _line_month(line)
                 if mo is not None:
@@ -257,6 +292,12 @@ def analyse_logs(log_dir, window_start, window_end,
                     # Prefiltered-in line, but well outside the window
                     # (another print's noise in the same file) - still
                     # worth it over a per-line regex that found nothing.
+                    continue
+
+                if any(f in line for f in _HANG_OP_FRAGMENTS):
+                    recent_ops.append((t if t is not None else 0.0,
+                                       line.rstrip()))
+                    del recent_ops[:-8]
                     continue
 
                 m = _RE_TIMER_CLOSE.search(line)
@@ -283,6 +324,19 @@ def analyse_logs(log_dir, window_start, window_end,
                             {"t": last_stats_t,
                              "blocked_for_s": round(stats_t - last_stats_t, 1)})
                     last_stats_t = stats_t
+                    result["last_stats_t"] = stats_t
+                    sp = _RE_SD_POS.search(line)
+                    if sp:
+                        pos = int(sp.group(1))
+                        hot = any(int(x) > 0
+                                  for x in _RE_TARGET.findall(line))
+                        if pos != hang["pos"]:
+                            _close_hang()
+                            hang.update(pos=pos, t0=stats_t, hot=hot)
+                            result["last_progress_t"] = stats_t
+                        else:
+                            hang["hot"] = hang["hot"] and hot
+                        hang["t_last"] = stats_t
                     pm = _RE_PRINT_STALL.search(line)
                     if pm and int(pm.group(1)) > 0:
                         result["print_stalls"].append(
@@ -326,6 +380,8 @@ def analyse_logs(log_dir, window_start, window_end,
                     continue
         if truncated:
             break
+
+    _close_hang()
 
     # Downsample health samples (plan §2.3's budget spirit applies to the
     # payload size too - a 51 h print at 1 Hz Stats lines is ~180k samples).
